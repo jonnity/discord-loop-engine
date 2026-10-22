@@ -226,6 +226,7 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 | `channelIds` | — | 中継するチャンネル（先頭が投稿先） |
 | `allowedUserIds` | — | 発言を受け取る人（あなただけにする） |
 | `concierge.model` | `sonnet` | 窓口のモデル |
+| `concierge.refresh` | 40 件 / 15% | 窓口とのやり取りがこの件数に達するか、コンテキストの残りがこの割合を切ったら、手が空いたとき（3分やり取りが無く、応答中でない）に engine が `/clear` して始め直す。直前のやり取りは渡し直し、挨拶は出さない。`maxEvents: 0` で無効 |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
 | `retro` | 5 件 / 7 日 / 3 回 | 振り返りの頻度と、仮ルールにする再現回数（仮置き。振り返りで見直す） |

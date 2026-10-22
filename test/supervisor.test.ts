@@ -187,3 +187,61 @@ test("tmuxSession を指定したセッションは、その tmux セッショ�
 		["send-keys", "-t", "dev:dle-oogiri-doc", "-l", "/parallel-cycle-loop"],
 	);
 });
+
+function refreshSetup(o: { events: number; idleMs: number; pane: string }) {
+	const calls: string[][] = [];
+	const phases: string[] = [];
+	const now = 10 * 60_000;
+	const sup = new Supervisor({
+		tmuxSession: "dle",
+		targets: () => [
+			{
+				name: "concierge",
+				cwd: "/c",
+				command: "claude",
+				initialPrompt: "/discord-loop-engine:concierge",
+				refresh: { prompt: "/discord-loop-engine:concierge refresh", maxEvents: 40, contextPercent: 15 },
+			},
+		],
+		tmux: async (args) => {
+			calls.push(args);
+			if (args[0] === "list-windows") return { ok: true, stdout: "dle-concierge" };
+			if (args[0] === "capture-pane") return { ok: true, stdout: o.pane };
+			return { ok: true, stdout: "" };
+		},
+		isLive: () => true,
+		notify: () => {},
+		activity: () => ({ events: o.events, lastAt: now - o.idleMs }),
+		onRefresh: (_n, p) => phases.push(p),
+		now: () => now,
+		promptDelayMs: 0,
+	});
+	const typed = () => calls.filter((c) => c[0] === "send-keys" && c.includes("-l")).map((c) => c.at(-1));
+	return { sup, typed, phases };
+}
+
+test("窓口のやり取りが溜まり、手が空いていたら /clear して refresh で始め直す", async () => {
+	const { sup, typed, phases } = refreshSetup({ events: 40, idleMs: 5 * 60_000, pane: "❯ " });
+	await sup.tick();
+	assert.deepEqual(typed(), ["/clear", "/discord-loop-engine:concierge refresh"]);
+	assert.deepEqual(phases, ["start", "done"], "その間に届いたものを engine が溜められるよう前後を知らせる");
+});
+
+test("コンテキストの残りが少なければ、件数が少なくても /clear する", async () => {
+	const { sup, typed } = refreshSetup({ events: 3, idleMs: 5 * 60_000, pane: "Context left until auto-compact: 9%" });
+	await sup.tick();
+	assert.equal(typed()[0], "/clear");
+});
+
+test("会話の途中・応答中・許可の確認中・まだ溜まっていないときは /clear しない", async () => {
+	for (const o of [
+		{ events: 40, idleMs: 30_000, pane: "❯ " },
+		{ events: 40, idleMs: 5 * 60_000, pane: "✻ Thinking… (esc to interrupt)" },
+		{ events: 40, idleMs: 5 * 60_000, pane: "Do you want to proceed?" },
+		{ events: 10, idleMs: 5 * 60_000, pane: "Context left until auto-compact: 40%" },
+	]) {
+		const { sup, typed } = refreshSetup(o);
+		await sup.tick();
+		assert.deepEqual(typed(), [], JSON.stringify(o));
+	}
+});

@@ -74,7 +74,7 @@ function setupEngine(retroEvery = 5, exec?: Run) {
 		tmuxSession: "dle-test",
 		workspaceDir: path.join(home, "ws"),
 		claudeBin: "claude",
-		concierge: { model: "sonnet", extraArgs: [], allowedTools: [] },
+		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
 		worker: { model: null, extraArgs: [], initialPrompt: "/discord-loop-engine:issue-loop" },
 		retro: { everyDoneTasks: retroEvery, everyDays: 7, promoteAfter: 3 },
 		board: { enabled: true },
@@ -651,6 +651,36 @@ test("マージ後のフェーズ done で、engine がマージ完了を知ら�
 			"**[kishimen-tool]** 🔵 マージ完了｜#12 票を破棄（PR #34）\n<https://github.com/jonnity/kishimen-tool/pull/34>",
 		);
 	} finally {
+		await engine.stop();
+	}
+});
+
+test("窓口を /clear している間に届いた発言は溜めて、終わったら直近のやり取りと一緒に渡す", async () => {
+	const { engine, rest, home, discord } = setupEngine();
+	await engine.start();
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	try {
+		await until(() => engine.sessions.has("concierge"));
+		discord(msg("今どう？", { id: "m1" }));
+		await c.event((p) => String(p.content).includes("今どう？"));
+		await c.tool("reply", { text: "待機中です", chat_id: CH, reply_to: "m1" });
+		assert.equal(engine.activity("concierge").events, 1);
+
+		engine.onRefresh("concierge", "start");
+		discord(msg("kishimen の件どうなった？", { id: "m2" }));
+		await until(() => rest.calls.some((x) => x.kind === "react" && x.emoji === "👀"));
+		assert.ok(
+			!rest.calls.some((x) => x.kind === "send" && x.content?.includes("起動していない")),
+			"/clear の最中は起動していない扱いにしない",
+		);
+		engine.onRefresh("concierge", "done");
+		const handoff = await c.event((p) => (p.meta as Record<string, string>).kind === "handoff");
+		assert.match(handoff.content, /ユーザー: 今どう？\n窓口: 待機中です/);
+		const held = await c.event((p) => String(p.content).includes("kishimen の件どうなった？"));
+		assert.equal(held.meta.message_id, "m2");
+		assert.equal(engine.activity("concierge").events, 0, "/clear したら数え直す");
+	} finally {
+		c.stop();
 		await engine.stop();
 	}
 });

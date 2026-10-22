@@ -21,7 +21,13 @@ export interface Config {
 	tmuxSession: string;
 	workspaceDir: string;
 	claudeBin: string;
-	concierge: { model: string; extraArgs: string[]; allowedTools: string[] };
+	concierge: {
+		model: string;
+		extraArgs: string[];
+		allowedTools: string[];
+		/** maxEvents 件のやり取りか、コンテキストの残りが contextPercent% 以下で、手が空いたら /clear する。0 で無効 */
+		refresh: { maxEvents: number; contextPercent: number };
+	};
 	worker: { model: string | null; extraArgs: string[]; initialPrompt: string };
 	retro: { everyDoneTasks: number; everyDays: number; promoteAfter: number };
 	board: { enabled: boolean };
@@ -33,7 +39,7 @@ export const CONFIG_TEMPLATE = {
 	permissionRelay: false,
 	tmuxSession: "dle",
 	workspaceDir: "~/dle/workspaces",
-	concierge: { model: "sonnet" },
+	concierge: { model: "sonnet", refresh: { maxEvents: 40, contextPercent: 15 } },
 	worker: { model: null, extraArgs: [] },
 	retro: { everyDoneTasks: 5, everyDays: 7, promoteAfter: 3 },
 	board: { enabled: true },
@@ -74,6 +80,7 @@ export function loadConfig(home = dleHome()): Config {
 	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const channelIds = raw.channelIds as string[];
 	const c = (raw.concierge ?? {}) as Record<string, unknown>;
+	const cr = (c.refresh ?? {}) as Record<string, unknown>;
 	const w = (raw.worker ?? {}) as Record<string, unknown>;
 	const r = (raw.retro ?? {}) as Record<string, unknown>;
 	const num = (v: unknown, d: number) => (typeof v === "number" && v > 0 ? v : d);
@@ -91,6 +98,11 @@ export function loadConfig(home = dleHome()): Config {
 			model: typeof c.model === "string" ? c.model : "sonnet",
 			extraArgs: strList(c.extraArgs),
 			allowedTools: strList(c.allowedTools),
+			refresh: {
+				// 0 で無効にできるよう、num（正の数だけ受け付ける）は使わない
+				maxEvents: typeof cr.maxEvents === "number" && cr.maxEvents >= 0 ? cr.maxEvents : 40,
+				contextPercent: num(cr.contextPercent, 15),
+			},
 		},
 		worker: {
 			model: typeof w.model === "string" ? w.model : null,

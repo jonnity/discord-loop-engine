@@ -115,6 +115,12 @@ export class Engine {
 	private boardDebounceMs: number;
 	private fatal: string | null = null;
 	private startedAt = new Date().toISOString();
+	// セッションごとの、前回の /clear 以降に流し込んだ件数と最後のやり取り（supervisor が /clear の判断に使う）
+	private activityBy = new Map<string, { events: number; lastAt: number }>();
+	// /clear している最中のセッション。この間に届いたものは outbox に溜め、終わってから渡す
+	private refreshing = new Set<string>();
+	// 窓口との直近のやり取り。/clear の後に渡し直して、会話の続きが分かるようにする
+	private recentChat: string[] = [];
 
 	constructor(o: EngineOptions) {
 		this.config = o.config;
@@ -191,6 +197,7 @@ export class Engine {
 					}
 					const who = session ?? { role: "cli" as Role, name: "cli", socket, pid: 0, cwd: "", since: "" };
 					if (msg.type === "call") {
+						if (session) this.touch(session.name, 0);
 						this.call(who, msg.name, msg.args ?? {}).then(
 							(data) => send(socket, { type: "result", id: msg.id, ok: true, data }),
 							(err: Error) => send(socket, { type: "result", id: msg.id, ok: false, error: err.message }),
@@ -268,12 +275,57 @@ export class Engine {
 		return session;
 	}
 
-	/** セッションへ流し込む。いなければ outbox に積んでおき、接続したときに渡す */
-	deliver(name: string, content: string, meta: Meta): "sent" | "queued" {
+	/**
+	 * セッションへ流し込む。いなければ outbox に積んでおき、接続したときに渡す。
+	 * /clear の最中なら outbox に溜めて "held"（起動していないわけではないので、そう扱わない）
+	 */
+	deliver(name: string, content: string, meta: Meta): "sent" | "queued" | "held" {
+		if (this.refreshing.has(name)) {
+			this.ledger.enqueue(name, { content, meta });
+			return "held";
+		}
 		const s = this.sessions.get(name);
-		if (s && send(s.socket, { type: "event", content, meta })) return "sent";
+		if (s && send(s.socket, { type: "event", content, meta })) {
+			this.touch(name, 1);
+			return "sent";
+		}
 		this.ledger.enqueue(name, { content, meta });
 		return "queued";
+	}
+
+	private touch(name: string, events: number) {
+		const a = this.activityBy.get(name) ?? { events: 0, lastAt: 0 };
+		this.activityBy.set(name, { events: a.events + events, lastAt: Date.now() });
+	}
+
+	activity(name: string) {
+		return this.activityBy.get(name) ?? { events: 0, lastAt: 0 };
+	}
+
+	private remember(line: string) {
+		this.recentChat.push(line.length > 400 ? `${line.slice(0, 400)}…` : line);
+		if (this.recentChat.length > 12) this.recentChat.shift();
+	}
+
+	/** supervisor が /clear する前後に呼ぶ */
+	onRefresh(name: string, phase: "start" | "done") {
+		if (phase === "start") {
+			this.refreshing.add(name);
+			return;
+		}
+		this.refreshing.delete(name);
+		this.activityBy.set(name, { events: 0, lastAt: Date.now() });
+		this.ledger.journal(`[${name}] コンテキストを整理（/clear して始め直し）`);
+		const s = this.sessions.get(name);
+		if (!s) return;
+		if (name === "concierge" && this.recentChat.length > 0)
+			send(s.socket, {
+				type: "event",
+				content: `/clear する前の直近のやり取り（古い順）:\n${this.recentChat.join("\n")}`,
+				meta: { kind: "handoff" },
+			});
+		for (const item of this.ledger.drain(name))
+			send(s.socket, { type: "event", content: item.content, meta: item.meta });
 	}
 
 	// --- Discord から ---------------------------------------------------------------------
@@ -309,6 +361,8 @@ export class Engine {
 			content += `\n\n（${att.id}: [${att.project}] ${KIND_LABEL[att.kind]}${att.issue ? ` #${att.issue}` : ""} ${att.title} / ${att.status === "open" ? "未対応" : "対応済み"}）`;
 		}
 		const how = this.deliver("concierge", content, meta);
+		// /clear の最中に届いたものは、この後そのまま渡すので直近のやり取りには入れない（二重になるため）
+		if (how !== "held") this.remember(`ユーザー: ${d.content}`);
 		if (how === "queued") {
 			await this.rest.sendMessage(d.channel_id, {
 				content: "窓口が起動していないため、起動したら渡します。",
@@ -403,6 +457,7 @@ export class Engine {
 			}
 			case "reply": {
 				conciergeOnly();
+				if (isConcierge) this.remember(`窓口: ${str(a.text)}`);
 				const id = await this.post(str(a.project) || "窓口", str(a.text), {
 					channelId: str(a.chat_id) || undefined,
 					replyTo: str(a.reply_to) || undefined,

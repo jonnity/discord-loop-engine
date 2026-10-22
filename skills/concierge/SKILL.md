@@ -21,6 +21,11 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 2. Discord に一度だけ挨拶を送る:「窓口を起動しました。あなた待ち N 件 / 作業中 N 件」＋あなた待ちの一覧
 3. あとは届くメッセージを待つ（届くまで何もしない）
 
+**引数が `refresh` のとき**は、engine がコンテキストを整理するために `/clear` して始め直したところ。
+1 だけ行い、**挨拶は送らない**（ユーザーから見れば同じ窓口が続いているだけなので）。直後に
+`meta.kind=handoff` で直前のやり取りが届くので、それを読んで会話の続きとして受け答えする。
+その後に、整理の間に届いていたメッセージが続けて届く。
+
 ## 届いたメッセージの扱い
 
 届くものは `<channel source="dle" ...>`。meta を見て振り分ける。
@@ -29,6 +34,7 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 |---|---|
 | `meta.attention` がある（A-番号への返事） | 下の「A-番号への返事」 |
 | `meta.kind=notice`（engine からのお知らせ） | 台帳は engine が更新済み。Discord に重ねて投稿しない。必要なら覚えておくだけ |
+| `meta.kind=handoff`（/clear 前の直近のやり取り） | 読んで覚えておくだけ。返事はしない |
 | `meta.kind=retro`（振り返りの依頼） | `/discord-loop-engine:retrospective` を実行 |
 | 新しい依頼（「〜を直して」「〜を作って」） | 下の「依頼を受ける」 |
 | 状況の質問（「今どう？」「何すればいい？」） | `board_show` / `tasks_list` / `attention_list` から答える。あなた待ちを先に、番号付きで |

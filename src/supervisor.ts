@@ -13,6 +13,12 @@ const REGISTER_TIMEOUT_MS = 3 * 60_000;
 const DEV_CHANNEL_PROMPT = "I am using this for local development";
 // 許可確認で止まっている画面の目印
 const PERMISSION_PROMPTS = ["Do you want to proceed?", "Do you want to make this edit", "Do you want to create"];
+// 応答の途中に出る目印（この間は /clear を入れない）
+const WORKING_MARK = "esc to interrupt";
+// コンテキストの残りの表示（Claude Code が残り少なくなると出す。表記の揺れに備えて2通り）
+const CONTEXT_LEFT = [/Context left until auto-compact: (\d+)%/i, /(\d+)% context left/i];
+// 最後のやり取りからこれだけ経つまでは /clear しない（会話の途中で記憶を消さないため）
+const REFRESH_IDLE_MS = 3 * 60_000;
 
 export type Tmux = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr?: string }>;
 
@@ -30,6 +36,11 @@ export interface SessionTarget {
 	cwd: string;
 	command: string; // シェルで実行する1行
 	initialPrompt: string;
+	/**
+	 * コンテキストが溜まったら、手が空いているときに /clear して prompt で始め直す（窓口用）。
+	 * maxEvents 件のやり取りか、コンテキストの残りが contextPercent% 以下になったら行う。
+	 */
+	refresh?: { prompt: string; maxEvents: number; contextPercent: number };
 	/** 既定以外の tmux セッションで起動したいとき（そのリポジトリのスクリプトが特定のセッション名を前提にしている場合） */
 	tmuxSession?: string;
 }
@@ -60,6 +71,10 @@ export interface SupervisorOptions {
 	tmux: Tmux;
 	isLive: (name: string) => boolean;
 	notify: (name: string, text: string) => void;
+	/** 前回の /clear 以降に流し込んだ件数と、最後にやり取りした時刻 */
+	activity?: (name: string) => { events: number; lastAt: number };
+	/** /clear の前後に呼ぶ（その間に届いたものは engine が溜めておき、終わってから渡す） */
+	onRefresh?: (name: string, phase: "start" | "done") => void;
 	log?: (msg: string) => void;
 	now?: () => number;
 	promptDelayMs?: number;
@@ -71,7 +86,14 @@ export class Supervisor {
 
 	constructor(opts: SupervisorOptions) {
 		// channel の接続直後は入力欄がまだ準備できていないことがあるため、少し待ってから入力する
-		this.o = { log: () => {}, now: Date.now, promptDelayMs: 5000, ...opts };
+		this.o = {
+			log: () => {},
+			now: Date.now,
+			promptDelayMs: 5000,
+			activity: () => ({ events: 0, lastAt: 0 }),
+			onRefresh: () => {},
+			...opts,
+		};
 	}
 
 	private st(name: string): SlotState {
@@ -117,7 +139,10 @@ export class Supervisor {
 			const exists = wins?.includes(windowName(t.name)) ?? false;
 			if (this.o.isLive(t.name)) {
 				s.waitingNotified = false;
-				if (exists) await this.checkStuck(t.name, s);
+				if (exists) {
+					await this.checkStuck(t.name, s);
+					await this.maybeRefresh(t);
+				}
 				continue;
 			}
 			if (exists) {
@@ -206,6 +231,37 @@ export class Supervisor {
 		await this.o.tmux(["send-keys", "-t", this.target(name), "-l", t.initialPrompt]);
 		await this.o.tmux(["send-keys", "-t", this.target(name), "Enter"]);
 		this.o.log(`supervisor: ${name} に「${t.initialPrompt}」を入力しました`);
+	}
+
+	/**
+	 * 窓口のコンテキストが溜まっていて、手が空いていれば /clear して始め直す。
+	 * 窓口が自分で /clear を予約する形（oogiri-doc の parallel-cycle-loop の one-shot 連鎖）を採らないのは、
+	 * 予約が空振りすると気づけないため。ペインを持っている engine が入力するほうが確実。
+	 */
+	private async maybeRefresh(t: SessionTarget) {
+		const r = t.refresh;
+		if (!r || r.maxEvents <= 0) return;
+		const a = this.o.activity(t.name);
+		if (a.events === 0 || this.o.now() - a.lastAt < REFRESH_IDLE_MS) return;
+		const pane = await this.o.tmux(["capture-pane", "-p", "-t", this.target(t.name)]);
+		if (!pane.ok || pane.stdout.includes(WORKING_MARK) || PERMISSION_PROMPTS.some((p) => pane.stdout.includes(p)))
+			return;
+		const left = CONTEXT_LEFT.map((re) => re.exec(pane.stdout)).find(Boolean);
+		const low = left ? Number(left[1]) <= r.contextPercent : false;
+		if (!low && a.events < r.maxEvents) return;
+		this.o.onRefresh(t.name, "start");
+		try {
+			await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", "/clear"]);
+			await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			await new Promise((res) => setTimeout(res, this.o.promptDelayMs));
+			await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", r.prompt]);
+			await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			this.o.log(
+				`supervisor: ${t.name} のコンテキストを整理しました（${low ? `残り ${left?.[1]}%` : `${a.events} 件のやり取り`}）`,
+			);
+		} finally {
+			this.o.onRefresh(t.name, "done");
+		}
 	}
 
 	/** 自動起動を止めたセッションを再開させる */

@@ -122,7 +122,7 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 		home,
 		socketPath: `${home}/engine.sock`,
 		claudeBin: "claude",
-		concierge: { model: "sonnet", extraArgs: [], allowedTools: [] },
+		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
 		worker: {
 			model: null,
 			extraArgs: ["--permission-mode", "acceptEdits"],

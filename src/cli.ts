@@ -118,6 +118,8 @@ async function cmdStart() {
 		tmux,
 		isLive: (n) => engine?.sessions.has(n) ?? false,
 		notify: (n, t) => engine?.notifyOps(n === "concierge" ? "窓口" : n, t),
+		activity: (n) => engine?.activity(n) ?? { events: 0, lastAt: 0 },
+		onRefresh: (n, phase) => engine?.onRefresh(n, phase),
 		log,
 	});
 	engine = new Engine({ config, rest, ledger, supervisor, log, gatewayFactory: (h) => new Gateway({ token, ...h }) });
