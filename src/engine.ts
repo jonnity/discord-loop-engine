@@ -517,6 +517,7 @@ export class Engine {
 					str(a.spec),
 					{
 						native: str(a.native) || undefined,
+						harness: a.harness === true,
 						tmuxSession: str(a.tmux_session) || undefined,
 						name: str(a.name) || undefined,
 					},
@@ -543,6 +544,8 @@ export class Engine {
 					mode,
 					initialPrompt: mode === "native" ? command : undefined,
 					tmuxSession: mode === "native" ? str(a.tmux_session) || p.tmuxSession : undefined,
+					// 調査し直すときに native を提案させない（人が harness に決めたので）
+					harnessOnly: mode === "harness" && !this.ledger.isReady({ ...p, mode }) ? true : undefined,
 				});
 				const notes: string[] = [];
 				const ready = this.ledger.isReady(next);
@@ -717,6 +720,10 @@ export class Engine {
 				);
 			}
 			validateHooks(profile?.hooks);
+		} else if (p.harnessOnly) {
+			throw new Error(
+				"このプロジェクトは harness で進めると決まっています。独自のループの固有の手順を hooks に写した案を出してください",
+			);
 		} else if (!str(a.initial_prompt)) {
 			throw new Error("native では initial_prompt（そのリポジトリのループを始めるコマンド）が必要です");
 		}

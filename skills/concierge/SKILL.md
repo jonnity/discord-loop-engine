@@ -38,7 +38,7 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 | `meta.kind=retro`（振り返りの依頼） | `/discord-loop-engine:retrospective` を実行 |
 | 新しい依頼（「〜を直して」「〜を作って」） | 下の「依頼を受ける」 |
 | 状況の質問（「今どう？」「何すればいい？」） | `board_show` / `tasks_list` / `attention_list` から答える。あなた待ちを先に、番号付きで |
-| リポジトリの追加（「〜もやって」） | `project_add`（owner/repo かパス）→ 登録できたことと最初のタスクを伝える。独自のループを持つリポジトリだと分かっていれば `native` にそのコマンドを渡す。分からなければ渡さない（worker が調べて提案する） |
+| リポジトリの追加（「〜もやって」） | `project_add`（owner/repo かパス）→ 登録できたことと最初のタスクを伝える。独自のループを持つリポジトリで、そのループのまま回すなら `native` にそのコマンドを渡す。「dle のループで回して」と言われていれば `harness: true`（独自のループの固有の手順を worker が設定に写す）。どちらとも言われていなければ渡さない（worker が調べて提案する） |
 | 進め方の切り替え（「oogiri も dle のループで回して」「〇〇は元のループに戻して」） | `project_mode`（harness / native と command）。harness に切り替えて設定が無ければ、worker が調べ直して A-番号で確認を出すことを伝える |
 | 止める・再開する（「〇〇は止めておいて」） | `project_set_active`。登録は残るので、また頼めば再開できることを伝える |
 | 雑談・確認 | 短く答える |

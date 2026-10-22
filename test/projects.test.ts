@@ -99,6 +99,36 @@ test("登録すると、設定が無ければ調査タスクを作り、ラベ�
 	assert.ok(!calls.includes("harness-labels"));
 });
 
+test("--harness で登録すると、独自のループがあっても調査は harness で進める（native からの登録し直しも）", async () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-h-"));
+	const ledger = new Ledger(home);
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-r-"));
+	execFileSync("git", ["-C", dir, "init", "-q"]);
+	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/jonnity/oogiri-doc"]);
+	const exec: Run = async (cmd, args) => (cmd === "git" ? run(cmd, args) : { ok: true, stdout: "", stderr: "" });
+	await registerProject(
+		ledger,
+		{ workspaceDir: "/nowhere" },
+		dir,
+		{ native: "/parallel-cycle-loop", tmuxSession: "dev" },
+		exec,
+	);
+	const r = await registerProject(ledger, { workspaceDir: "/nowhere" }, dir, { harness: true }, exec);
+	assert.equal(r.project.mode, "harness");
+	assert.equal(r.project.harnessOnly, true);
+	assert.equal(r.project.initialPrompt, undefined);
+	assert.equal(r.project.tmuxSession, undefined);
+	const cfg = {
+		home,
+		socketPath: "/s",
+		claudeBin: "claude",
+		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
+		worker: { model: null, extraArgs: [], initialPrompt: "/discord-loop-engine:issue-loop" },
+	} as unknown as Config;
+	const t = sessionTargets(cfg, ledger.projects(), ledger).find((x) => x.name === "oogiri-doc");
+	assert.equal(t?.initialPrompt, "/discord-loop-engine:onboard harness");
+});
+
 test("owner/repo 指定は workspaceDir に gh repo clone する", async () => {
 	const ws = mkdtempSync(path.join(os.tmpdir(), "dle-ws-"));
 	const calls: string[][] = [];

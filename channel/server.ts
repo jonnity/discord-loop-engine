@@ -172,6 +172,10 @@ const TOOLS: ToolDef[] = [
 			properties: {
 				spec: s("jonnity/kishimen-tool または ~/src/kishimen-tool"),
 				native: s("そのリポジトリ独自のループで進める場合、それを始めるコマンド（例: /parallel-cycle-loop）"),
+				harness: {
+					type: "boolean",
+					description: "独自のループがあっても dle の issue-loop で進めると決まっているとき true",
+				},
 				tmux_session: s("native のとき、そのリポジトリのスクリプトが前提にしている tmux セッション名（例: dev）"),
 				name: s("プロジェクト名を変えたいとき"),
 			},

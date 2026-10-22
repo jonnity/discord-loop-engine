@@ -6,7 +6,8 @@
 //   dle down                 常駐を止める（各セッションは止めない）
 //   dle start                フォアグラウンドで起動する（up が中で使う）
 //   dle status               engine・Discord・セッションの状態
-//   dle add <owner/repo|パス> リポジトリを登録する（--native <コマンド> で独自ループのまま）
+//   dle add <owner/repo|パス> リポジトリを登録する（--native <コマンド> で独自ループのまま、
+//                            --harness で独自ループがあっても dle のループで回す）
 //   dle projects             登録済みのリポジトリ
 //   dle tasks [--all]        台帳のタスク
 //   dle attention            あなた待ち
@@ -195,11 +196,13 @@ function cmdStatus() {
 }
 
 async function cmdAdd(spec: string | undefined, flags: Record<string, string | boolean>) {
-	if (!spec) fail("dle add <owner/repo またはパス> [--native <コマンド>] [--tmux-session <名前>] [--name <名前>]");
+	if (!spec)
+		fail("dle add <owner/repo またはパス> [--native <コマンド> | --harness] [--tmux-session <名前>] [--name <名前>]");
 	const config = loadConfig(home);
 	const args = {
 		spec,
 		native: typeof flags.native === "string" ? flags.native : undefined,
+		harness: flags.harness === true,
 		tmux_session: typeof flags["tmux-session"] === "string" ? flags["tmux-session"] : undefined,
 		name: typeof flags.name === "string" ? flags.name : undefined,
 	};
@@ -211,6 +214,7 @@ async function cmdAdd(spec: string | undefined, flags: Record<string, string | b
 		viaEngine ??
 		(await registerProject(new Ledger(home), config, spec, {
 			native: args.native,
+			harness: args.harness,
 			tmuxSession: args.tmux_session,
 			name: args.name,
 		}));

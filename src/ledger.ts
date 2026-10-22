@@ -70,6 +70,11 @@ export interface Project {
 	tmuxSession?: string;
 	/** worker を起動するときに追加で許可するもの（--allowedTools の形式） */
 	allow?: string[];
+	/**
+	 * 独自のループがあっても harness で進めると人が決めているとき（dle add --harness / dle mode harness）。
+	 * 調査では native を提案せず、独自のループから固有の手順を hooks に写す。設定が確定したら消す
+	 */
+	harnessOnly?: boolean;
 }
 
 export interface ProfileDraft {
@@ -228,6 +233,7 @@ export class Ledger {
 			mode: d.mode,
 			initialPrompt: d.mode === "native" ? d.initialPrompt : undefined,
 			tmuxSession: d.mode === "native" ? d.tmuxSession : undefined,
+			harnessOnly: undefined,
 		});
 		writeAtomic(path.join(this.dir, "projects", name, "draft.json"), "null\n");
 		this.journal(`[${name}] 設定を確定（${d.mode}）`);

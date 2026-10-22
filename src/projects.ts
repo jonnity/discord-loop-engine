@@ -80,6 +80,8 @@ function projectName(dir: string, repo: string): string {
 export interface AddOptions {
 	/** native モードで使うリポジトリ独自のループのコマンド（例: /parallel-cycle-loop） */
 	native?: string;
+	/** 独自のループがあっても dle の issue-loop で進める */
+	harness?: boolean;
 	tmuxSession?: string;
 	name?: string;
 }
@@ -126,6 +128,7 @@ export async function resolveProject(
 		active: true,
 		mode: opts.native ? "native" : "harness",
 		...(opts.native ? { initialPrompt: opts.native } : {}),
+		...(opts.harness && !opts.native ? { harnessOnly: true } : {}),
 		...(opts.tmuxSession ? { tmuxSession: opts.tmuxSession } : {}),
 	};
 }
@@ -192,7 +195,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 				? (p.initialPrompt ?? "")
 				: ready
 					? cfg.worker.initialPrompt
-					: "/discord-loop-engine:onboard";
+					: `/discord-loop-engine:onboard${p.harnessOnly ? " harness" : ""}`;
 			return {
 				name: p.name,
 				cwd: p.path,
@@ -260,7 +263,9 @@ export async function registerProject(
 	const prev = ledger.projects().find((p) => p.name === resolved.name);
 	// 登録し直しでは、明示されなかった項目（native の設定など）を引き継ぐ
 	const project = ledger.upsertProject(
-		prev && !opts.native ? { ...prev, path: resolved.path, repo: resolved.repo, active: true } : resolved,
+		prev && !opts.native && !opts.harness
+			? { ...prev, path: resolved.path, repo: resolved.repo, active: true }
+			: { ...prev, ...resolved, ...(opts.harness ? { initialPrompt: undefined, tmuxSession: undefined } : {}) },
 	);
 	const notes: string[] = [];
 	excludeLocalState(project.path);

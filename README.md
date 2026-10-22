@@ -158,7 +158,9 @@ dle mode oogiri-doc harness                           # dle の issue-loop で�
 dle mode oogiri-doc native --command /parallel-cycle-loop   # リポジトリ独自のループに戻す
 ```
 
-登録し直し（`dle add`）では今のモードが引き継がれるので、切り替えはこちらで行います。worker は起動し直します。
+まだ登録していないリポジトリを最初から dle のループで回すなら、`dle add <owner/repo またはパス> --harness` で登録します
+（独自のループがあっても native を提案せず、固有の手順を写した案を出します）。
+登録し直し（`dle add`）では今のモードが引き継がれるので、登録済みの切り替えはこちらで行います。worker は起動し直します。
 harness に切り替えると、worker は独自のループのスキルを読み、**そのリポジトリ固有の手順だけ**を
 設定の差し込み口（下記）に写した案を出します。独自のループのスキルはリポジトリに残ります。
 
@@ -213,7 +215,7 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 |---|---|
 | `dle up` / `dle down` | 常駐の開始・停止（窓口と worker のセッションは止めない） |
 | `dle status` | engine・Discord・セッションの状態とボード |
-| `dle add <owner/repo またはパス> [--native <コマンド>] [--tmux-session <名前>] [--name <名前>]` | リポジトリを登録（worker が自動で起動） |
+| `dle add <owner/repo またはパス> [--native <コマンド> \| --harness] [--tmux-session <名前>] [--name <名前>]` | リポジトリを登録（worker が自動で起動） |
 | `dle tasks [--all]` / `dle attention` / `dle board` | 台帳を見る |
 | `dle restart <concierge またはプロジェクト名>` | セッションを起動し直す |
 | `dle mode <名前> harness\|native [--command <コマンド>]` | 進め方を切り替える |

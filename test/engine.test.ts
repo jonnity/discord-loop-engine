@@ -502,7 +502,11 @@ test("モードを切り替えると、native の設定を消して harness の�
 			["プロジェクトの調査と設定"],
 			"設定が無いので調査から始める",
 		);
-		assert.equal(engine.targets().find((t) => t.name === "oogiri-doc")?.initialPrompt, "/discord-loop-engine:onboard");
+		assert.equal(
+			engine.targets().find((t) => t.name === "oogiri-doc")?.initialPrompt,
+			"/discord-loop-engine:onboard harness",
+			"人が harness に決めたので、調査で native を提案させない",
+		);
 		assert.ok(!commands.includes("harness-labels"), "設定が確定するまでラベルは作らない");
 
 		const bad = await c.tool("project_mode", { name: "oogiri-doc", mode: "native" });

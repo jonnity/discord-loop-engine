@@ -34,6 +34,10 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
 
 迷ったら native にしない（独自のループが「Issue → 設計 → 実装 → PR → 人の承認でマージ」を自分で回せる場合だけ）。
 
+**引数が `harness` のとき**（`dle add --harness` や `dle mode <名前> harness` で人が決めている）は、この表で
+決めない。独自のループがあっても harness で進め、下の「独自のループから固有の手順を写す」に従う
+（native の案は engine が受け付けない）。
+
 ### harness の場合: 設定の案を作る
 
 `profile_template` ツールで雛形と調査済みの例を受け取り、その形で作る。
@@ -55,7 +59,7 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
 - `demo`: 録画の手順が既にあるときだけ。無ければ `null`
 - `specRecordDir`: 設計記録を PR に含める慣習がリポジトリにあるときだけ。無ければ `null`
 
-### native から harness に切り替えたとき（`dle mode <名前> harness`）
+### 独自のループから固有の手順を写す（引数が `harness` のとき）
 
 独自のループ（例: `.claude/skills/` の parallel-cycle-loop）を、dle の issue-loop に置き換えるための調査。
 独自のループのスキルを読み、**ループの本体ではなく、そのリポジトリ固有の手順**を拾って設定に写す:
