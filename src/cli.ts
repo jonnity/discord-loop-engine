@@ -23,6 +23,7 @@ import { CONFIG_TEMPLATE, type Config, loadConfig, readToken } from "./config.ts
 import { Engine } from "./engine.ts";
 import { Gateway } from "./gateway.ts";
 import { Ledger } from "./ledger.ts";
+import { checkNode } from "./node-version.ts";
 import { resolveProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
 import { Rest } from "./rest.ts";
@@ -105,6 +106,9 @@ function cmdInit() {
 }
 
 async function cmdStart() {
+	// Discord との TLS 通信を受け持つので、修正の入っていない Node では起動しない
+	const node = checkNode();
+	if (!node.ok && process.env.DLE_ALLOW_UNPATCHED_NODE !== "1") fail(`起動を止めました: ${node.reason}`);
 	const config = loadConfig(home);
 	const token = readToken(home);
 	if (!token) fail(`Bot トークンがありません（環境変数 DISCORD_BOT_TOKEN か ${path.join(home, ".env")}）`);
@@ -245,12 +249,8 @@ async function cmdDoctor() {
 	const results: string[] = [];
 	const check = (ok: boolean, label: string, hint = "") =>
 		results.push(`${ok ? "✅" : "❌"} ${label}${!ok && hint ? `\n   → ${hint}` : ""}`);
-	const [major, minor] = process.versions.node.split(".").map(Number) as [number, number];
-	check(
-		major > 22 || (major === 22 && minor >= 18),
-		`Node ${process.versions.node}（24 LTS 推奨・22.18 以上）`,
-		"Node 24 LTS を入れてください",
-	);
+	const node = checkNode();
+	check(node.ok, `Node ${process.versions.node}（セキュリティ修正済みの版か）`, node.ok ? "" : node.reason);
 	let config: Config | null = null;
 	try {
 		config = loadConfig(home);

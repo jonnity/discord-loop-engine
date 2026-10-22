@@ -24,7 +24,7 @@ Discord 共通チャンネル ── Bot ──▶ engine（ローカル常駐�
 
 ## 必要なもの
 
-Linux か WSL2。Node 24 LTS（22.18 以上でも動く）、tmux、git、jq、[GitHub CLI](https://cli.github.com/)（`gh auth login` 済み）、
+Linux か WSL2。Node 24 LTS（24.22.1 以上。22 系なら 22.23.4 以上。2026-10-21 のセキュリティ修正が入っていない版では engine が起動しない）、tmux、git、jq、[GitHub CLI](https://cli.github.com/)（`gh auth login` 済み）、
 Claude Code、Codex CLI。`dle doctor` でまとめて確認できます。
 
 ## セットアップ
@@ -133,4 +133,5 @@ npm run check       # Biome
 ```
 
 engine は TypeScript をビルドせず、Node の型ストリップでそのまま実行しています。
+Node のセキュリティリリースが出たら `src/node-version.ts` の最低版を更新します。
 ハーネス（`bin/harness-*`）は bash です。
