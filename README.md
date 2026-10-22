@@ -31,13 +31,13 @@ main を clone して、下の順に進めれば使えます。engine は実行�
 
 | もの | 入れ方の例 | 確認 |
 |---|---|---|
-| Node 24 LTS（**24.22.1 以上**） | `fnm install 24 && fnm default 24`（nvm でも可） | `node -v` |
+| Node 24 LTS（最新を推奨。22.18 以上で動く） | `fnm install 24 && fnm default 24`（nvm でも可） | `node -v` |
 | tmux・git・jq | `sudo apt install -y tmux git jq` | `tmux -V` |
 | GitHub CLI | [cli.github.com](https://cli.github.com/) の手順 → `gh auth login` | `gh auth status` |
 | Claude Code | [公式の手順](https://code.claude.com/docs) → `claude` を一度起動してログイン | `claude --version` |
 | Codex CLI | 公式の手順 → `codex` を一度起動してログイン | `codex --version` |
 
-Node は 2026-10-21 のセキュリティ修正が入った版（24.22.1 / 22.23.4 / 26.12.1 以上）でないと engine が起動しません。
+engine は Discord と常時通信するので、Node のセキュリティリリースが出たら更新してください。
 
 ### 2. Discord の Bot を作る
 
@@ -147,7 +147,6 @@ dle down && dle up
 | 「セッションが engine に繋がっていません」と届く | `tmux attach -t dle` で該当ウィンドウを開き、表示されている確認に答える |
 | 「許可の確認で止まっています」と届く | 同じく tmux で答える。よく出るものは、そのリポジトリの `permissions.allow` に足す |
 | 窓口が返事をしない | `dle restart concierge`。台帳は残っているので続きから再開する |
-| `dle start` が「起動を止めました」で止まる | Node を 24.22.1 以上に上げる |
 
 ## 使い方
 
@@ -215,5 +214,4 @@ npm run check       # Biome
 ```
 
 engine は TypeScript をビルドせず、Node の型ストリップでそのまま実行しています。
-Node のセキュリティリリースが出たら `src/node-version.ts` の最低版を更新します。
 ハーネス（`bin/harness-*`）は bash です。
