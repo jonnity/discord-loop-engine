@@ -1,0 +1,65 @@
+#!/usr/bin/env bash
+#
+# harness-config — プロジェクトの .claude/harness.json を jq フィルタで読む。
+#
+# 使い方:
+#   harness-config '.project'                 # 値を出力（null/未定義なら空文字で exit 1）
+#   harness-config '.maxParallel' 3           # 未定義なら既定値 3 を出力
+#   harness-config --path                     # 設定ファイルの絶対パスを出力
+#   harness-config --root                     # プロジェクトルートを出力
+#
+# 設定ファイルの探索順:
+#   1) $HARNESS_CONFIG  2) $CLAUDE_PROJECT_DIR/.claude/harness.json  3) <git toplevel>/.claude/harness.json
+#
+# worktree 内から呼んでも harness.json はコミット済みなので worktree 側で見つかる。
+
+set -euo pipefail
+
+resolve_root() {
+	if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.claude/harness.json" ]; then
+		printf '%s\n' "$CLAUDE_PROJECT_DIR"
+		return
+	fi
+	git rev-parse --show-toplevel 2>/dev/null || pwd
+}
+
+ROOT="$(resolve_root)"
+CONFIG="${HARNESS_CONFIG:-$ROOT/.claude/harness.json}"
+
+case "${1:-}" in
+--path)
+	printf '%s\n' "$CONFIG"
+	exit 0
+	;;
+--root)
+	printf '%s\n' "$ROOT"
+	exit 0
+	;;
+"")
+	echo "harness-config: jq フィルタを指定してください" >&2
+	exit 2
+	;;
+esac
+
+FILTER="$1"
+DEFAULT="${2-}"
+
+if [ ! -f "$CONFIG" ]; then
+	if [ $# -ge 2 ]; then
+		printf '%s\n' "$DEFAULT"
+		exit 0
+	fi
+	echo "harness-config: 設定ファイルがありません（$CONFIG）。/discord-loop-engine:harness-init で作成してください。" >&2
+	exit 1
+fi
+
+# `// empty` だと false まで空扱いになるため、null だけを除く
+value="$(jq -r "($FILTER) | select(. != null)" "$CONFIG")"
+if [ -z "$value" ]; then
+	if [ $# -ge 2 ]; then
+		printf '%s\n' "$DEFAULT"
+		exit 0
+	fi
+	exit 1
+fi
+printf '%s\n' "$value"

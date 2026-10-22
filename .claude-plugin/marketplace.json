@@ -1,0 +1,13 @@
+{
+	"name": "discord-loop-engine",
+	"owner": { "name": "jonnity" },
+	"metadata": { "description": "discord-loop-engine の Claude Code プラグイン" },
+	"plugins": [
+		{
+			"name": "discord-loop-engine",
+			"source": "./",
+			"description": "Discord を窓口に、ローカルの Claude Code が Issue 駆動で開発ループを回し続ける（窓口・worker・タスク台帳・自己改善）",
+			"version": "0.1.0"
+		}
+	]
+}

@@ -1,0 +1,80 @@
+#!/usr/bin/env bash
+#
+# harness-inbox — 人間ゲートにいる Issue について「人間からの返事」と「通知の鮮度」を機械的に拾う。
+#
+# 出力（1行1件の JSON）:
+#   {"issue":12,"kind":"answer","url":...,"body":...}      interview への owner の返信
+#   {"issue":12,"kind":"merge-ok","pr":34,"url":...}        マージ承認（PR に "OK" / Approve / harness:merge-ok ラベル）
+#   {"issue":12,"kind":"merge-ng","pr":34,"url":...,"body":...}  差し戻し（"NG..." / Request changes）
+#   {"issue":12,"kind":"stale-notify","pr":34,"head":"abc1234"}  承認依頼後に head が進んだのに再依頼していない
+#   {"issue":12,"kind":"missing-notify","pr":34}                 awaiting-merge なのに依頼コメントが無い
+#
+# 返事として扱うのは harness.json の owners（既定: リポジトリ owner）の発言だけ。
+# 第三者のコメントで承認・仕様決定が進まないようにするため。
+#
+# 使い方: harness-inbox
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
+
+owners_json="$(jq -nc --arg o "$(cfg '.owners | join(",")')" '$o | split(",") | map(select(. != ""))')"
+if [ "$owners_json" = "[]" ]; then
+	owners_json="$(jq -nc --arg o "$(gh repo view --json owner -q .owner.login)" '[$o]')"
+fi
+prefix="$(cfg '.branchPrefix' 'fix/issue-')"
+
+# interview: 最後の質問コメント以降の owner の発言を回答として返す
+for n in $(gh issue list --state open --label harness:interview --json number -q '.[].number'); do
+	gh issue view "$n" --json comments | jq -c --argjson owners "$owners_json" --argjson n "$n" '
+		.comments as $c
+		| ([$c | to_entries[] | select(.value.body | contains("harness:gate phase=interview")) | .key] | last) as $q
+		| if $q == null then empty else
+			$c[($q + 1):][]
+			| select(.author.login as $a | $owners | index($a))
+			| select(.body | contains("<!-- harness:") | not)
+			| {issue: $n, kind: "answer", url: .url, body: .body}
+		end'
+done
+
+# awaiting-merge: 承認/差し戻し/通知鮮度
+for n in $(gh issue list --state open --label harness:awaiting-merge --json number -q '.[].number'); do
+	labels="$(gh issue view "$n" --json labels -q '.labels[].name')"
+	pr="$(gh pr list --state open --head "${prefix}${n}" --json number -q '.[0].number // empty')"
+	if [ -z "$pr" ]; then
+		continue
+	fi
+	gh pr view "$pr" --json comments,reviews,headRefOid,url | jq -c \
+		--argjson owners "$owners_json" --argjson n "$n" --argjson pr "$pr" \
+		--arg mergeok "$(printf '%s\n' "$labels" | grep -qx 'harness:merge-ok' && echo 1 || echo 0)" '
+		. as $p
+		| ([$p.comments[] | select(.body | contains("harness:gate phase=awaiting-merge"))] | last) as $req
+		| if $req == null then {issue: $n, kind: "missing-notify", pr: $pr}
+		else
+			($req.body | capture("sha=(?<s>[^ ]+)").s) as $sha
+			| if $sha != $p.headRefOid then {issue: $n, kind: "stale-notify", pr: $pr, head: $p.headRefOid[0:7]}
+			else
+				(
+					[ $p.comments[]
+						| select(.createdAt > $req.createdAt)
+						| select(.author.login as $a | $owners | index($a))
+						| select(.body | contains("<!-- harness:") | not)
+						| {at: .createdAt, url: .url, body: .body,
+							kind: (if (.body | test("^\\s*(OK|ok|ＯＫ|LGTM|マージして)")) then "merge-ok"
+								elif (.body | test("^\\s*(NG|ng|ＮＧ)")) then "merge-ng" else "comment" end)} ]
+					+ [ $p.reviews[]
+						| select(.submittedAt > $req.createdAt)
+						| select(.author.login as $a | $owners | index($a))
+						| select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
+						| {at: .submittedAt, url: $p.url, body: .body,
+							kind: (if .state == "APPROVED" then "merge-ok" else "merge-ng" end)} ]
+					+ (if $mergeok == "1" then [{at: "9999", url: $p.url, body: "", kind: "merge-ok"}] else [] end)
+				)
+				| sort_by(.at)
+				| (map(select(.kind != "comment")) | last) as $verdict
+				| (if $verdict == null then empty else {issue: $n, kind: $verdict.kind, pr: $pr, url: $verdict.url, body: $verdict.body} end),
+					(.[] | select(.kind == "comment") | {issue: $n, kind: "answer", pr: $pr, url: .url, body: .body})
+			end
+		end'
+done

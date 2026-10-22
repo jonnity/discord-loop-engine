@@ -1,0 +1,8 @@
+{
+	"name": "discord-loop-engine",
+	"version": "0.1.0",
+	"description": "Discord を窓口に、ローカルの Claude Code が Issue 駆動で開発ループを回し続ける（窓口・worker・タスク台帳・自己改善）",
+	"author": { "name": "jonnity" },
+	"repository": "https://github.com/jonnity/discord-loop-engine",
+	"keywords": ["discord", "loop", "issue", "codex", "tmux", "channel"]
+}

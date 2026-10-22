@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# dle — discord-loop-engine の CLI（src/cli.ts）を呼ぶ薄いラッパー。PATH に置いて使う。
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+	DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+	SOURCE="$(readlink "$SOURCE")"
+	[[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+# TypeScript をビルドせずに Node の型ストリップでそのまま実行する
+exec node --disable-warning=ExperimentalWarning "$DIR/../src/cli.ts" "$@"

@@ -1,0 +1,48 @@
+#!/usr/bin/env bash
+#
+# harness-status — ループの状態を読み取り専用で一覧表示する（Codex への入力・遷移・PR 操作はしない）。
+#
+# 真実の在り処は GitHub の harness:* ラベル。ローカルの .harness/ は補助（tmux 対応・heartbeat）。
+#
+# 使い方: harness-status
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
+ROOT="$("$SCRIPT_DIR/harness-config" --root)"
+PROJECT="$(cfg '.project')"
+
+echo "=== discord-loop-engine: ${PROJECT:-$(basename "$ROOT")} ==="
+for phase in interview designing spec-review implementing impl-review awaiting-merge blocked queued; do
+	rows="$(gh issue list --state open --label "harness:$phase" --json number,title \
+		-q '.[] | "  #\(.number) \(.title)"' 2>/dev/null)"
+	[ -z "$rows" ] && continue
+	echo "[$phase]"
+	printf '%s\n' "$rows"
+done
+
+echo ""
+echo "[tmux codex windows]"
+tmux list-windows -a -F '  #{window_name} (#{session_name})' 2>/dev/null | grep 'codex-' || echo "  (なし)"
+
+echo ""
+hb="$ROOT/.harness/loop-heartbeat"
+if [ -f "$hb" ]; then
+	last="$(sed -n 's/^last_tick_at=//p' "$hb")"
+	interval="$(sed -n 's/^heartbeat_interval=//p' "$hb")"
+	echo "[loop] last tick: ${last:-?} (interval ${interval:-?})"
+	if [ -n "$last" ]; then
+		age=$(($(date +%s) - $(date -d "$last" +%s 2>/dev/null || echo 0)))
+		mins="${interval%min}"
+		if [[ "$mins" =~ ^[0-9]+$ ]] && [ "$age" -gt $((mins * 60 * 2 + 300)) ]; then
+			echo "  ⚠️ 心拍が ${age}s 途絶えています。ループが止まっている可能性があります（/discord-loop-engine:issue-loop で再開）"
+		fi
+	fi
+else
+	echo "[loop] heartbeat なし（ループ未起動）"
+fi
+
+echo ""
+echo "[inbox]"
+"$SCRIPT_DIR/harness-inbox" 2>/dev/null | jq -r '"  #\(.issue) \(.kind)\(if .pr then " PR#\(.pr)" else "" end)"' || true

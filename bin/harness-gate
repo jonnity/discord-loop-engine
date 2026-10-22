@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+#
+# harness-gate — PR 作成前ゲート。harness.json の gate に並べた検査を全部実行し、最後に一覧を出す。
+#
+# 最初の失敗で止めないのは、「直す→別の所で落ちる」の往復を1回で済ませるため
+# （oogiri-doc の pnpm ci:local と同じ考え方）。CI と同じ検査を同じ順で並べておけば、
+# ここを通した PR が CI で赤くなったときに「コード起因ではない」と疑う根拠になる。
+#
+# 使い方: harness-gate [<実行ディレクトリ>]   # 既定はカレント（worktree で実行する）
+#
+# harness.json:
+#   "gate": [ {"name": "types", "run": "npm run typecheck"}, ... ]
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DIR="${1:-$(pwd)}"
+cd "$DIR" || exit 2
+
+CONFIG="$("$SCRIPT_DIR/harness-config" --path)"
+count="$(jq '.gate | length' "$CONFIG" 2>/dev/null || echo 0)"
+if [ "$count" = 0 ]; then
+	echo "harness-gate: harness.json に gate が定義されていません" >&2
+	exit 2
+fi
+
+results=()
+failed=0
+for i in $(seq 0 $((count - 1))); do
+	name="$(jq -r ".gate[$i].name" "$CONFIG")"
+	run="$(jq -r ".gate[$i].run" "$CONFIG")"
+	echo "=== [$name] $run" >&2
+	start=$(date +%s)
+	if bash -c "$run"; then
+		results+=("✅ $name ($(($(date +%s) - start))s)")
+	else
+		results+=("❌ $name ($(($(date +%s) - start))s)  ← $run")
+		failed=1
+	fi
+done
+
+echo "" >&2
+echo "=== harness-gate 結果 ($DIR)" >&2
+printf '%s\n' "${results[@]}" >&2
+exit "$failed"

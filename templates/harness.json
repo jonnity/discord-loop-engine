@@ -1,0 +1,26 @@
+{
+	"$comment": "discord-loop-engine の設定。{n} は Issue 番号、{worktree} は worktree の絶対パスに置換される。",
+	"project": "my-project",
+	"repo": "owner/my-project",
+	"baseBranch": "main",
+	"owners": ["owner"],
+	"maxParallel": 3,
+	"worktreeRoot": ".worktrees",
+	"branchPrefix": "fix/issue-",
+	"mergeMethod": "merge",
+	"setup": ["npm ci"],
+	"gate": [{ "name": "types", "run": "npm run typecheck" }, { "name": "test", "run": "npm test" }],
+	"codex": {
+		"command": "codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox"
+	},
+	"context": ["CLAUDE.md", "AGENTS.md"],
+	"demo": null,
+	"specRecordDir": "docs/spec",
+	"humanChecks": [],
+	"ciTriage": null,
+	"notify": {
+		"required": true,
+		"envFiles": [".env"],
+		"maxAttachMB": 10
+	}
+}

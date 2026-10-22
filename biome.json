@@ -1,0 +1,9 @@
+{
+	"$schema": "https://biomejs.dev/schemas/2.2.4/schema.json",
+	"files": {
+		"includes": ["src/**", "channel/**", "test/**", "*.json", ".claude-plugin/**", "hooks/**", "templates/**"]
+	},
+	"formatter": { "indentStyle": "tab", "lineWidth": 120 },
+	"javascript": { "formatter": { "quoteStyle": "double" } },
+	"linter": { "rules": { "recommended": true } }
+}

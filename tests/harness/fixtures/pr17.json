@@ -1,0 +1,5 @@
+{"headRefOid":"ccccccc333","url":"https://github.com/o/r/pull/17","comments":[
+ {"author":{"login":"jonnity"},"body":"承認お願い\n<!-- harness:gate phase=awaiting-merge issue=7 sha=ccccccc333 -->","createdAt":"2026-10-03T00:00:00Z","url":"c1"}
+],"reviews":[
+ {"author":{"login":"jonnity"},"state":"CHANGES_REQUESTED","body":"直して","submittedAt":"2026-10-03T01:00:00Z"}
+]}

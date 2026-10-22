@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+#
+# harness-guard — PreToolUse(Bash) hook。ハーネスの入口を迂回するコマンドを止める。
+#
+# .claude/harness.json があるプロジェクトでだけ働く（他プロジェクトでは何もしない）。
+# 止めるもの:
+#   - harness:* ラベルの直接操作（queued / priority 以外）→ harness-phase を使う
+#     （直接付けると「人間ゲートのラベル ⇔ Discord 通知済み」が崩れるため）
+#   - gh pr merge の直接実行 → harness-merge を使う（承認記録・CI 確認・完了通知を通すため）
+#   - git add -f / --force → ignore 対象のローカル状態を force-add した事故（oogiri-doc #798）の再発防止
+#   - Discord webhook への直接 curl → harness-notify を使う（プロジェクト名・リンクの書式を揃えるため）
+#
+# 入力: stdin に hook の JSON（tool_input.command）。止めるときは exit 2 + stderr に理由。
+
+set -uo pipefail
+
+# 先に入力を読み切る。読まずに終えると、書き手（Claude Code やテスト）が SIGPIPE を受けることがある
+input="$(cat)"
+ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
+[ -f "$ROOT/.claude/harness.json" ] || exit 0
+
+cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
+[ -z "$cmd" ] && exit 0
+
+deny() {
+	echo "harness-guard: $1" >&2
+	exit 2
+}
+
+# harness スクリプト自身の呼び出しは通す（中で gh を叩くのはスクリプトの責務）
+first="$(printf '%s' "$cmd" | awk '{print $1}')"
+case "$(basename -- "$first")" in
+harness-*) exit 0 ;;
+esac
+
+if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+(issue|pr)[[:space:]]+edit.*--(add|remove)-label' &&
+	printf '%s' "$cmd" | grep -Eq 'harness:' &&
+	printf '%s' "$cmd" | grep -Eo 'harness:[a-z-]+' | grep -Evq '^harness:(queued|priority)$'; then
+	deny "harness:* のフェーズラベルは直接操作できません。harness-phase <issue> <phase> を使ってください（人間ゲートは Discord 通知とセットで遷移させるため）。"
+fi
+
+if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+api.*labels' && printf '%s' "$cmd" | grep -q 'harness:'; then
+	deny "gh api での harness:* ラベル操作は禁止です。harness-phase を使ってください。"
+fi
+
+if printf '%s' "$cmd" | grep -Eq 'gh[[:space:]]+pr[[:space:]]+merge'; then
+	deny "gh pr merge は直接実行できません。harness-merge <issue> を使ってください（承認記録・CI 確認・完了通知を通すため）。"
+fi
+
+if printf '%s' "$cmd" | grep -Eq 'git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+add([[:space:]].*)?[[:space:]](-f|--force)([[:space:]]|$)'; then
+	deny "git add -f は禁止です。ignore 対象（.harness/ 等のローカル状態）をコミットしないでください。必要なファイルはパスを列挙して通常の git add で追加します。"
+fi
+
+if printf '%s' "$cmd" | grep -Eq 'discord(app)?\.com/api/webhooks'; then
+	deny "Discord webhook への直接投稿は禁止です。harness-notify を使ってください（プロジェクト名とリンクの書式を揃えるため）。"
+fi
+
+exit 0

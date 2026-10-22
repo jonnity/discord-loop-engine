@@ -1,0 +1,55 @@
+name: discord-loop-engine Discord notify
+description: >-
+  harness-notify と同じ書式（プロジェクト名・リンク付き）で Discord に投稿する。
+  エージェントに依存せず必ず届けたいイベント（マージ完了・CI 失敗）を CI 側から送るために使う。
+inputs:
+  webhook-url:
+    description: Discord webhook URL（secrets.DISCORD_WEBHOOK_URL を渡す）
+    required: true
+  event:
+    description: "merged | ci-red | info | blocked など（harness-notify の --event）"
+    required: true
+  title:
+    description: 見出し（Issue / PR タイトル等）
+    required: true
+  url:
+    description: 開けばすぐ状況が分かるリンク
+    required: true
+  issue:
+    description: Issue 番号（任意）
+    required: false
+    default: ""
+  pr:
+    description: PR 番号（任意）
+    required: false
+    default: ""
+  body:
+    description: 短い要約（任意）
+    required: false
+    default: ""
+  project:
+    description: プロジェクト表示名（既定はリポジトリ名）
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    - name: Post to Discord
+      shell: bash
+      env:
+        DISCORD_WEBHOOK_URL: ${{ inputs.webhook-url }}
+        H_EVENT: ${{ inputs.event }}
+        H_TITLE: ${{ inputs.title }}
+        H_URL: ${{ inputs.url }}
+        H_ISSUE: ${{ inputs.issue }}
+        H_PR: ${{ inputs.pr }}
+        H_BODY: ${{ inputs.body }}
+        H_PROJECT: ${{ inputs.project }}
+        H_REPO: ${{ github.repository }}
+      run: |
+        args=(--event "$H_EVENT" --title "$H_TITLE" --url "$H_URL" --repo "$H_REPO")
+        [ -n "$H_ISSUE" ] && args+=(--issue "$H_ISSUE")
+        [ -n "$H_PR" ] && args+=(--pr "$H_PR")
+        [ -n "$H_BODY" ] && args+=(--body "$H_BODY")
+        args+=(--project "${H_PROJECT:-${H_REPO#*/}}")
+        "$GITHUB_ACTION_PATH/../../../bin/harness-notify" "${args[@]}"

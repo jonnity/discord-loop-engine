@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# テスト用の gh スタブ。harness-inbox が呼ぶ問い合わせにだけ fixture を返す。
+D="$(cd "$(dirname "$0")" && pwd)"
+case "$*" in
+"repo view --json owner -q .owner.login") echo jonnity ;;
+*"issue list --state open --label harness:interview"*) echo 3 ;;
+*"issue list --state open --label harness:awaiting-merge"*) printf '5\n6\n7\n' ;;
+"issue view 3 --json comments") cat "$D/issue3.json" ;;
+"issue view 5 --json labels -q .labels[].name") echo harness:awaiting-merge ;;
+"issue view 6 --json labels -q .labels[].name") echo harness:awaiting-merge ;;
+"issue view 7 --json labels -q .labels[].name") printf 'harness:awaiting-merge\nharness:merge-ok\n' ;;
+*"pr list --state open --head fix/issue-5"*) echo 15 ;;
+*"pr list --state open --head fix/issue-6"*) echo 16 ;;
+*"pr list --state open --head fix/issue-7"*) echo 17 ;;
+"pr view 15 --json comments,reviews,headRefOid,url") cat "$D/pr15.json" ;;
+"pr view 16 --json comments,reviews,headRefOid,url") cat "$D/pr16.json" ;;
+"pr view 17 --json comments,reviews,headRefOid,url") cat "$D/pr17.json" ;;
+*) echo "gh stub: unexpected: $*" >&2; exit 1 ;;
+esac

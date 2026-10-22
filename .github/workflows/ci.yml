@@ -1,0 +1,33 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - name: Biome
+        run: npm run check:ci
+      - name: 型チェック
+        run: npm run typecheck
+      - name: shellcheck
+        run: |
+          shellcheck -S warning bin/harness-* bin/dle
+          shellcheck -S warning -e SC2034 tests/harness/run.sh  # check() が eval で変数を読むため
+      - name: JSON の妥当性
+        run: for f in .claude-plugin/*.json hooks/hooks.json .mcp.json templates/harness.json; do jq empty "$f"; done
+      - name: テスト
+        run: npm test

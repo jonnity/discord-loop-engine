@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+#
+# harness-labels — ハーネスが状態機械として使う harness:* ラベルをリポジトリに作成/更新する（冪等）。
+#
+# 使い方: harness-labels [--repo owner/repo]
+
+set -euo pipefail
+
+repo_args=()
+if [ "${1:-}" = "--repo" ]; then
+	repo_args=(--repo "$2")
+fi
+
+create() {
+	gh label create "$1" --color "$2" --description "$3" --force "${repo_args[@]}" >/dev/null
+	echo "label: $1"
+}
+
+create "harness:queued" "c5def5" "ハーネスの着手待ちキュー（人間が付ける）"
+create "harness:interview" "fbca04" "要件確認の回答待ち（人間）"
+create "harness:designing" "d4c5f9" "Codex が設計書を作成中"
+create "harness:spec-review" "bfd4f2" "設計書の敵対的レビュー中"
+create "harness:implementing" "d4c5f9" "Codex が実装中"
+create "harness:impl-review" "bfd4f2" "実装の敵対的レビュー・実動作確認中"
+create "harness:awaiting-merge" "0e8a16" "PR 作成済み・マージ承認待ち（人間）"
+create "harness:merge-ok" "0b6e26" "人間がマージを承認した（スマホからはこのラベルを付けるだけで良い）"
+create "harness:blocked" "b60205" "自動では進められない・人間の対応が必要"
+create "harness:priority" "e99695" "キューで優先する"

@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+#
+# harness-phase — Issue のフェーズ（harness:* ラベル）を遷移させる唯一の入口。
+#
+# 人間ゲート（interview / awaiting-merge / blocked）へ入るときは、
+#   1) 人間が読むべき本文を GitHub にコメントとして投稿し（Issue か PR）
+#   2) そのコメントへのリンク付きで Discord に通知し
+#   3) 通知が成功した場合だけラベルを付け替える
+# の順で行う。つまり「人間ゲートのラベルが付いている ⇔ 通知済み」が構造的に成り立つ。
+# oogiri-doc では「通知してから承認依頼済みと書く」がプローズのルールで、守られない事故が
+# 繰り返し起きたため、手順ではなく入口を1本にして担保する（ラベルの直接編集は harness-guard が止める）。
+#
+# 使い方:
+#   harness-phase <issue> <phase> [--comment-file F | --comment TEXT] [--pr N] [--file F]
+#                 [--summary TEXT] [--notify]
+#
+# phase:
+#   queued | interview | designing | spec-review | implementing | impl-review | awaiting-merge | blocked | done
+#
+#   interview      : --comment(-file) 必須。Issue にコメントし Discord へ「要件確認」
+#   awaiting-merge : --pr と --comment(-file) 必須。PR にコメント（head sha を埋め込む）し「マージ承認依頼」
+#   blocked        : --comment(-file) 必須。Issue にコメントし「要対応」
+#   done           : harness:* ラベルを全部外す（「マージ完了」の通知は CI 側の harness-notify ワークフローが
+#                    出す。GitHub の画面からマージした場合も同じ1通にするため、ここでは送らない）
+#   その他         : ラベルの付け替えのみ。--notify を付けると「着手/お知らせ」を通知
+#
+# --summary は Discord embed に出す短い要約（省略時はコメント冒頭 300 文字）。
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PHASES=(queued interview designing spec-review implementing impl-review awaiting-merge blocked)
+
+ISSUE="${1:-}"
+PHASE="${2:-}"
+if [ -z "$ISSUE" ] || [ -z "$PHASE" ]; then
+	sed -n '2,30p' "$0" >&2
+	exit 2
+fi
+shift 2
+
+COMMENT="" COMMENT_FILE="" PR="" FILE="" SUMMARY="" NOTIFY=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--comment) COMMENT="$2"; shift 2 ;;
+	--comment-file) COMMENT_FILE="$2"; shift 2 ;;
+	--pr) PR="$2"; shift 2 ;;
+	--file) FILE="$2"; shift 2 ;;
+	--summary) SUMMARY="$2"; shift 2 ;;
+	--notify) NOTIFY=1; shift ;;
+	*)
+		echo "harness-phase: 不明な引数 $1" >&2
+		exit 2
+		;;
+	esac
+done
+
+valid=0
+for p in "${PHASES[@]}" "done"; do [ "$p" = "$PHASE" ] && valid=1; done
+if [ "$valid" = 0 ]; then
+	echo "harness-phase: 不明なフェーズ $PHASE" >&2
+	exit 2
+fi
+
+if [ -n "$COMMENT_FILE" ]; then
+	COMMENT="$(cat "$COMMENT_FILE")"
+fi
+
+gate=0
+case "$PHASE" in
+interview | blocked) gate=1 ;;
+awaiting-merge)
+	gate=1
+	if [ -z "$PR" ]; then
+		echo "harness-phase: awaiting-merge には --pr が必要です" >&2
+		exit 2
+	fi
+	;;
+esac
+if [ "$gate" = 1 ] && [ -z "$COMMENT" ]; then
+	echo "harness-phase: $PHASE は人間ゲートのため、読むべき本文（--comment / --comment-file）が必須です" >&2
+	exit 2
+fi
+
+TITLE="$(gh issue view "$ISSUE" --json title -q .title)"
+ISSUE_URL="$(gh issue view "$ISSUE" --json url -q .url)"
+
+# --- 1) 本文を GitHub に投稿 ---------------------------------------------------
+LINK="$ISSUE_URL"
+if [ -n "$COMMENT" ]; then
+	sha=""
+	if [ -n "$PR" ]; then
+		sha="$(gh pr view "$PR" --json headRefOid -q .headRefOid)"
+	fi
+	marker="<!-- harness:gate phase=$PHASE issue=$ISSUE${sha:+ sha=$sha} -->"
+	body="$COMMENT
+
+---
+_discord-loop-engine · \`$PHASE\`${sha:+ · head \`${sha:0:7}\`}_
+$marker"
+	tmp="$(mktemp)"
+	printf '%s\n' "$body" >"$tmp"
+	if [ "$PHASE" = "awaiting-merge" ]; then
+		LINK="$(gh pr comment "$PR" --body-file "$tmp" | tail -n 1)"
+	else
+		LINK="$(gh issue comment "$ISSUE" --body-file "$tmp" | tail -n 1)"
+	fi
+	rm -f "$tmp"
+	echo "harness-phase: コメントを投稿しました: $LINK" >&2
+fi
+
+if [ -z "$SUMMARY" ] && [ -n "$COMMENT" ]; then
+	SUMMARY="$(printf '%s' "$COMMENT" | head -c 300)"
+fi
+
+# --- 2) Discord 通知（人間ゲートは必須。失敗したらラベルを変えずに終了） ---------
+event=""
+case "$PHASE" in
+interview) event="interview" ;;
+awaiting-merge) event="merge-request" ;;
+blocked) event="blocked" ;;
+designing) [ "$NOTIFY" = 1 ] && event="started" ;;
+*) [ "$NOTIFY" = 1 ] && event="info" ;;
+esac
+
+if [ -n "$event" ]; then
+	notify_args=(--event "$event" --title "$TITLE" --url "$LINK" --issue "$ISSUE")
+	[ -n "$PR" ] && notify_args+=(--pr "$PR")
+	[ -n "$SUMMARY" ] && notify_args+=(--body "$SUMMARY")
+	[ -n "$FILE" ] && notify_args+=(--file "$FILE")
+	if ! "$SCRIPT_DIR/harness-notify" "${notify_args[@]}"; then
+		echo "harness-phase: Discord 通知に失敗したため、ラベルは変更していません（$PHASE へは未遷移）。" >&2
+		echo "  原因を解消して同じコマンドを再実行してください。" >&2
+		exit 4
+	fi
+fi
+
+# --- 3) ラベル付け替え --------------------------------------------------------
+current="$(gh issue view "$ISSUE" --json labels -q '.labels[].name' | grep '^harness:' || true)"
+edit_args=()
+while IFS= read -r l; do
+	[ -z "$l" ] && continue
+	[ "$l" = "harness:$PHASE" ] && continue
+	# merge-ok はマージ承認の記録なので done 以外では残す
+	[ "$l" = "harness:merge-ok" ] && [ "$PHASE" != "done" ] && continue
+	edit_args+=(--remove-label "$l")
+done <<<"$current"
+if [ "$PHASE" != "done" ]; then
+	edit_args+=(--add-label "harness:$PHASE")
+fi
+if [ ${#edit_args[@]} -gt 0 ]; then
+	if ! gh issue edit "$ISSUE" "${edit_args[@]}" >/dev/null; then
+		echo "harness-phase: ラベル変更に失敗しました。ラベル未作成なら harness-labels を実行してください。" >&2
+		exit 5
+	fi
+fi
+# engine が動いていれば台帳にもフェーズを残す（ボードと「今なにをしているか」のため。失敗してもフェーズ遷移は止めない）
+DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
+if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
+	"$SCRIPT_DIR/dle" notify --event phase --phase "$PHASE" --issue "$ISSUE" --title "$TITLE" --url "$ISSUE_URL" \
+		${PR:+--pr "$PR"} --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" \
+		>/dev/null 2>&1 || true
+fi
+echo "harness-phase: #$ISSUE → $PHASE" >&2

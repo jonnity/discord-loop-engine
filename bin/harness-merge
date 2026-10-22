@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+#
+# harness-merge — 人間の承認を確認してから PR をマージし、Issue を done にして完了通知する。
+#
+# 承認として認めるもの（どれか1つ）:
+#   - harness-inbox が merge-ok を返す（owner の "OK" コメント / Approve / harness:merge-ok ラベル）
+#   - --chat-approval "<ユーザーの発言の引用>"（対話チャットで OK をもらった場合。PR に記録を残す）
+# マージ前に、承認依頼を出した head sha と現在の head が一致していること、CI が green であること、
+# mergeable であることを確認する。どれかが崩れていたらマージしない。
+#
+# 使い方: harness-merge <issue> [--chat-approval "<引用>"]
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
+
+ISSUE="${1:?issue 番号を指定してください}"
+shift
+CHAT=""
+if [ "${1:-}" = "--chat-approval" ]; then
+	CHAT="${2:?引用を指定してください}"
+fi
+
+prefix="$(cfg '.branchPrefix' 'fix/issue-')"
+method="$(cfg '.mergeMethod' 'merge')"
+PR="$(gh pr list --state open --head "${prefix}${ISSUE}" --json number -q '.[0].number // empty')"
+[ -z "$PR" ] && { echo "harness-merge: #$ISSUE の open PR（head ${prefix}${ISSUE}）が見つかりません" >&2; exit 1; }
+
+verdict="$("$SCRIPT_DIR/harness-inbox" | jq -r --argjson n "$ISSUE" 'select(.issue == $n) | .kind' | grep -E '^(merge-ok|merge-ng|stale-notify|missing-notify)$' | tail -n 1 || true)"
+case "$verdict" in
+stale-notify | missing-notify)
+	echo "harness-merge: 承認依頼後に head が変わっている（または依頼が無い）ため、再度 harness-phase $ISSUE awaiting-merge で依頼し直してください" >&2
+	exit 1
+	;;
+merge-ng)
+	echo "harness-merge: 最新の判断が NG（差し戻し）です。マージしません" >&2
+	exit 1
+	;;
+merge-ok) ;;
+*)
+	if [ -z "$CHAT" ]; then
+		echo "harness-merge: マージ承認が見つかりません（PR への OK / Approve / harness:merge-ok ラベル、または --chat-approval）" >&2
+		exit 1
+	fi
+	;;
+esac
+
+state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,statusCheckRollup)"
+mergeable="$(printf '%s' "$state" | jq -r .mergeable)"
+bad_checks="$(printf '%s' "$state" | jq -r '[.statusCheckRollup[]? | select((.conclusion // .state) as $c | ($c != "SUCCESS" and $c != "NEUTRAL" and $c != "SKIPPED"))] | map(.name // .context) | join(", ")')"
+if [ "$mergeable" != "MERGEABLE" ]; then
+	echo "harness-merge: PR #$PR が mergeable ではありません（$mergeable）。base を取り込んでから再実行してください" >&2
+	exit 1
+fi
+if [ -n "$bad_checks" ]; then
+	echo "harness-merge: green でないチェックがあります: $bad_checks" >&2
+	exit 1
+fi
+
+if [ -n "$CHAT" ]; then
+	gh pr comment "$PR" --body "チャットでマージ承認を受けました:
+> $CHAT
+
+<!-- harness:approval source=chat -->" >/dev/null
+fi
+
+gh pr merge "$PR" "--$method"
+"$SCRIPT_DIR/harness-phase" "$ISSUE" "done" --pr "$PR"

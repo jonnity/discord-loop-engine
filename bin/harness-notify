@@ -1,0 +1,233 @@
+#!/usr/bin/env bash
+#
+# harness-notify — ハーネスのイベントを Discord webhook へ投稿する（全プロジェクト共通チャンネル前提）。
+#
+# 複数プロジェクトが1つのチャンネルに流れ込むため、どの投稿も
+#   - 送信者名・本文先頭・embed の author にプロジェクト名
+#   - 開けばすぐ状況が分かる GitHub のリンク（Issue コメント / PR）を embed のタイトルリンクに
+# を必ず入れる。詳細な文面は GitHub 側（リンク先）に置き、Discord はそこへの入口に徹する。
+#
+# 使い方:
+#   harness-notify --event <種別> --title <Issueタイトル> --url <開いてほしいURL> \
+#     [--issue N] [--pr N] [--body <短い要約>] [--file <添付ファイル>] \
+#     [--project <名前>] [--repo <owner/repo>] [--dry-run]
+#
+# 種別: interview | merge-request | blocked | ci-red | merged | started | info
+#
+# webhook URL:
+#   $DISCORD_WEBHOOK_URL → harness.json の notify.envFiles に列挙した .env を順に grep。
+#   見つからない場合、notify.required が true（既定）なら exit 3 で失敗する。
+#   oogiri-doc の notify-discord.sh は未設定時に exit 0 で skip していたが、それだと
+#   「通知したつもりで何も届いていない」状態が黙って続くため、ここでは必須にしている。
+#   ※ URL は秘密情報。標準出力・ログに出さない。
+#
+# 終了コード: 0=投稿成功（または required=false での skip） / 2=引数不正 / 3=webhook 未設定 / 4=投稿失敗
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
+
+EVENT="" TITLE="" URL="" ISSUE="" PR="" BODY="" FILE="" PROJECT="" REPO="" DRY_RUN=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--event) EVENT="$2"; shift 2 ;;
+	--title) TITLE="$2"; shift 2 ;;
+	--url) URL="$2"; shift 2 ;;
+	--issue) ISSUE="$2"; shift 2 ;;
+	--pr) PR="$2"; shift 2 ;;
+	--body) BODY="$2"; shift 2 ;;
+	--file) FILE="$2"; shift 2 ;;
+	--project) PROJECT="$2"; shift 2 ;;
+	--repo) REPO="$2"; shift 2 ;;
+	--dry-run) DRY_RUN=1; shift ;;
+	*)
+		echo "harness-notify: 不明な引数 $1" >&2
+		exit 2
+		;;
+	esac
+done
+
+case "$EVENT" in
+interview) LABEL="要件確認"; ICON="🟡"; COLOR=15844367; ACTION=1 ;;
+merge-request) LABEL="マージ承認依頼"; ICON="🟢"; COLOR=3066993; ACTION=1 ;;
+blocked) LABEL="要対応"; ICON="🔴"; COLOR=15158332; ACTION=1 ;;
+ci-red) LABEL="CI失敗"; ICON="🟠"; COLOR=15105570; ACTION=0 ;;
+merged) LABEL="マージ完了"; ICON="🔵"; COLOR=3447003; ACTION=0 ;;
+started) LABEL="着手"; ICON="▶️"; COLOR=5793266; ACTION=0 ;;
+info) LABEL="お知らせ"; ICON="ℹ️"; COLOR=10070709; ACTION=0 ;;
+*)
+	echo "harness-notify: --event が不正です（$EVENT）" >&2
+	exit 2
+	;;
+esac
+
+if [ -z "$TITLE" ] || [ -z "$URL" ]; then
+	echo "harness-notify: --title と --url は必須です（リンク無しの通知は送らない）" >&2
+	exit 2
+fi
+
+# --- プロジェクト識別 ---------------------------------------------------------
+if [ -z "$REPO" ]; then
+	REPO="$(cfg '.repo')"
+fi
+if [ -z "$REPO" ]; then
+	# origin が https / ssh / ローカルプロキシのいずれでも末尾2セグメントが owner/repo になる。
+	remote="$(git remote get-url origin 2>/dev/null || true)"
+	remote="${remote%.git}"
+	remote="${remote#*:}"
+	REPO="$(printf '%s' "$remote" | awk -F/ 'NF>=2 {print $(NF-1)"/"$NF}')"
+fi
+if [ -z "$PROJECT" ]; then
+	PROJECT="$(cfg '.project')"
+fi
+PROJECT="${PROJECT:-${REPO#*/}}"
+PROJECT="${PROJECT:-unknown-project}"
+REPO_URL=""
+[ -n "$REPO" ] && REPO_URL="https://github.com/$REPO"
+
+ISSUE_URL="" PR_URL=""
+[ -n "$ISSUE" ] && [ -n "$REPO_URL" ] && ISSUE_URL="$REPO_URL/issues/$ISSUE"
+[ -n "$PR" ] && [ -n "$REPO_URL" ] && PR_URL="$REPO_URL/pull/$PR"
+
+HEADLINE="$ICON $LABEL｜${ISSUE:+#$ISSUE }$TITLE"
+
+# --- engine が動いていれば engine 経由で投稿する --------------------------------
+# discord-loop-engine の engine が動いているマシンでは、AI からの声を Bot に一本化する。
+# engine は台帳に A-番号で記録してから投稿するので、返事を番号で受けられ、ボードとも揃う。
+# engine が止まっているとき（や CI の中）は、これまでどおり webhook に投稿する。
+DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
+if [ "$DRY_RUN" = 0 ] && [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
+	dle_args=(notify --project "$PROJECT" --event "$EVENT" --title "$TITLE" --url "$URL")
+	[ -n "$ISSUE" ] && dle_args+=(--issue "$ISSUE")
+	[ -n "$PR" ] && dle_args+=(--pr "$PR")
+	[ -n "$BODY" ] && dle_args+=(--body "$BODY")
+	[ -n "$FILE" ] && dle_args+=(--file "$FILE")
+	set +e
+	"$SCRIPT_DIR/dle" "${dle_args[@]}" >/dev/null
+	rc=$?
+	set -e
+	if [ "$rc" = 0 ]; then
+		echo "harness-notify: engine 経由で Discord へ投稿しました（[$PROJECT] $LABEL）。" >&2
+		exit 0
+	fi
+	if [ "$rc" != 3 ]; then
+		echo "harness-notify: engine 経由の投稿に失敗しました（exit $rc）。" >&2
+		exit 4
+	fi
+	echo "harness-notify: engine に繋がらないため webhook で投稿します。" >&2
+fi
+
+# --- payload 組み立て --------------------------------------------------------
+# content はスマホのプッシュ通知に出る部分なので、プロジェクト名と種別を先頭に置く。
+# URL を <> で囲むのは、Discord の自動プレビューで embed が二重に出るのを防ぐため。
+CONTENT="**[$PROJECT]** $HEADLINE"
+if [ "$ACTION" = 1 ]; then
+	CONTENT="$CONTENT
+👉 リンク先で内容を確認して返信してください"
+fi
+CONTENT="$CONTENT
+<$URL>"
+
+payload_json="$(jq -nc \
+	--arg username "$PROJECT" \
+	--arg content "$CONTENT" \
+	--arg project "$PROJECT" \
+	--arg repo_url "$REPO_URL" \
+	--arg title "$HEADLINE" \
+	--arg url "$URL" \
+	--arg body "$BODY" \
+	--arg issue_url "$ISSUE_URL" \
+	--arg issue "$ISSUE" \
+	--arg pr_url "$PR_URL" \
+	--arg pr "$PR" \
+	--arg event "$EVENT" \
+	--argjson color "$COLOR" \
+	--arg ts "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+	'{
+		username: $username,
+		content: $content,
+		allowed_mentions: {parse: []},
+		embeds: [
+			({
+				author: ({name: $project} + (if $repo_url != "" then {url: $repo_url} else {} end)),
+				title: ($title | .[0:256]),
+				url: $url,
+				color: $color,
+				footer: {text: ("discord-loop-engine · " + $event)},
+				timestamp: $ts,
+				fields: (
+					[]
+					+ (if $issue_url != "" then [{name: "Issue", value: ("[#" + $issue + "](" + $issue_url + ")"), inline: true}] else [] end)
+					+ (if $pr_url != "" then [{name: "PR", value: ("[#" + $pr + "](" + $pr_url + ")"), inline: true}] else [] end)
+				)
+			} + (if $body != "" then {description: ($body | .[0:3500])} else {} end))
+		]
+	}')"
+
+if [ "$DRY_RUN" = 1 ]; then
+	printf '%s\n' "$payload_json"
+	[ -n "$FILE" ] && echo "harness-notify: (dry-run) 添付: $FILE" >&2
+	exit 0
+fi
+
+# --- webhook URL の解決 -------------------------------------------------------
+WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
+if [ -z "$WEBHOOK_URL" ]; then
+	ROOT="$("$SCRIPT_DIR/harness-config" --root 2>/dev/null || pwd)"
+	env_files="$(cfg '.notify.envFiles[]?')"
+	[ -z "$env_files" ] && env_files=".env"
+	while IFS= read -r rel; do
+		[ -z "$rel" ] && continue
+		f="$ROOT/$rel"
+		[ -f "$f" ] || continue
+		line="$(grep -E '^[[:space:]]*DISCORD_WEBHOOK_URL[[:space:]]*=' "$f" | tail -n 1 || true)"
+		if [ -n "$line" ]; then
+			WEBHOOK_URL="${line#*=}"
+			WEBHOOK_URL="${WEBHOOK_URL//[[:space:]]/}"
+			WEBHOOK_URL="${WEBHOOK_URL%\"}"
+			WEBHOOK_URL="${WEBHOOK_URL#\"}"
+			WEBHOOK_URL="${WEBHOOK_URL%\'}"
+			WEBHOOK_URL="${WEBHOOK_URL#\'}"
+			break
+		fi
+	done <<<"$env_files"
+fi
+
+if [ -z "$WEBHOOK_URL" ]; then
+	required="$(cfg '.notify.required')"
+	if [ "$required" = "false" ]; then
+		echo "harness-notify: DISCORD_WEBHOOK_URL 未設定のため skip（notify.required=false）" >&2
+		exit 0
+	fi
+	echo "harness-notify: DISCORD_WEBHOOK_URL が未設定です。通知は必須のため失敗扱いにします（exit 3）。" >&2
+	echo "  環境変数 DISCORD_WEBHOOK_URL か、harness.json の notify.envFiles に挙げた .env に設定してください。" >&2
+	exit 3
+fi
+
+# --- 添付（存在 & 上限以下のみ） ----------------------------------------------
+MAX_MB="$(cfg '.notify.maxAttachMB')"
+MAX_MB="${MAX_MB:-10}"
+attach=""
+if [ -n "$FILE" ]; then
+	if [ ! -s "$FILE" ]; then
+		echo "harness-notify: 添付ファイルが無いか空です（$FILE）。本文のみ投稿します。" >&2
+	else
+		size="$(stat -c%s "$FILE" 2>/dev/null || stat -f%z "$FILE" 2>/dev/null || echo 0)"
+		if [ "$size" -gt $((MAX_MB * 1024 * 1024)) ]; then
+			echo "harness-notify: 添付が ${MAX_MB}MB を超えるため添付しません。本文のみ投稿します。" >&2
+		else
+			attach="$FILE"
+		fi
+	fi
+fi
+
+# --- 投稿 ---------------------------------------------------------------------
+# ?wait=true で Discord が作成したメッセージを返させ、「本当に投稿されたか」を確認する。
+args=(-sS -f --retry 2 --retry-delay 2 -o /dev/null -w '%{http_code}' -F "payload_json=$payload_json")
+[ -n "$attach" ] && args+=(-F "files[0]=@$attach")
+if ! code="$(curl "${args[@]}" "${WEBHOOK_URL}?wait=true" 2>/dev/null)"; then
+	echo "harness-notify: Discord への投稿に失敗しました（HTTP ${code:-???}）。" >&2
+	exit 4
+fi
+echo "harness-notify: Discord へ投稿しました（[$PROJECT] $LABEL${attach:+ / 添付 $(basename "$attach")}）。" >&2

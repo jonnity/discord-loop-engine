@@ -1,0 +1,6 @@
+{"comments":[
+ {"author":{"login":"jonnity"},"body":"古いコメント","createdAt":"2026-10-01T00:00:00Z","url":"u0"},
+ {"author":{"login":"jonnity"},"body":"Q1. どっち?\n<!-- harness:gate phase=interview issue=3 -->","createdAt":"2026-10-02T00:00:00Z","url":"u1"},
+ {"author":{"login":"stranger"},"body":"Aで!","createdAt":"2026-10-02T01:00:00Z","url":"u2"},
+ {"author":{"login":"jonnity"},"body":"Bでお願いします","createdAt":"2026-10-02T02:00:00Z","url":"u3"}
+]}
