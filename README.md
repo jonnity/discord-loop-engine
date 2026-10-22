@@ -22,50 +22,132 @@ Discord 共通チャンネル ── Bot ──▶ engine（ローカル常駐�
 - **自己改善**: うまくいかなかったことを記録 → 振り返り → 仮ルール（すぐ効く）→ 正式な改善 PR（あなたの OK が要る）
 - **マージには必ずあなたの OK が要る**
 
-## 必要なもの
-
-Linux か WSL2。Node 24 LTS（24.22.1 以上。22 系なら 22.23.4 以上。2026-10-21 のセキュリティ修正が入っていない版では engine が起動しない）、tmux、git、jq、[GitHub CLI](https://cli.github.com/)（`gh auth login` 済み）、
-Claude Code、Codex CLI。`dle doctor` でまとめて確認できます。
-
 ## セットアップ
 
-### 1. Discord の Bot を作る
+main を clone して、下の順に進めれば使えます。engine は実行時に npm のパッケージを使わないので、
+`npm install` は要りません（開発するときだけ必要）。所要時間は 20〜30 分ほどです。
 
-1. [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Bot → Reset Token でトークンを控える
-2. Bot → Privileged Gateway Intents → **Message Content Intent** を有効にする
-3. OAuth2 → URL Generator: scope `bot`、権限 View Channels / Send Messages / Send Messages in Threads /
-   Read Message History / Add Reactions / Attach Files / Manage Messages（ボードのピン留め）→ 生成した URL で招待する
-4. Discord の設定 → 詳細設定 → 開発者モードを有効にし、共通チャンネルの ID と自分のユーザー ID をコピーする
+### 1. 必要なものを入れる（Linux か WSL2）
 
-### 2. engine を入れる
+| もの | 入れ方の例 | 確認 |
+|---|---|---|
+| Node 24 LTS（**24.22.1 以上**） | `fnm install 24 && fnm default 24`（nvm でも可） | `node -v` |
+| tmux・git・jq | `sudo apt install -y tmux git jq` | `tmux -V` |
+| GitHub CLI | [cli.github.com](https://cli.github.com/) の手順 → `gh auth login` | `gh auth status` |
+| Claude Code | [公式の手順](https://code.claude.com/docs) → `claude` を一度起動してログイン | `claude --version` |
+| Codex CLI | 公式の手順 → `codex` を一度起動してログイン | `codex --version` |
+
+Node は 2026-10-21 のセキュリティ修正が入った版（24.22.1 / 22.23.4 / 26.12.1 以上）でないと engine が起動しません。
+
+### 2. Discord の Bot を作る
+
+1. [Discord Developer Portal](https://discord.com/developers/applications) → New Application → Bot → **Reset Token** でトークンを控える
+2. 同じ画面の Privileged Gateway Intents で **Message Content Intent** を有効にする
+3. OAuth2 → URL Generator: scope に `bot`、権限に View Channels / Send Messages / Send Messages in Threads /
+   Read Message History / Add Reactions / Attach Files / Manage Messages（ボードのピン留め）を選び、
+   生成した URL を開いて、共通チャンネルのあるサーバーに招待する
+4. Discord の設定 → 詳細設定 → **開発者モード**を有効にし、共通チャンネルを右クリック → 「チャンネル ID をコピー」、
+   自分のアイコンを右クリック → 「ユーザー ID をコピー」
+
+Bot はメッセージを中継するだけです。サーバーは要らず、手元の engine が Discord に繋ぎに行きます。
+
+### 3. engine を置く
 
 ```bash
 git clone https://github.com/jonnity/discord-loop-engine ~/discord-loop-engine
-ln -s ~/discord-loop-engine/bin/dle ~/.local/bin/dle   # PATH の通った場所に
-dle init        # ~/.discord-loop-engine/config.json と .env の雛形を作る
+mkdir -p ~/.local/bin && ln -sf ~/discord-loop-engine/bin/dle ~/.local/bin/dle
+dle init
 ```
 
-`config.json` の `channelIds`・`allowedUserIds` を埋め、`.env` に `DISCORD_BOT_TOKEN=...` を書きます。
+`~/.local/bin` が PATH に無ければ、`~/.bashrc` に `export PATH="$HOME/.local/bin:$PATH"` を足してください。
 
-### 3. Claude Code にプラグインを入れる
+`dle init` が作った2つのファイルを埋めます（どちらも本人だけが読める権限で作られます）。
 
+```jsonc
+// ~/.discord-loop-engine/config.json
+{
+	"channelIds": ["<共通チャンネルの ID>"],
+	"allowedUserIds": ["<自分のユーザー ID>"],
+	"workspaceDir": "~/dle/workspaces",   // dle add owner/repo の clone 先
+	"concierge": { "model": "sonnet" },
+	"worker": { "model": null, "extraArgs": [] }
+	// 残りの項目は既定のままで良い（「設定」の表を参照）
+}
 ```
-/plugin marketplace add jonnity/discord-loop-engine
-/plugin install discord-loop-engine@discord-loop-engine
-```
-
-### 4. 起動してリポジトリを追加する
 
 ```bash
-dle doctor
-dle up                              # tmux の dle セッションで常駐
-dle add jonnity/kishimen-tool       # ~/dle/workspaces/ に clone（パスを渡せば既存の場所を使う）
+# ~/.discord-loop-engine/.env
+DISCORD_BOT_TOKEN=<控えたトークン>
 ```
 
-窓口に「kishimen-tool もやって」と話しかけても追加できます。初回だけ `tmux attach -t dle` で各ウィンドウを開き、
-フォルダの信頼と MCP サーバーの承認に答えてください（開発用 channel の警告には engine が自動で答えます）。
+### 4. Claude Code にプラグインを入れる
 
-`.claude/harness.json` が無いリポジトリは、最初のタスクが「ハーネスの導入」になります（その PR もあなたの OK 待ち）。
+ターミナルで（Claude Code の中なら `/plugin marketplace add …` と `/plugin install …`）:
+
+```bash
+claude plugin marketplace add jonnity/discord-loop-engine
+claude plugin install discord-loop-engine@discord-loop-engine
+```
+
+ユーザー単位で入ります。窓口と worker は engine がこのプラグインを付けて起動します。
+
+### 5. 確認して起動する
+
+```bash
+dle doctor   # すべて ✅ になるまで直す
+dle up       # tmux の dle セッションで engine が常駐し、15 秒ほどで窓口が立ち上がる
+```
+
+**最初の1回だけ**、窓口の画面で確認に答えます。
+
+```bash
+tmux attach -t dle        # Ctrl-b w でウィンドウ一覧 → dle-concierge を選ぶ
+```
+
+- 「Is this a project you created or one you trust?」→ **Yes, I trust this folder**
+- MCP サーバーの承認が出たら → 使う、を選ぶ
+- 「Loading development channels」の警告には engine が自動で答えます
+
+`Ctrl-b d` で tmux から抜けても動き続けます。Discord に窓口から「窓口を起動しました」と届けば準備完了です。
+
+### 6. リポジトリを追加する
+
+```bash
+dle add jonnity/kishimen-tool     # ~/dle/workspaces/kishimen-tool に clone
+dle add ~/src/oogiri-doc          # 既存の場所を使う
+```
+
+Discord で窓口に「kishimen-tool もやって」と頼んでも同じです。追加すると worker が起動するので、
+5. と同じように `dle-<プロジェクト名>` のウィンドウで、最初の1回だけフォルダの信頼に答えてください。
+
+**リポジトリ側の準備**:
+
+- `.claude/harness.json` が無いリポジトリは、最初のタスクが「ハーネスの導入」になります。worker が導入の PR を作り、
+  あなたの OK（A-番号）を待ちます
+- CI の結果（マージ完了・CI 失敗）も Discord に流したい場合は、そのリポジトリの Settings → Secrets and variables →
+  Actions に **`DISCORD_WEBHOOK_URL`**（共通チャンネルの webhook。チャンネルの設定 → 連携サービス → ウェブフック で作る）を登録します。
+  通知用のワークフローはハーネスの導入 PR に入っています
+- worker は無人で動くので、そのリポジトリでよく使うコマンド（テスト・ビルドなど）を `.claude/settings.json` の
+  `permissions.allow` に入れておくと、許可の確認で止まりにくくなります（止まったときは Discord に知らせが来ます）
+
+### 更新する
+
+```bash
+git -C ~/discord-loop-engine pull
+claude plugin marketplace update discord-loop-engine
+claude plugin update discord-loop-engine@discord-loop-engine
+dle down && dle up
+```
+
+### うまく動かないとき
+
+| 症状 | 見るところ |
+|---|---|
+| Discord に何も届かない | `dle status` の Discord 欄。`close 4014` なら Message Content Intent が無効、`トークンが無効` なら .env |
+| 「セッションが engine に繋がっていません」と届く | `tmux attach -t dle` で該当ウィンドウを開き、表示されている確認に答える |
+| 「許可の確認で止まっています」と届く | 同じく tmux で答える。よく出るものは、そのリポジトリの `permissions.allow` に足す |
+| 窓口が返事をしない | `dle restart concierge`。台帳は残っているので続きから再開する |
+| `dle start` が「起動を止めました」で止まる | Node を 24.22.1 以上に上げる |
 
 ## 使い方
 

@@ -22,7 +22,7 @@ jobs:
     if: github.event_name == 'pull_request' && github.event.pull_request.merged == true
     runs-on: ubuntu-24.04
     steps:
-      - uses: jonnity/discord-loop-engine/.github/actions/discord-notify@v1
+      - uses: jonnity/discord-loop-engine/.github/actions/discord-notify@main
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
           event: merged
@@ -35,7 +35,7 @@ jobs:
     if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion == 'failure'
     runs-on: ubuntu-24.04
     steps:
-      - uses: jonnity/discord-loop-engine/.github/actions/discord-notify@v1
+      - uses: jonnity/discord-loop-engine/.github/actions/discord-notify@main
         with:
           webhook-url: ${{ secrets.DISCORD_WEBHOOK_URL }}
           event: ci-red
