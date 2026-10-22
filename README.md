@@ -7,17 +7,20 @@
 ```
 Discord 共通チャンネル ── Bot ──▶ engine（ローカル常駐）──▶ 窓口（Sonnet・あなたと話すのはここだけ）
         ▲                          │  タスク台帳（ファイル）       │ 依頼・回答
-        │ A-番号の依頼・ボード        └──────────────▶ worker: kishimen-tool（issue-loop ＋ Codex）
-        │                                           worker: oogiri-doc
-        └── CI の結果（GitHub Actions の webhook）
+          A-番号の依頼・ボード        └──────────────▶ worker: kishimen-tool（issue-loop ＋ Codex）
+          CI 失敗・マージ完了         │  CI の監視（gh）            worker: oogiri-doc（リポジトリ独自のループ）
 ```
+
+**対象のリポジトリには何も置きません。** `dle add` するだけで、worker がリポジトリを調べて進め方の案を出し、
+あなたの OK をもらってから回り始めます。設定は engine 側（`~/.discord-loop-engine/projects/`）に保存されます。
 
 - **窓口（concierge）**: 依頼を Issue とタスクにして worker に振る。状況に答える。あなた待ち（A-番号）を管理する。
   コードは書かず、マージもしない。迷ったら相談役の **advisor（Opus）** に聞く
 - **worker**: リポジトリごとに1つ。`issue-loop` で Issue を進める（設計・実装は Codex を tmux で、レビューは Claude）。
+  既に独自のループを持つリポジトリ（oogiri-doc の `/parallel-cycle-loop` など）は、そのループをそのまま使う（native モード）。
   あなたとは直接話さない
 - **engine**: Discord との接続（Bot は中継だけ）、窓口と worker の起動・再起動、台帳の記録、
-  人の判断が要る報告への A-番号付けと投稿、ボードの更新
+  人の判断が要る報告への A-番号付けと投稿、ボードの更新、各リポジトリの CI の監視とマージ完了の通知
 - **タスク台帳**: `~/.discord-loop-engine/` の Markdown / JSON。窓口がやり直しても、マシンを再起動しても続きが分かる
 - **自己改善**: うまくいかなかったことを記録 → 振り返り → 仮ルール（すぐ効く）→ 正式な改善 PR（あなたの OK が要る）
 - **マージには必ずあなたの OK が要る**
@@ -114,21 +117,39 @@ tmux attach -t dle        # Ctrl-b w でウィンドウ一覧 → dle-concierge 
 
 ```bash
 dle add jonnity/kishimen-tool     # ~/dle/workspaces/kishimen-tool に clone
-dle add ~/src/oogiri-doc          # 既存の場所を使う
+dle add ~/src/kishimen-tool       # 既存の場所を使う
 ```
 
 Discord で窓口に「kishimen-tool もやって」と頼んでも同じです。追加すると worker が起動するので、
 5. と同じように `dle-<プロジェクト名>` のウィンドウで、最初の1回だけフォルダの信頼に答えてください。
 
-**リポジトリ側の準備**:
+追加したあとの流れ:
 
-- `.claude/harness.json` が無いリポジトリは、最初のタスクが「ハーネスの導入」になります。worker が導入の PR を作り、
-  あなたの OK（A-番号）を待ちます
-- CI の結果（マージ完了・CI 失敗）も Discord に流したい場合は、そのリポジトリの Settings → Secrets and variables →
-  Actions に **`DISCORD_WEBHOOK_URL`**（共通チャンネルの webhook。チャンネルの設定 → 連携サービス → ウェブフック で作る）を登録します。
-  通知用のワークフローはハーネスの導入 PR に入っています
-- worker は無人で動くので、そのリポジトリでよく使うコマンド（テスト・ビルドなど）を `.claude/settings.json` の
-  `permissions.allow` に入れておくと、許可の確認で止まりにくくなります（止まったときは Discord に知らせが来ます）
+1. engine が `harness:*` ラベルを作り、作業用のディレクトリ（`.harness/`・`.worktrees/`）を
+   `.git/info/exclude`（コミットされない除外設定）に足す。リポジトリのファイルは変えない
+2. worker がリポジトリを調べ（CI・テストのコマンド・規約・UI の有無・実機でしか確かめられないこと）、
+   **「⚙️ A-1 設定の確認」** を出す
+3. 「A-1 OK」と返すと設定が確定し、ループが始まる。設定は `~/.discord-loop-engine/projects/<名前>/harness.json`
+
+**リポジトリ側の準備は要りません。** CI の失敗とマージ完了は engine が `gh` で見て Discord に知らせるので、
+通知用のワークフローや Secrets も不要です。チームで設定を共有したいときだけ、同じ内容をリポジトリの
+`.claude/harness.json` に置けば、そちらが優先されます。
+
+### 独自のループを持つリポジトリ（native モード）
+
+oogiri-doc のように、Issue を拾ってマージ承認まで自分で回す仕組みを既に持っているリポジトリは、
+その仕組みをそのまま使います。ハーネスの設定もガードも適用しません。
+
+```bash
+# oogiri-doc: /parallel-cycle-loop で回し、そのスクリプトが前提にしている tmux セッション「dev」で起動する
+dle add /workspace --native /parallel-cycle-loop --tmux-session dev --name oogiri-doc
+```
+
+- リポジトリの手順・通知（`scripts/notify-discord.sh` など）・権限の設定はそのまま使われます
+- 窓口からの依頼や A-番号への回答は、ユーザーからの指示として worker に届きます
+- oogiri-doc のスキルは `/workspace` にあることを前提にしているので、engine もそのリポジトリと同じ環境
+  （devcontainer の中など）で動かしてください
+- `--native` を付けずに追加しても、worker が独自のループを見つければ native を提案してきます
 
 ### 更新する
 
@@ -147,6 +168,7 @@ dle down && dle up
 | 「セッションが engine に繋がっていません」と届く | `tmux attach -t dle` で該当ウィンドウを開き、表示されている確認に答える |
 | 「許可の確認で止まっています」と届く | 同じく tmux で答える。よく出るものは、そのリポジトリの `permissions.allow` に足す |
 | 窓口が返事をしない | `dle restart concierge`。台帳は残っているので続きから再開する |
+| 設定を見直したい | `~/.discord-loop-engine/projects/<名前>/harness.json` を直して `dle restart <名前>`。窓口に「kishimen-tool の設定を見直して」と頼んでもよい |
 
 ## 使い方
 
@@ -167,7 +189,7 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 |---|---|
 | `dle up` / `dle down` | 常駐の開始・停止（窓口と worker のセッションは止めない） |
 | `dle status` | engine・Discord・セッションの状態とボード |
-| `dle add <owner/repo またはパス>` | リポジトリを登録（worker が自動で起動） |
+| `dle add <owner/repo またはパス> [--native <コマンド>] [--tmux-session <名前>] [--name <名前>]` | リポジトリを登録（worker が自動で起動） |
 | `dle tasks [--all]` / `dle attention` / `dle board` | 台帳を見る |
 | `dle restart <concierge またはプロジェクト名>` | セッションを起動し直す |
 | `dle doctor` | 必要なものが揃っているか |
@@ -195,6 +217,7 @@ board.md               ボード
 journal/2026-10-22.md  起きたことの時系列
 learnings/             自己改善（failures.jsonl・rules.md）
 outbox/                起動していないセッション宛ての指示（起動したら渡す）
+projects/<名前>/       プロジェクトごとの設定（harness.json）と確認待ちの案
 ```
 
 ## 注意

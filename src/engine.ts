@@ -4,12 +4,13 @@
 //   （LLM の判断を挟まないので、通知の漏れが起きない）
 // - 窓口からの指示・回答は、worker がいなければ outbox に積み、起動したら渡す（忘れない）
 
-import { chmodSync, existsSync, mkdirSync, unlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import net, { type Socket } from "node:net";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import { type AttentionKind, KIND_LABEL, Ledger, TASK_STATUSES, type Task, type TaskStatus } from "./ledger.ts";
-import { run as defaultRun, type Run, resolveProject, sessionTargets } from "./projects.ts";
+import { run as defaultRun, type Run, registerProject, sessionTargets } from "./projects.ts";
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
 import type { DiscordApi } from "./rest.ts";
 import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
@@ -39,6 +40,11 @@ const GATE_EVENTS: Record<string, { kind: AttentionKind; icon: string; how: (id:
 		how: (id) => `👉 よければ「${id} OK」、直してほしい点があれば「${id} NG: …」と返信してください`,
 	},
 	blocked: { kind: "blocked", icon: "🔴", how: (id) => `👉 「${id} …」で指示してください` },
+	setup: {
+		kind: "setup",
+		icon: "⚙️",
+		how: (id) => `👉 この設定で始めてよければ「${id} OK」、直してほしい点があれば「${id} NG: …」と返信してください`,
+	},
 };
 
 const PHASE_STATUS: Record<string, TaskStatus> = {
@@ -114,7 +120,7 @@ export class Engine {
 	}
 
 	targets() {
-		return sessionTargets(this.config, this.ledger.projects());
+		return sessionTargets(this.config, this.ledger.projects(), this.ledger);
 	}
 
 	async start() {
@@ -354,7 +360,12 @@ export class Engine {
 			case "board_show":
 				return this.ledger.renderBoard();
 			case "projects_list":
-				return this.ledger.projects().map((p) => ({ ...p, live: this.sessions.has(p.name) }));
+				return this.ledger.projects().map((p) => ({
+					...p,
+					live: this.sessions.has(p.name),
+					ready: this.ledger.isReady(p),
+					profile: this.ledger.effectiveProfilePath(p),
+				}));
 			case "rules_get":
 				return this.ledger.rules();
 			case "learning_add": {
@@ -423,26 +434,20 @@ export class Engine {
 			}
 			case "project_add": {
 				conciergeOnly();
-				const p = await resolveProject(str(a.spec), this.config, this.exec);
-				const saved = this.ledger.upsertProject(p);
-				this.ledger.journal(`[${p.name}] プロジェクトを登録（${p.repo} / ${p.path}）`);
-				if (
-					p.needsInit &&
-					!this.ledger
-						.tasks()
-						.some((t) => t.project === p.name && t.title.includes("ハーネスの導入") && t.status !== "done")
-				) {
-					this.ledger.createTask({
-						project: p.name,
-						title: "ハーネスの導入（harness-init）",
-						status: "queued",
-						next: ".claude/harness.json などを用意する PR を作り、OK をもらう",
-						note: "harness.json が無いため導入から始める",
-					});
-				}
+				const r = await registerProject(
+					this.ledger,
+					this.config,
+					str(a.spec),
+					{
+						native: str(a.native) || undefined,
+						tmuxSession: str(a.tmux_session) || undefined,
+						name: str(a.name) || undefined,
+					},
+					this.exec,
+				);
 				this.scheduleBoard();
 				this.supervisor?.tick().catch(() => {});
-				return saved;
+				return r;
 			}
 			case "project_set_active": {
 				conciergeOnly();
@@ -482,6 +487,45 @@ export class Engine {
 			}
 			case "report":
 				return this.report(who, a);
+			case "profile_propose":
+				return this.proposeProfile(who, a);
+			case "profile_template": {
+				// プラグインのキャッシュは worker の作業ディレクトリの外にあり、読むと許可の確認で止まるため、engine が渡す
+				const dir = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "templates");
+				const examples: Record<string, unknown> = {};
+				const exDir = path.join(dir, "examples");
+				for (const f of existsSync(exDir) ? readdirSync(exDir).filter((x) => x.endsWith(".json")) : []) {
+					examples[f.replace(/\.json$/, "")] = JSON.parse(readFileSync(path.join(exDir, f), "utf8"));
+				}
+				return { template: JSON.parse(readFileSync(path.join(dir, "profile.example.json"), "utf8")), examples };
+			}
+			case "profile_get": {
+				const name = who.role === "worker" ? who.name : str(a.project);
+				const p = this.ledger.projects().find((x) => x.name === name);
+				if (!p) throw new Error(`プロジェクト ${name} は登録されていません`);
+				return {
+					project: p,
+					path: this.ledger.effectiveProfilePath(p),
+					profile: this.ledger.profile(p),
+					draft: this.ledger.draft(name),
+				};
+			}
+			case "profile_activate": {
+				const name = who.role === "worker" ? who.name : str(a.project);
+				const p = this.ledger.activateDraft(name);
+				const task = this.ledger
+					.tasks()
+					.find((t) => t.project === name && t.title.startsWith("プロジェクトの調査") && t.status !== "done");
+				if (task) this.ledger.updateTask(task.id, { status: "done", waiting: "" }, `設定を確定（${p.mode}）`);
+				this.scheduleBoard();
+				return {
+					project: p,
+					note:
+						p.mode === "native"
+							? `以後は ${p.initialPrompt} で進める`
+							: "以後は /discord-loop-engine:issue-loop で進める。permissions は次の起動（dle restart）から反映される",
+				};
+			}
 			case "notify":
 				return this.notify(who, a);
 			case "restart": {
@@ -492,6 +536,102 @@ export class Engine {
 			default:
 				throw new Error(`unknown tool: ${name}`);
 		}
+	}
+
+	/** 人の判断が要る依頼を A-番号付きで台帳に記録し、Bot で投稿し、窓口に知らせる */
+	private async openGate(
+		project: string,
+		gate: (typeof GATE_EVENTS)[string],
+		o: { task: Task | null; issue: string; pr: string; title: string; url: string; body: string; file?: string },
+	) {
+		const { task, issue, pr, title, url, body } = o;
+		const att = this.ledger.addAttention({
+			taskId: task?.id ?? "",
+			project,
+			issue,
+			pr,
+			kind: gate.kind,
+			title,
+			url,
+			summary: body,
+		});
+		const label = KIND_LABEL[gate.kind];
+		const text = [
+			`${gate.icon} ${att.id} ${label}｜${issue ? `#${issue} ` : ""}${title}`,
+			body || null,
+			gate.how(att.id),
+			url ? `<${url}>` : null,
+		]
+			.filter(Boolean)
+			.join("\n");
+		const messageId = await this.post(project, text, { files: o.file && existsSync(o.file) ? [o.file] : [] });
+		if (messageId) this.ledger.setAttentionMessage(att.id, messageId);
+		if (task) {
+			this.ledger.updateTask(
+				task.id,
+				{ status: "waiting-human", waiting: `${att.id} ${label}${pr ? `（PR #${pr}）` : ""}`, ...(pr ? { pr } : {}) },
+				`${att.id} ${label}を依頼`,
+			);
+		}
+		this.deliver(
+			"concierge",
+			`[${project}] ${att.id} ${label}を Discord に出しました${task ? `（${task.id}）` : ""}。あなたから重ねて投稿する必要はありません。`,
+			{ kind: "notice", attention: att.id, project },
+		);
+		this.scheduleBoard();
+		return { attention: att.id, message_id: messageId };
+	}
+
+	/** worker の調査結果（設定の案）を受け取り、A-番号で確認を求める */
+	private async proposeProfile(who: Pick<Session, "role" | "name">, a: Record<string, unknown>) {
+		const project = who.role === "worker" ? who.name : str(a.project);
+		const p = this.ledger.projects().find((x) => x.name === project);
+		if (!p) throw new Error(`プロジェクト ${project} は登録されていません`);
+		const mode = str(a.mode) === "native" ? "native" : "harness";
+		let profile: Record<string, unknown> | undefined;
+		if (mode === "harness") {
+			profile = (typeof a.profile === "string" ? JSON.parse(a.profile) : a.profile) as
+				| Record<string, unknown>
+				| undefined;
+			const gate = profile?.gate;
+			if (
+				!Array.isArray(gate) ||
+				gate.length === 0 ||
+				!gate.every((g) => typeof g?.name === "string" && typeof g?.run === "string")
+			) {
+				throw new Error(
+					'profile.gate に [{ "name": ..., "run": ... }] を1つ以上入れてください（CI と同じ検査を同じ順で）',
+				);
+			}
+		} else if (!str(a.initial_prompt)) {
+			throw new Error("native では initial_prompt（そのリポジトリのループを始めるコマンド）が必要です");
+		}
+		const summary = str(a.summary);
+		const task =
+			this.ledger
+				.tasks()
+				.find((t) => t.project === project && t.title.startsWith("プロジェクトの調査") && t.status !== "done") ?? null;
+		this.ledger.saveDraft(project, {
+			mode,
+			...(profile ? { profile } : {}),
+			...(mode === "native"
+				? { initialPrompt: str(a.initial_prompt), tmuxSession: str(a.tmux_session) || undefined }
+				: {}),
+			summary,
+			proposedAt: new Date().toISOString(),
+		});
+		const draftView =
+			mode === "harness"
+				? `検査（PR 前に CI と同じ順で）:\n${(profile?.gate as { name: string; run: string }[]).map((g) => `- ${g.name}: \`${g.run}\``).join("\n")}`
+				: `このリポジトリ独自のループで進めます: \`${str(a.initial_prompt)}\``;
+		return this.openGate(project, GATE_EVENTS.setup as (typeof GATE_EVENTS)[string], {
+			task,
+			issue: "",
+			pr: "",
+			title: `${project} の設定`,
+			url: `https://github.com/${p.repo}`,
+			body: [summary, draftView].filter(Boolean).join("\n"),
+		});
 	}
 
 	/** harness-notify（harness-phase）から。人の判断が要る通知は A-番号を付けて投稿する */
@@ -508,46 +648,7 @@ export class Engine {
 		const task = issue ? this.ledger.ensureTaskForIssue(project, issue, title) : null;
 
 		if (gate) {
-			const att = this.ledger.addAttention({
-				taskId: task?.id ?? "",
-				project,
-				issue,
-				pr,
-				kind: gate.kind,
-				title,
-				url,
-				summary: body,
-			});
-			const label = KIND_LABEL[gate.kind];
-			const text = [
-				`${gate.icon} ${att.id} ${label}｜${issue ? `#${issue} ` : ""}${title}`,
-				body || null,
-				gate.how(att.id),
-				url ? `<${url}>` : null,
-			]
-				.filter(Boolean)
-				.join("\n");
-			const file = str(a.file);
-			const messageId = await this.post(project, text, { files: file && existsSync(file) ? [file] : [] });
-			if (messageId) this.ledger.setAttentionMessage(att.id, messageId);
-			if (task) {
-				this.ledger.updateTask(
-					task.id,
-					{ status: "waiting-human", waiting: `${att.id} ${label}${pr ? `（PR #${pr}）` : ""}`, ...(pr ? { pr } : {}) },
-					`${att.id} ${label}を依頼`,
-				);
-			}
-			this.deliver(
-				"concierge",
-				`[${project}] ${att.id} ${label}を Discord に出しました${task ? `（${task.id}）` : ""}。あなたから重ねて投稿する必要はありません。`,
-				{
-					kind: "notice",
-					attention: att.id,
-					project,
-				},
-			);
-			this.scheduleBoard();
-			return { attention: att.id, message_id: messageId };
+			return this.openGate(project, gate, { task, issue, pr, title, url, body, file: str(a.file) });
 		}
 
 		if (event === "phase") {
@@ -561,6 +662,14 @@ export class Engine {
 				);
 				if (status === "done") this.onTaskDone(t);
 				else if (status === "ai-working") this.ledger.resolveAttentionForTask(task.id, "（作業再開）");
+			}
+			// マージ完了は CI の webhook ではなく engine が知らせる（リポジトリ側に通知の仕組みを置かないため）
+			if (phase === "done" && pr) {
+				const p = this.ledger.projects().find((x) => x.name === project);
+				await this.post(
+					project,
+					`🔵 マージ完了｜${issue ? `#${issue} ` : ""}${title}（PR #${pr}）${p ? `\n<https://github.com/${p.repo}/pull/${pr}>` : ""}`,
+				);
 			}
 			this.scheduleBoard();
 			return { task: task?.id ?? null };
@@ -579,7 +688,7 @@ export class Engine {
 		const taskId =
 			str(a.task_id) ||
 			(str(a.issue)
-				? this.ledger.ensureTaskForIssue(project, str(a.issue), str(a.title) || `#${str(a.issue)}`).id
+				? this.ledger.ensureTaskForIssue(project, str(a.issue), str(a.title) || "（件名は未取得）").id
 				: "");
 		if (!taskId) throw new Error("task_id か issue が必要です");
 		const patch: Partial<Task> = {};
@@ -597,7 +706,7 @@ export class Engine {
 		const a = this.ledger.resolveAttention(id, answer);
 		const label = KIND_LABEL[a.kind];
 		let delivery: string = "none";
-		if (a.kind === "interview" || a.kind === "merge" || a.kind === "blocked") {
+		if (a.kind === "interview" || a.kind === "merge" || a.kind === "blocked" || a.kind === "setup") {
 			delivery = this.deliver(
 				a.project,
 				`${a.id}（${label}${a.issue ? `・#${a.issue}` : ""}${a.pr ? `・PR #${a.pr}` : ""}）への回答が届きました（窓口経由・Discord）:\n${answer}`,
@@ -633,6 +742,82 @@ export class Engine {
 			`振り返りの時期です（前回から完了 ${st.doneSinceRetro} 件・未整理の学び ${pending} 件）。/discord-loop-engine:retrospective を実行してください。`,
 			{ kind: "retro" },
 		);
+	}
+
+	// --- CI の監視 -------------------------------------------------------------------------------
+	/**
+	 * 各リポジトリの既定ブランチの CI を見て、新しく失敗した run を Bot で知らせる。
+	 * リポジトリに通知用のワークフローや Secrets を置かずに済むよう、engine が gh で見に行く。
+	 * PR の CI は worker が自分で見て直すので、ここでは既定ブランチだけを見る。
+	 * 初めて見るリポジトリは、既にある run を「通知済み」として覚えるだけにする（過去の失敗を一度に流さない）。
+	 */
+	async ciTick() {
+		const st = this.ledger.state();
+		const seen = { ...st.ciSeen };
+		const branches = { ...st.defaultBranches };
+		let changed = false;
+		for (const p of this.ledger.projects().filter((x) => x.active && x.repo)) {
+			let branch = branches[p.name];
+			if (!branch) {
+				const r = await this.exec("gh", [
+					"repo",
+					"view",
+					p.repo,
+					"--json",
+					"defaultBranchRef",
+					"-q",
+					".defaultBranchRef.name",
+				]);
+				if (!r.ok || !r.stdout.trim()) continue;
+				branch = r.stdout.trim();
+				branches[p.name] = branch;
+				changed = true;
+			}
+			const r = await this.exec("gh", [
+				"run",
+				"list",
+				"-R",
+				p.repo,
+				"--branch",
+				branch,
+				"--limit",
+				"10",
+				"--json",
+				"databaseId,status,conclusion,workflowName,displayTitle,url",
+			]);
+			if (!r.ok) continue;
+			let runs: {
+				databaseId: number;
+				status: string;
+				conclusion: string;
+				workflowName: string;
+				displayTitle: string;
+				url: string;
+			}[];
+			try {
+				runs = JSON.parse(r.stdout);
+			} catch {
+				continue;
+			}
+			const known = seen[p.name];
+			const done = runs.filter((x) => x.status === "completed");
+			if (!known) {
+				seen[p.name] = done.map((x) => x.databaseId);
+				changed = true;
+				continue;
+			}
+			for (const run of done) {
+				if (known.includes(run.databaseId)) continue;
+				known.push(run.databaseId);
+				changed = true;
+				if (["failure", "timed_out", "startup_failure"].includes(run.conclusion)) {
+					await this.post(p.name, `🟠 CI失敗｜${run.workflowName} @ ${branch}\n${run.displayTitle}\n<${run.url}>`);
+					this.ledger.journal(`[${p.name}] CI 失敗: ${run.workflowName} @ ${branch}`);
+				}
+			}
+			seen[p.name] = known.slice(-50);
+		}
+		if (changed) this.ledger.saveState({ ciSeen: seen, defaultBranches: branches });
 	}
 
 	// --- ボード -------------------------------------------------------------------------------

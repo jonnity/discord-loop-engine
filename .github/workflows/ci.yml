@@ -28,6 +28,6 @@ jobs:
           shellcheck -S warning bin/harness-* bin/dle
           shellcheck -S warning -e SC2034 tests/harness/run.sh  # check() が eval で変数を読むため
       - name: JSON の妥当性
-        run: for f in .claude-plugin/*.json hooks/hooks.json .mcp.json templates/harness.json; do jq empty "$f"; done
+        run: for f in .claude-plugin/*.json hooks/hooks.json .mcp.json templates/profile.example.json templates/examples/*.json; do jq empty "$f"; done
       - name: テスト
         run: npm test

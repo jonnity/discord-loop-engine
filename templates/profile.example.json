@@ -1,0 +1,22 @@
+{
+	"$comment": "プロジェクトの設定の例。通常は worker が /discord-loop-engine:onboard で調べて作り、A-番号で確認を取ってから ~/.discord-loop-engine/projects/<名前>/harness.json に保存される。リポジトリの .claude/harness.json に置けばそちらが優先される。{n} は Issue 番号、{worktree} は worktree の絶対パスに置換される。",
+	"baseBranch": "main",
+	"owners": ["owner"],
+	"maxParallel": 3,
+	"worktreeRoot": ".worktrees",
+	"branchPrefix": "fix/issue-",
+	"mergeMethod": "merge",
+	"setup": ["npm ci"],
+	"gate": [{ "name": "types", "run": "npm run typecheck" }, { "name": "test", "run": "npm test" }],
+	"codex": {
+		"command": "codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox"
+	},
+	"context": ["CLAUDE.md", "AGENTS.md", "README.md"],
+	"notes": "リポジトリに規約ファイルが無いときの、このプロジェクトの決まりごと（Codex とレビュー役が読む）",
+	"permissions": ["Bash(npm:*)", "Bash(npx:*)"],
+	"demo": null,
+	"specRecordDir": null,
+	"humanChecks": [],
+	"ciTriage": null,
+	"notify": { "required": true, "envFiles": [], "maxAttachMB": 10 }
+}

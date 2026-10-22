@@ -20,7 +20,7 @@ skills/           concierge（窓口）・issue-loop / issue-cycle（worker）�
 agents/           advisor（Opus の相談役）・harness-implementer（Codex の代打）
 bin/              dle と harness-*（bash。ハーネスの入口）
 hooks/            harness-guard（入口の迂回を止める）
-templates/        利用するリポジトリに置くもの
+templates/        プロジェクト設定の例（profile.example.json・examples/）
 test/             node --test / tests/harness/run.sh（bash スクリプトのテスト）
 ```
 

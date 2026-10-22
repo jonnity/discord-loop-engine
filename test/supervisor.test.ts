@@ -141,3 +141,40 @@ test("シェルに渡す引数を安全に囲む", () => {
 	assert.equal(shq("Bash(gh issue:*)"), "'Bash(gh issue:*)'");
 	assert.equal(shq("it's"), `'it'\\''s'`);
 });
+
+test("tmuxSession を指定したセッションは、その tmux セッションで起動する（native のリポジトリが前提にしている名前）", async () => {
+	const calls: string[][] = [];
+	const sup = new Supervisor({
+		tmuxSession: "dle",
+		targets: () => [
+			{ name: "concierge", cwd: "/h/c", command: "claude --c", initialPrompt: "" },
+			{
+				name: "oogiri-doc",
+				cwd: "/w/o",
+				command: "claude --o",
+				initialPrompt: "/parallel-cycle-loop",
+				tmuxSession: "dev",
+			},
+		],
+		tmux: async (args) => {
+			calls.push(args);
+			return args[0] === "list-windows" ? { ok: false, stdout: "" } : { ok: true, stdout: "" };
+		},
+		isLive: () => false,
+		notify: () => {},
+		promptDelayMs: 0,
+	});
+	await sup.tick();
+	assert.deepEqual(
+		calls.filter((c) => c[0] === "new-session").map((c) => [c[3], c[5]]),
+		[
+			["dle", "dle-concierge"],
+			["dev", "dle-oogiri-doc"],
+		],
+	);
+	await sup.onRegistered("oogiri-doc");
+	assert.deepEqual(
+		calls.find((c) => c[0] === "send-keys"),
+		["send-keys", "-t", "dev:dle-oogiri-doc", "-l", "/parallel-cycle-loop"],
+	);
+});

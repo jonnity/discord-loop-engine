@@ -1,0 +1,50 @@
+{
+	"$comment": "kishimen-tool（Tauri + React の採点ツール）向けに調査した結果の例。engine 側に置く形。",
+	"baseBranch": "main",
+	"owners": ["jonnity"],
+	"maxParallel": 3,
+	"worktreeRoot": ".worktrees",
+	"branchPrefix": "fix/issue-",
+	"mergeMethod": "merge",
+	"setup": ["npm ci"],
+	"gate": [
+		{
+			"name": "types",
+			"run": "npm run typecheck"
+		},
+		{
+			"name": "test",
+			"run": "npm test"
+		},
+		{
+			"name": "e2e",
+			"run": "npm run test:e2e"
+		},
+		{
+			"name": "build",
+			"run": "npx vite build"
+		},
+		{
+			"name": "rust",
+			"run": "if git diff --quiet origin/main...HEAD -- src-tauri && git diff --quiet HEAD -- src-tauri; then echo 'src-tauri に変更なし: skip'; else (cd src-tauri && cargo test --workspace); fi"
+		}
+	],
+	"codex": {
+		"command": "codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox"
+	},
+	"context": ["spec.md", "README.md"],
+	"demo": null,
+	"specRecordDir": null,
+	"humanChecks": [
+		"src-tauri/ または src/platform/ を変更した場合: Windows 実機で物理テンキー5台の識別・割り当て・採点ができること（Linux のコンテナでは Raw Input を確認できない）",
+		"投影画面の見た目を変えた場合: 第2ディスプレイの全画面で、点数が出ず色と「達成」だけで状況が伝わること"
+	],
+	"ciTriage": null,
+	"notify": {
+		"required": true,
+		"envFiles": [],
+		"maxAttachMB": 10
+	},
+	"permissions": ["Bash(npm:*)", "Bash(npx:*)", "Bash(cargo:*)"],
+	"notes": "正本は回答履歴（累積点などは毎回再計算）。src/core は UI に依存しない純粋関数。投影画面に点数を渡さない。環境差分は src/platform に閉じ込める。保存ファイルと localStorage の後方互換を壊さない。npm を使う（pnpm-lock.yaml は使っていない）。"
+}

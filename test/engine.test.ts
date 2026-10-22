@@ -9,13 +9,14 @@
 // - ボードは1通を投稿・ピン留めし、以後は書き換える
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../src/config.ts";
 import { Engine } from "../src/engine.ts";
+import type { Run } from "../src/projects.ts";
 import { lineReader } from "../src/protocol.ts";
 import type { DiscordMessage } from "../src/route.ts";
 
@@ -58,7 +59,7 @@ function fakeRest() {
 	};
 }
 
-function setupEngine(retroEvery = 5) {
+function setupEngine(retroEvery = 5, exec?: Run) {
 	// Unix ソケットのパス長制限（約 104 文字）に収まるよう短い場所に作る
 	const home = mkdtempSync(path.join(os.tmpdir(), "dle-"));
 	const raw = { channelIds: [CH], allowedUserIds: [ME], retro: { everyDoneTasks: retroEvery } };
@@ -85,6 +86,7 @@ function setupEngine(retroEvery = 5) {
 		rest,
 		log: () => {},
 		boardDebounceMs: 10,
+		...(exec ? { exec } : {}),
 		gatewayFactory: (h) => {
 			onMessage = h.onMessage;
 			return { start() {}, stop() {}, connected: true, user: { id: "999", username: "bot" } };
@@ -312,7 +314,7 @@ test("worker がいない間の指示は、繋がった時に届く", async () =
 		repo: "jonnity/kishimen-tool",
 		path: home,
 		active: true,
-		needsInit: false,
+		mode: "harness",
 	});
 	const c = startChannel(home, { DLE_ROLE: "concierge" });
 	let w: ReturnType<typeof startChannel> | null = null;
@@ -406,6 +408,153 @@ test("harness-notify は engine が動いていれば webhook ではなく engin
 		assert.match(r.stderr, /engine 経由/);
 		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
 		assert.match(post?.content ?? "", /^\*\*\[kishimen-tool\]\*\* 🟡 A-1 要件確認｜#15 お題の並び替え/);
+	} finally {
+		await engine.stop();
+	}
+});
+
+test("調査した設定の案は A-番号で確認され、OK の回答を受けた worker が確定するとリポジトリの外に保存される", async () => {
+	const { engine, rest, home } = setupEngine();
+	await engine.start();
+	const repo = mkdtempSync(path.join(os.tmpdir(), "dle-r-"));
+	engine.ledger.upsertProject({
+		name: "kishimen-tool",
+		repo: "jonnity/kishimen-tool",
+		path: repo,
+		active: true,
+		mode: "harness",
+	});
+	engine.ledger.createTask({ project: "kishimen-tool", title: "プロジェクトの調査と設定", status: "ai-working" });
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "kishimen-tool", DLE_LOOP: "harness" });
+	try {
+		await until(() => engine.sessions.has("concierge") && engine.sessions.has("kishimen-tool"));
+		const tpl = JSON.parse((await w.tool("profile_template", {})).text);
+		assert.ok(Array.isArray(tpl.template.gate) && tpl.examples["kishimen-tool"], "雛形と例を engine から受け取れる");
+		const bad = await w.tool("profile_propose", { mode: "harness", profile: { gate: [] }, summary: "x" });
+		assert.equal(bad.isError, true, "gate の無い案は受け付けない");
+		const r = await w.tool("profile_propose", {
+			mode: "harness",
+			profile: { gate: [{ name: "test", run: "npm test" }], permissions: ["Bash(npm:*)"] },
+			summary: "npm のプロジェクトです",
+		});
+		assert.equal(r.isError, false, r.text);
+		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
+		assert.match(
+			post?.content ?? "",
+			/⚙️ A-1 設定の確認｜kishimen-tool の設定\nnpm のプロジェクトです\n検査（PR 前に CI と同じ順で）:\n- test: `npm test`/,
+		);
+		assert.equal(engine.ledger.tasks()[0]?.status, "waiting-human");
+
+		await c.tool("attention_answer", { id: "A-1", answer: "OK（Discord: jonnity）" });
+		const got = await w.event((p) => (p.meta as Record<string, string>).attention === "A-1");
+		assert.equal(got.meta.kind, "setup");
+		const act = await w.tool("profile_activate", {});
+		assert.equal(act.isError, false, act.text);
+		const saved = JSON.parse(readFileSync(path.join(home, "projects", "kishimen-tool", "harness.json"), "utf8"));
+		assert.deepEqual(saved.gate, [{ name: "test", run: "npm test" }]);
+		assert.equal(saved.repo, "jonnity/kishimen-tool");
+		assert.ok(!existsSync(path.join(repo, ".claude")), "リポジトリには何も置かない");
+		assert.equal(engine.ledger.tasks()[0]?.status, "done");
+		assert.equal(
+			engine.targets().find((t) => t.name === "kishimen-tool")?.initialPrompt,
+			"/discord-loop-engine:issue-loop",
+		);
+	} finally {
+		c.stop();
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("native の worker には独自のループで進める案内を出し、ハーネス用の案内は出さない", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "oogiri-doc", DLE_LOOP: "native" });
+	try {
+		const init = await w.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+		const text = String(init.result?.instructions);
+		assert.match(text, /このリポジトリ独自のループ/);
+		assert.doesNotMatch(text, /issue-loop スキル/);
+	} finally {
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("既定ブランチの CI の新しい失敗だけを知らせる（初回は既存の run を覚えるだけ）", async () => {
+	let runs = [
+		{ databaseId: 1, status: "completed", conclusion: "failure", workflowName: "CI", displayTitle: "old", url: "u1" },
+	];
+	const exec: Run = async (cmd, args) => {
+		if (cmd === "gh" && args[0] === "repo") return { ok: true, stdout: "main\n", stderr: "" };
+		if (cmd === "gh" && args[0] === "run") return { ok: true, stdout: JSON.stringify(runs), stderr: "" };
+		return { ok: false, stdout: "", stderr: "" };
+	};
+	const { engine, rest } = setupEngine(5, exec);
+	engine.ledger.upsertProject({
+		name: "kishimen-tool",
+		repo: "jonnity/kishimen-tool",
+		path: "/w",
+		active: true,
+		mode: "harness",
+	});
+	await engine.ciTick();
+	assert.equal(rest.calls.filter((x) => x.kind === "send").length, 0, "初回は過去の失敗を流さない");
+	runs = [
+		{ databaseId: 2, status: "completed", conclusion: "success", workflowName: "CI", displayTitle: "ok", url: "u2" },
+		{
+			databaseId: 3,
+			status: "completed",
+			conclusion: "failure",
+			workflowName: "CI",
+			displayTitle: "fix: 票",
+			url: "https://run/3",
+		},
+		{ databaseId: 4, status: "in_progress", conclusion: "", workflowName: "CI", displayTitle: "wip", url: "u4" },
+		...runs,
+	];
+	await engine.ciTick();
+	await engine.ciTick();
+	const sent = rest.calls.filter((x) => x.kind === "send");
+	assert.equal(sent.length, 1);
+	assert.match(sent[0]?.content ?? "", /^\*\*\[kishimen-tool\]\*\* 🟠 CI失敗｜CI @ main\nfix: 票\n<https:\/\/run\/3>/);
+});
+
+test("マージ後のフェーズ done で、engine がマージ完了を知らせる", async () => {
+	const { engine, rest, home } = setupEngine();
+	await engine.start();
+	engine.ledger.upsertProject({
+		name: "kishimen-tool",
+		repo: "jonnity/kishimen-tool",
+		path: "/w",
+		active: true,
+		mode: "harness",
+	});
+	try {
+		const d = await dle(home, [
+			"notify",
+			"--project",
+			"kishimen-tool",
+			"--event",
+			"phase",
+			"--phase",
+			"done",
+			"--issue",
+			"12",
+			"--title",
+			"票を破棄",
+			"--url",
+			"u",
+			"--pr",
+			"34",
+		]);
+		assert.equal(d.code, 0, d.stderr);
+		const sent = rest.calls.find((x) => x.kind === "send" && x.content?.includes("マージ完了"));
+		assert.equal(
+			sent?.content,
+			"**[kishimen-tool]** 🔵 マージ完了｜#12 票を破棄（PR #34）\n<https://github.com/jonnity/kishimen-tool/pull/34>",
+		);
 	} finally {
 		await engine.stop();
 	}

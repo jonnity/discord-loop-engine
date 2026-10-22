@@ -5,12 +5,21 @@
 // - 窓口は Sonnet で、worker は DLE_PROJECT 付きで、どちらも開発用 channel と dle ツールの許可付きで起動する
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import type { Config } from "../src/config.ts";
-import { type Run, repoFromRemote, resolveProject, sessionTargets } from "../src/projects.ts";
+import { Ledger, type Project } from "../src/ledger.ts";
+import {
+	excludeLocalState,
+	type Run,
+	registerProject,
+	repoFromRemote,
+	resolveProject,
+	run,
+	sessionTargets,
+} from "../src/projects.ts";
 
 test("origin の URL から owner/repo を読む", () => {
 	assert.equal(repoFromRemote("https://github.com/jonnity/kishimen-tool.git"), "jonnity/kishimen-tool");
@@ -18,19 +27,68 @@ test("origin の URL から owner/repo を読む", () => {
 	assert.equal(repoFromRemote("http://proxy@127.0.0.1:1234/git/jonnity/kishimen-tool"), "jonnity/kishimen-tool");
 });
 
-test("パス指定は既存の場所を使い、harness.json が無ければ needsInit", async () => {
+test("パス指定は既存の場所を使い、既定は harness、--native ならそのコマンドで native", async () => {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-p-"));
 	execFileSync("git", ["-C", dir, "init", "-q"]);
 	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/jonnity/kishimen-tool"]);
 	const p = await resolveProject(dir, { workspaceDir: "/nowhere" });
 	assert.deepEqual(
-		{ name: p.name, repo: p.repo, needsInit: p.needsInit },
-		{ name: "kishimen-tool", repo: "jonnity/kishimen-tool", needsInit: true },
+		{ name: p.name, repo: p.repo, mode: p.mode },
+		{ name: "kishimen-tool", repo: "jonnity/kishimen-tool", mode: "harness" },
 	);
-	mkdirSync(path.join(dir, ".claude"));
-	writeFileSync(path.join(dir, ".claude", "harness.json"), JSON.stringify({ project: "kishimen" }));
-	const q = await resolveProject(dir, { workspaceDir: "/nowhere" });
-	assert.deepEqual({ name: q.name, needsInit: q.needsInit }, { name: "kishimen", needsInit: false });
+	const n = await resolveProject(dir, { workspaceDir: "/nowhere" }, undefined, {
+		native: "/parallel-cycle-loop",
+		tmuxSession: "dev",
+		name: "oogiri-doc",
+	});
+	assert.deepEqual(
+		{ name: n.name, mode: n.mode, initialPrompt: n.initialPrompt, tmuxSession: n.tmuxSession },
+		{ name: "oogiri-doc", mode: "native", initialPrompt: "/parallel-cycle-loop", tmuxSession: "dev" },
+	);
+});
+
+test("作業用ディレクトリはリポジトリの .gitignore ではなく .git/info/exclude に足す（何度呼んでも1回だけ）", () => {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-x-"));
+	execFileSync("git", ["-C", dir, "init", "-q"]);
+	excludeLocalState(dir);
+	excludeLocalState(dir);
+	const ex = readFileSync(path.join(dir, ".git", "info", "exclude"), "utf8");
+	assert.equal(ex.split("\n").filter((l) => l === ".harness/").length, 1);
+	assert.ok(ex.includes(".worktrees/"));
+	assert.ok(!existsSync(path.join(dir, ".gitignore")), "リポジトリには何も置かない");
+});
+
+test("登録すると、設定が無ければ調査タスクを作り、ラベルを作る（native はラベルを作らない）", async () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-h-"));
+	const ledger = new Ledger(home);
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-r-"));
+	execFileSync("git", ["-C", dir, "init", "-q"]);
+	execFileSync("git", ["-C", dir, "remote", "add", "origin", "https://github.com/jonnity/kishimen-tool"]);
+	const calls: string[] = [];
+	const exec: Run = async (cmd, args) => {
+		calls.push(path.basename(cmd));
+		return cmd === "git" ? run(cmd, args) : { ok: true, stdout: "", stderr: "" };
+	};
+	const r = await registerProject(ledger, { workspaceDir: "/nowhere" }, dir, {}, exec);
+	assert.equal(r.ready, false);
+	assert.ok(calls.includes("harness-labels"));
+	assert.deepEqual(
+		ledger.tasks().map((t) => t.title),
+		["プロジェクトの調査と設定"],
+	);
+	await registerProject(ledger, { workspaceDir: "/nowhere" }, dir, {}, exec);
+	assert.equal(ledger.tasks().length, 1, "登録し直しても調査タスクは増やさない");
+
+	calls.length = 0;
+	const n = await registerProject(
+		ledger,
+		{ workspaceDir: "/nowhere" },
+		dir,
+		{ native: "/parallel-cycle-loop", name: "oogiri-doc" },
+		exec,
+	);
+	assert.equal(n.ready, true);
+	assert.ok(!calls.includes("harness-labels"));
 });
 
 test("owner/repo 指定は workspaceDir に gh repo clone する", async () => {
@@ -49,10 +107,12 @@ test("owner/repo 指定は workspaceDir に gh repo clone する", async () => {
 	await assert.rejects(resolveProject("not a repo", { workspaceDir: ws }, fake), /解釈できません/);
 });
 
-test("窓口は Sonnet、worker は DLE_PROJECT 付きで、どちらも channel と dle ツールの許可付きで起動する", () => {
+test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と mode で最初のコマンドが変わる", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-t-"));
+	const ledger = new Ledger(home);
 	const cfg = {
-		home: "/h",
-		socketPath: "/h/engine.sock",
+		home,
+		socketPath: `${home}/engine.sock`,
 		claudeBin: "claude",
 		concierge: { model: "sonnet", extraArgs: [], allowedTools: [] },
 		worker: {
@@ -61,21 +121,44 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、どちらも channel
 			initialPrompt: "/discord-loop-engine:issue-loop",
 		},
 	} as unknown as Config;
-	const [c, w, ...rest] = sessionTargets(cfg, [
-		{ name: "kishimen-tool", repo: "jonnity/kishimen-tool", path: "/w/k", active: true, addedAt: "", needsInit: false },
-		{ name: "paused", repo: "x/y", path: "/w/p", active: false, addedAt: "", needsInit: false },
-	]);
+	const base = { repo: "x/y", active: true, addedAt: "" };
+	const projects: Project[] = [
+		{ ...base, name: "kishimen-tool", path: "/w/k", mode: "harness" },
+		{
+			...base,
+			name: "oogiri-doc",
+			path: "/w/o",
+			mode: "native",
+			initialPrompt: "/parallel-cycle-loop",
+			tmuxSession: "dev",
+		},
+		{ ...base, name: "paused", path: "/w/p", mode: "harness", active: false },
+	];
+	const [c, k, o, ...rest] = sessionTargets(cfg, projects, ledger);
 	assert.equal(rest.length, 0, "active でないものは起動しない");
 	assert.match(
 		c?.command ?? "",
-		/^env DLE_HOME=\/h DLE_SOCKET=\/h\/engine.sock DLE_ROLE=concierge claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle /,
+		/DLE_ROLE=concierge claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle /,
 	);
 	assert.match(c?.command ?? "", /'Bash\(gh issue create:\*\)'/);
 	assert.equal(c?.initialPrompt, "/discord-loop-engine:concierge");
-	assert.match(
-		w?.command ?? "",
-		/DLE_ROLE=worker DLE_PROJECT=kishimen-tool claude --dangerously-load-development-channels/,
+
+	assert.equal(k?.initialPrompt, "/discord-loop-engine:onboard", "設定が無ければ調査から");
+	assert.match(k?.command ?? "", /DLE_ROLE=worker DLE_PROJECT=kishimen-tool DLE_LOOP=harness claude /);
+	assert.match(k?.command ?? "", /'Bash\(harness-merge:\*\)'.* --permission-mode acceptEdits$/);
+
+	assert.equal(o?.initialPrompt, "/parallel-cycle-loop", "native はそのリポジトリのループで始める");
+	assert.equal(o?.tmuxSession, "dev");
+	assert.match(o?.command ?? "", /DLE_LOOP=native/);
+	assert.doesNotMatch(o?.command ?? "", /harness-merge/, "native にはハーネスの許可を渡さない");
+
+	// 設定が確定したら issue-loop で始め、設定の permissions も許可に加える
+	mkdirSync(path.join(home, "projects", "kishimen-tool"), { recursive: true });
+	writeFileSync(
+		path.join(home, "projects", "kishimen-tool", "harness.json"),
+		JSON.stringify({ gate: [], permissions: ["Bash(cargo:*)"] }),
 	);
-	assert.match(w?.command ?? "", /'Bash\(harness-merge:\*\)'.* --permission-mode acceptEdits$/);
-	assert.equal(w?.cwd, "/w/k");
+	const k2 = sessionTargets(cfg, projects, ledger)[1];
+	assert.equal(k2?.initialPrompt, "/discord-loop-engine:issue-loop");
+	assert.match(k2?.command ?? "", /'Bash\(cargo:\*\)'/);
 });

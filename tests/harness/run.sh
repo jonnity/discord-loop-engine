@@ -89,6 +89,20 @@ check "guard: 通常の gh は通す" '[ "$(guard "gh pr view 5 --json url")" = 
 rm "$PROJ/.claude/harness.json"
 check "guard: harness.json が無いプロジェクトでは何もしない" '[ "$(guard "gh pr merge 5")" = 0 ]'
 
+# --- engine 側の設定（リポジトリに何も置かない形） ---------------------------------
+DLEH="$TMP/dle-home"
+mkdir -p "$DLEH/projects/kishimen-tool"
+echo '{ "project": "kishimen-tool", "maxParallel": 4 }' >"$DLEH/projects/kishimen-tool/harness.json"
+check "config: リポジトリに無ければ engine 側の設定を読む" '[ "$(DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool "$BIN/harness-config" .maxParallel 3)" = 4 ]'
+check "config: DLE_PROJECT が無ければ engine 側は見ない" '[ "$(DLE_HOME="$DLEH" "$BIN/harness-config" .maxParallel 3)" = 3 ]'
+echo '{ "maxParallel": 2 }' >"$PROJ/.claude/harness.json"
+check "config: リポジトリに置いてあればそちらを優先する" '[ "$(DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool "$BIN/harness-config" .maxParallel 3)" = 2 ]'
+rm "$PROJ/.claude/harness.json"
+gguard() { jq -nc --arg c "$1" '{tool_input:{command:$c}}' | env "${@:2}" "$BIN/harness-guard" >/dev/null 2>&1; echo $?; }
+check "guard: engine 側の設定があれば働く" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool)" = 2 ]'
+check "guard: native モードでは何もしない（独自のループの gh pr merge を止めない）" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool DLE_LOOP=native)" = 0 ]'
+check "guard: 設定の無いプロジェクトでは何もしない" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=oogiri-doc)" = 0 ]'
+
 echo ""
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]

@@ -169,10 +169,54 @@ const TOOLS: ToolDef[] = [
 		description: "リポジトリを登録する（owner/repo なら clone、パスなら既存の場所）。worker は自動で起動する",
 		inputSchema: {
 			type: "object",
-			properties: { spec: s("jonnity/kishimen-tool または ~/src/kishimen-tool") },
+			properties: {
+				spec: s("jonnity/kishimen-tool または ~/src/kishimen-tool"),
+				native: s("そのリポジトリ独自のループで進める場合、それを始めるコマンド（例: /parallel-cycle-loop）"),
+				tmux_session: s("native のとき、そのリポジトリのスクリプトが前提にしている tmux セッション名（例: dev）"),
+				name: s("プロジェクト名を変えたいとき"),
+			},
 			required: ["spec"],
 		},
 		roles: ["concierge"],
+	},
+	{
+		name: "profile_propose",
+		description:
+			"調査したプロジェクトの設定の案を出す。engine が A-番号で人に確認を求め、回答は meta.attention 付きで届く。OK なら profile_activate を呼ぶ",
+		inputSchema: {
+			type: "object",
+			properties: {
+				mode: s("harness（issue-loop で進める）か native（そのリポジトリ独自のループで進める）"),
+				profile: {
+					type: "object",
+					description:
+						"harness のときの設定（gate・setup・context・demo・humanChecks・permissions など。templates/profile.example.json の形）",
+				},
+				initial_prompt: s("native のとき、そのリポジトリのループを始めるコマンド"),
+				tmux_session: s("native のとき、そのリポジトリが前提にしている tmux セッション名（あれば）"),
+				summary: s("人に見せる要約（調べて分かったこと・判断の理由・自動では確かめられないこと）"),
+			},
+			required: ["mode", "summary"],
+		},
+		roles: ["worker"],
+	},
+	{
+		name: "profile_template",
+		description: "プロジェクト設定の雛形と、調査済みの例（onboard で設定の案を作るときに使う）",
+		inputSchema: { type: "object", properties: {} },
+		roles: ["worker"],
+	},
+	{
+		name: "profile_get",
+		description: "プロジェクトの設定（使われている harness.json の場所と中身・確認待ちの案）",
+		inputSchema: { type: "object", properties: { project: s("窓口から見るときのプロジェクト名") } },
+		roles: ["concierge", "worker"],
+	},
+	{
+		name: "profile_activate",
+		description: "確認で OK をもらった設定の案を確定する",
+		inputSchema: { type: "object", properties: {} },
+		roles: ["worker"],
 	},
 	{
 		name: "project_set_active",
@@ -259,10 +303,16 @@ const INSTRUCTIONS =
 	role === "concierge"
 		? `あなたは discord-loop-engine の窓口です。ユーザーとのやり取りはすべて Discord（<channel source="dle">）で届き、返事は reply ツールだけで返します。
 振る舞いの詳細は /discord-loop-engine:concierge スキルに従ってください。meta.attention があればその A-番号への返事、meta.kind=notice は engine からのお知らせ（Discord への再投稿は不要）、meta.kind=retro は振り返りの依頼です。`
-		: role === "worker"
-			? `あなたは discord-loop-engine の worker（プロジェクト「${project}」）です。ユーザーとは直接話さず、窓口と engine を通します。
-<channel source="dle"> で届くのは、窓口からの依頼（meta.from=concierge）・A-番号への回答（meta.attention）・仮ルール（meta.kind=rules）です。扱い方は /discord-loop-engine:issue-loop スキルの「engine との連携」に従ってください。`
-			: "このセッションは discord-loop-engine の中継対象ではありません（engine から起動したセッションだけが対象）。";
+		: role === "worker" && process.env.DLE_LOOP === "native"
+			? `あなたは discord-loop-engine の worker（プロジェクト「${project}」）で、このリポジトリ独自のループ（CLAUDE.md・.claude/skills の手順）で進めます。
+discord-loop-engine のハーネス（issue-loop・harness-*）は使わず、リポジトリの手順・通知の仕組みをそのまま守ってください。
+<channel source="dle"> で届く窓口からの依頼（meta.from=concierge）や A-番号への回答（meta.attention）は、ユーザーからの指示として扱います。
+作業の節目（着手・PR 作成・マージ・止まった理由）は report ツールで台帳に一言残すと、窓口がユーザーに状況を答えられます。うまくいかなかったことは learning_add で記録します。`
+			: role === "worker"
+				? `あなたは discord-loop-engine の worker（プロジェクト「${project}」）です。ユーザーとは直接話さず、窓口と engine を通します。
+<channel source="dle"> で届くのは、窓口からの依頼（meta.from=concierge）・A-番号への回答（meta.attention）・仮ルール（meta.kind=rules）です。扱い方は /discord-loop-engine:issue-loop スキルの「engine との連携」に従ってください。
+設定がまだ無いプロジェクトでは、最初に /discord-loop-engine:onboard で調査と設定を行います。`
+				: "このセッションは discord-loop-engine の中継対象ではありません（engine から起動したセッションだけが対象）。";
 
 // --- engine との接続 -------------------------------------------------------------------
 let engine: Socket | null = null;

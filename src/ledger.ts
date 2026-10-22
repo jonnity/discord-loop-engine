@@ -32,7 +32,7 @@ export interface Task {
 	history: string[];
 }
 
-export type AttentionKind = "interview" | "merge" | "blocked" | "permission" | "session";
+export type AttentionKind = "interview" | "merge" | "blocked" | "setup" | "permission" | "session";
 
 export interface Attention {
 	id: string;
@@ -51,13 +51,35 @@ export interface Attention {
 	messageId?: string;
 }
 
+/**
+ * harness: discord-loop-engine の issue-loop で進める（設定はリポジトリか engine 側の harness.json）
+ * native:  リポジトリ独自のループ（oogiri-doc の /parallel-cycle-loop など）で進める。ハーネスの設定もガードも使わない
+ */
+export type LoopMode = "harness" | "native";
+
 export interface Project {
 	name: string;
 	repo: string;
 	path: string;
 	active: boolean;
 	addedAt: string;
-	needsInit: boolean;
+	mode: LoopMode;
+	/** native のとき worker に最初に入力するコマンド（例: /parallel-cycle-loop） */
+	initialPrompt?: string;
+	/** native のとき、そのリポジトリのスクリプトが前提にしている tmux セッション名（例: dev） */
+	tmuxSession?: string;
+	/** worker を起動するときに追加で許可するもの（--allowedTools の形式） */
+	allow?: string[];
+}
+
+export interface ProfileDraft {
+	mode: LoopMode;
+	profile?: Record<string, unknown>;
+	initialPrompt?: string;
+	tmuxSession?: string;
+	summary: string;
+	attention?: string;
+	proposedAt: string;
 }
 
 export interface Learning {
@@ -78,12 +100,16 @@ interface State {
 	doneSinceRetro: number;
 	lastRetroAt: string;
 	retroRequestedAt: string | null;
+	/** プロジェクトごとに、通知済み（または起動時に既にあった）CI の run ID */
+	ciSeen: Record<string, number[]>;
+	defaultBranches: Record<string, string>;
 }
 
 export const KIND_LABEL: Record<AttentionKind, string> = {
 	interview: "要件確認",
 	merge: "マージ承認",
 	blocked: "要対応",
+	setup: "設定の確認",
 	permission: "許可の確認",
 	session: "セッションの確認",
 };
@@ -135,6 +161,8 @@ export class Ledger {
 			doneSinceRetro: 0,
 			lastRetroAt: this.iso(),
 			retroRequestedAt: null,
+			ciSeen: {},
+			defaultBranches: {},
 			...readJson<Partial<State>>(path.join(this.dir, "state.json"), {}),
 		};
 	}
@@ -145,7 +173,65 @@ export class Ledger {
 
 	// --- projects ----------------------------------------------------------------
 	projects(): Project[] {
-		return readJson<Project[]>(path.join(this.dir, "projects.json"), []);
+		// mode が無いのは 0.1.0 の形式。その頃はすべて harness だった
+		return readJson<Project[]>(path.join(this.dir, "projects.json"), []).map((p) => ({
+			...p,
+			mode: p.mode ?? "harness",
+		}));
+	}
+
+	// --- プロジェクトの設定（engine 側の harness.json） ----------------------------------
+	profilePath(name: string): string {
+		return path.join(this.dir, "projects", name, "harness.json");
+	}
+
+	/** 実際に使われる harness.json（リポジトリにあればそちらを優先）。無ければ null */
+	effectiveProfilePath(p: Project): string | null {
+		const inRepo = path.join(p.path, ".claude", "harness.json");
+		if (existsSync(inRepo)) return inRepo;
+		const own = this.profilePath(p.name);
+		return existsSync(own) ? own : null;
+	}
+
+	profile(p: Project): Record<string, unknown> | null {
+		const f = this.effectiveProfilePath(p);
+		return f ? readJson<Record<string, unknown> | null>(f, null) : null;
+	}
+
+	/** 調査が終わって使える状態か（native は設定ファイル不要） */
+	isReady(p: Project): boolean {
+		return p.mode === "native" || this.effectiveProfilePath(p) !== null;
+	}
+
+	saveDraft(name: string, draft: ProfileDraft) {
+		writeAtomic(path.join(this.dir, "projects", name, "draft.json"), `${JSON.stringify(draft, null, 2)}\n`);
+	}
+
+	draft(name: string): ProfileDraft | null {
+		return readJson<ProfileDraft | null>(path.join(this.dir, "projects", name, "draft.json"), null);
+	}
+
+	/** 確認済みの案を本番の設定にする */
+	activateDraft(name: string): Project {
+		const d = this.draft(name);
+		const p = this.projects().find((x) => x.name === name);
+		if (!d || !p) throw new Error(`${name} の設定案がありません`);
+		if (d.mode === "harness") {
+			if (!d.profile) throw new Error("harness モードの案に profile がありません");
+			writeAtomic(
+				this.profilePath(name),
+				`${JSON.stringify({ project: name, repo: p.repo, ...d.profile }, null, "\t")}\n`,
+			);
+		}
+		const next = this.upsertProject({
+			...p,
+			mode: d.mode,
+			initialPrompt: d.mode === "native" ? d.initialPrompt : undefined,
+			tmuxSession: d.mode === "native" ? d.tmuxSession : undefined,
+		});
+		writeAtomic(path.join(this.dir, "projects", name, "draft.json"), "null\n");
+		this.journal(`[${name}] 設定を確定（${d.mode}）`);
+		return next;
 	}
 
 	upsertProject(p: Omit<Project, "addedAt"> & { addedAt?: string }): Project {

@@ -2,7 +2,8 @@
 #
 # harness-guard — PreToolUse(Bash) hook。ハーネスの入口を迂回するコマンドを止める。
 #
-# .claude/harness.json があるプロジェクトでだけ働く（他プロジェクトでは何もしない）。
+# ハーネスの設定（リポジトリか engine 側の harness.json）があるプロジェクトでだけ働く。
+# 設定の無いプロジェクトや、独自のループで進める native モード（DLE_LOOP=native）では何もしない。
 # 止めるもの:
 #   - harness:* ラベルの直接操作（queued / priority 以外）→ harness-phase を使う
 #     （直接付けると「人間ゲートのラベル ⇔ Discord 通知済み」が崩れるため）
@@ -16,8 +17,10 @@ set -uo pipefail
 
 # 先に入力を読み切る。読まずに終えると、書き手（Claude Code やテスト）が SIGPIPE を受けることがある
 input="$(cat)"
-ROOT="${CLAUDE_PROJECT_DIR:-$(pwd)}"
-[ -f "$ROOT/.claude/harness.json" ] || exit 0
+[ "${DLE_LOOP:-}" = "native" ] && exit 0
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CONFIG="$("$SCRIPT_DIR/harness-config" --path 2>/dev/null || true)"
+[ -n "$CONFIG" ] && [ -f "$CONFIG" ] || exit 0
 
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [ -z "$cmd" ] && exit 0

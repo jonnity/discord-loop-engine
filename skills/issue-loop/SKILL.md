@@ -25,8 +25,9 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 - `issue-cycle` の前提（codex・tmux・gh、`.claude/harness.json`、`harness-labels` 済み）
 - `CronCreate` / `CronList` / `CronDelete` が使えること。使えない環境では手動で `/discord-loop-engine:issue-loop`
   を繰り返す運用に落とす
-- Discord webhook が設定済み（`harness-notify` は未設定だと失敗する。ループ開始時に
-  `harness-notify --event info --title "issue-loop 開始" --url <repo URL>` で疎通を確認する）
+- 人の判断が要る通知を出せること。discord-loop-engine の engine が動いていれば engine 経由で出る。
+  engine を使わず単体で回すときは、`DISCORD_WEBHOOK_URL` を環境変数か設定の `notify.envFiles` に置く
+  （どちらも無いと `harness-notify` は失敗する）
 
 ## 起動時
 
@@ -151,8 +152,9 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
   マージ後に見つかった漏れ）。自己改善の材料になる。`tag` は `ci-red` / `review-ng` / `user-ng` / `stall` /
   `scope-miss` など
 - harness-phase を通らない節目（ブロッカーの解消・方針の変更など）は `report` で台帳に一言残す
-- **`.claude/harness.json` が無いリポジトリでは、最初に `/discord-loop-engine:harness-init` を行う**。
-  導入の PR も Issue 化して、通常のフロー（承認依頼まで）で進める
+- **設定（リポジトリの `.claude/harness.json` か engine 側の設定）が無いプロジェクトでは、
+  最初に `/discord-loop-engine:onboard` を行う**（調べて案を出し、A-番号で確認をもらってから確定する。
+  リポジトリには何も置かない）
 
 ### 6. 何も変化が無い tick
 

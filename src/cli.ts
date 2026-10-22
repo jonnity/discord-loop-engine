@@ -6,7 +6,7 @@
 //   dle down                 常駐を止める（各セッションは止めない）
 //   dle start                フォアグラウンドで起動する（up が中で使う）
 //   dle status               engine・Discord・セッションの状態
-//   dle add <owner/repo|パス> リポジトリを登録する（worker が自動で起動する）
+//   dle add <owner/repo|パス> リポジトリを登録する（--native <コマンド> で独自ループのまま）
 //   dle projects             登録済みのリポジトリ
 //   dle tasks [--all]        台帳のタスク
 //   dle attention            あなた待ち
@@ -23,7 +23,7 @@ import { CONFIG_TEMPLATE, type Config, loadConfig, readToken } from "./config.ts
 import { Engine } from "./engine.ts";
 import { Gateway } from "./gateway.ts";
 import { Ledger } from "./ledger.ts";
-import { resolveProject } from "./projects.ts";
+import { registerProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
 import { Rest } from "./rest.ts";
 import { Supervisor, tmuxRunner, windowName } from "./supervisor.ts";
@@ -126,6 +126,9 @@ async function cmdStart() {
 	// channel の再接続を待ってから起動判定する（engine 再起動時に既存セッションを二重起動しない）
 	setTimeout(tick, 15_000);
 	setInterval(tick, 30_000);
+	const ci = () => engine?.ciTick().catch((e: Error) => log(`ci: ${e.message}`));
+	setTimeout(ci, 20_000);
+	setInterval(ci, 5 * 60_000);
 	setInterval(() => {
 		engine?.writeStatus();
 		engine?.maybeRequestRetro();
@@ -188,26 +191,34 @@ function cmdStatus() {
 	console.log(`\n${ledger.renderBoard()}`);
 }
 
-async function cmdAdd(spec: string | undefined) {
-	if (!spec) fail("dle add <owner/repo またはパス>");
+async function cmdAdd(spec: string | undefined, flags: Record<string, string | boolean>) {
+	if (!spec) fail("dle add <owner/repo またはパス> [--native <コマンド>] [--tmux-session <名前>] [--name <名前>]");
 	const config = loadConfig(home);
-	const viaEngine = await callEngine(config, "project_add", { spec });
-	if (viaEngine) {
-		show(viaEngine);
-		return;
-	}
+	const args = {
+		spec,
+		native: typeof flags.native === "string" ? flags.native : undefined,
+		tmux_session: typeof flags["tmux-session"] === "string" ? flags["tmux-session"] : undefined,
+		name: typeof flags.name === "string" ? flags.name : undefined,
+	};
+	const viaEngine = (await callEngine(config, "project_add", args)) as Awaited<
+		ReturnType<typeof registerProject>
+	> | null;
 	// engine が止まっていれば台帳に直接書く（書き手が engine だけ、という前提は起動中にだけ要る）
-	const p = await resolveProject(spec, config);
-	const ledger = new Ledger(home);
-	ledger.upsertProject(p);
-	if (p.needsInit)
-		ledger.createTask({
-			project: p.name,
-			title: "ハーネスの導入（harness-init）",
-			status: "queued",
-			note: "harness.json が無いため導入から始める",
-		});
-	console.log(`${p.name} を登録しました（${p.path}）。dle up で worker が起動します。`);
+	const r =
+		viaEngine ??
+		(await registerProject(new Ledger(home), config, spec, {
+			native: args.native,
+			tmuxSession: args.tmux_session,
+			name: args.name,
+		}));
+	const p = r.project;
+	console.log(
+		`${p.name} を登録しました（${p.path} / ${p.mode === "native" ? `native: ${p.initialPrompt ?? "（コマンドなし）"}` : "harness"}）`,
+	);
+	if (p.mode === "harness" && !r.ready)
+		console.log("  設定が無いので、worker がまずリポジトリを調べて設定の案を出します（A-番号で確認が来ます）");
+	for (const n of r.notes) console.log(`  ⚠️ ${n}`);
+	if (!viaEngine) console.log("  engine が止まっています。dle up で worker が起動します");
 }
 
 async function cmdRead(name: string, args: Record<string, unknown>, local: (l: Ledger) => unknown) {
@@ -317,7 +328,7 @@ const commands: Record<string, () => unknown> = {
 	up: cmdUp,
 	down: cmdDown,
 	status: cmdStatus,
-	add: () => cmdAdd(rest[0]),
+	add: () => cmdAdd(rest[0], flags),
 	projects: () => cmdRead("projects_list", {}, (l) => l.projects()),
 	tasks: () =>
 		cmdRead("tasks_list", { all: flags.all === true }, (l) =>

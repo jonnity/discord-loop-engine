@@ -1,10 +1,11 @@
 // リポジトリの登録（dle add）と、各セッションの起動コマンドの組み立て。
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { type Config, DLE_TOOLS_RULE, expandHome, PLUGIN_SPEC } from "./config.ts";
-import type { Project } from "./ledger.ts";
+import type { Ledger, Project } from "./ledger.ts";
 import { type SessionTarget, shq } from "./supervisor.ts";
 
 export type Run = (cmd: string, args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
@@ -17,6 +18,32 @@ export const run: Run = (cmd, args) =>
 	});
 
 export const RESERVED_NAMES = ["concierge", "engine"];
+
+// 無人の worker が調べ物で止まらないよう、読むだけのコマンドは確認なしで通す
+const READ_ONLY_COMMANDS = [
+	"ls",
+	"cat",
+	"head",
+	"tail",
+	"wc",
+	"find",
+	"grep",
+	"rg",
+	"jq",
+	"git status",
+	"git log",
+	"git diff",
+	"git show",
+	"git branch",
+	"git rev-parse",
+	"gh issue view",
+	"gh issue list",
+	"gh pr view",
+	"gh pr list",
+	"gh pr checks",
+	"gh run list",
+	"gh run view",
+];
 
 const HARNESS_COMMANDS = [
 	"harness-config",
@@ -49,14 +76,22 @@ function projectName(dir: string, repo: string): string {
 	return repo.split("/")[1] || path.basename(dir);
 }
 
+export interface AddOptions {
+	/** native モードで使うリポジトリ独自のループのコマンド（例: /parallel-cycle-loop） */
+	native?: string;
+	tmuxSession?: string;
+	name?: string;
+}
+
 /**
  * spec が owner/repo なら workspaceDir に clone（済みならそのまま）、パスなら既存の場所を使う。
- * どちらも git リポジトリであることを確かめ、.claude/harness.json が無ければ needsInit にする。
+ * どちらも GitHub の origin を持つ git リポジトリであることを確かめる。
  */
 export async function resolveProject(
 	spec: string,
 	cfg: Pick<Config, "workspaceDir">,
 	exec: Run = run,
+	opts: AddOptions = {},
 ): Promise<Omit<Project, "addedAt">> {
 	let dir: string;
 	let repo: string;
@@ -80,9 +115,35 @@ export async function resolveProject(
 	} else {
 		throw new Error(`「${spec}」はリポジトリとして解釈できません（owner/repo かパスで指定してください）`);
 	}
-	const name = projectName(dir, repo);
-	if (RESERVED_NAMES.includes(name)) throw new Error(`プロジェクト名「${name}」は予約されています`);
-	return { name, repo, path: dir, active: true, needsInit: !existsSync(path.join(dir, ".claude", "harness.json")) };
+	const name = opts.name || projectName(dir, repo);
+	if (RESERVED_NAMES.includes(name) || !/^[A-Za-z0-9._-]+$/.test(name))
+		throw new Error(`プロジェクト名「${name}」は使えません`);
+	return {
+		name,
+		repo,
+		path: dir,
+		active: true,
+		mode: opts.native ? "native" : "harness",
+		...(opts.native ? { initialPrompt: opts.native } : {}),
+		...(opts.tmuxSession ? { tmuxSession: opts.tmuxSession } : {}),
+	};
+}
+
+// ハーネスが作業用に置くもの。リポジトリの .gitignore を書き換えずに済むよう、コミットされない
+// .git/info/exclude に足す（リポジトリ側には何も置かない、という方針のため）
+const LOCAL_STATE = [".harness/", ".worktrees/"];
+
+export function excludeLocalState(dir: string) {
+	const file = path.join(dir, ".git", "info", "exclude");
+	if (!existsSync(path.join(dir, ".git"))) return;
+	mkdirSync(path.dirname(file), { recursive: true });
+	const current = existsSync(file) ? readFileSync(file, "utf8") : "";
+	const missing = LOCAL_STATE.filter((l) => !current.split("\n").includes(l));
+	if (missing.length === 0) return;
+	appendFileSync(
+		file,
+		`${current && !current.endsWith("\n") ? "\n" : ""}# discord-loop-engine の作業用\n${missing.join("\n")}\n`,
+	);
 }
 
 function claudeCommand(cfg: Config, env: Record<string, string>, args: string[]): string {
@@ -92,7 +153,7 @@ function claudeCommand(cfg: Config, env: Record<string, string>, args: string[])
 	return `env ${envPart} ${[cfg.claudeBin, ...args].map(shq).join(" ")}`;
 }
 
-export function sessionTargets(cfg: Config, projects: Project[]): SessionTarget[] {
+export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger): SessionTarget[] {
 	const baseEnv = { DLE_HOME: cfg.home, DLE_SOCKET: cfg.socketPath };
 	const channelArgs = ["--dangerously-load-development-channels", PLUGIN_SPEC];
 	const concierge: SessionTarget = {
@@ -119,22 +180,86 @@ export function sessionTargets(cfg: Config, projects: Project[]): SessionTarget[
 	};
 	const workers = projects
 		.filter((p) => p.active)
-		.map(
-			(p): SessionTarget => ({
+		.map((p): SessionTarget => {
+			const native = p.mode === "native";
+			const profile = ledger?.profile(p) ?? null;
+			const fromProfile = Array.isArray(profile?.permissions)
+				? (profile.permissions as unknown[]).filter((x): x is string => typeof x === "string")
+				: [];
+			const ready = ledger ? ledger.isReady(p) : true;
+			const initialPrompt = native
+				? (p.initialPrompt ?? "")
+				: ready
+					? cfg.worker.initialPrompt
+					: "/discord-loop-engine:onboard";
+			return {
 				name: p.name,
 				cwd: p.path,
-				command: claudeCommand(cfg, { ...baseEnv, DLE_ROLE: "worker", DLE_PROJECT: p.name }, [
-					...(cfg.worker.model ? ["--model", cfg.worker.model] : []),
-					...channelArgs,
-					"--allowedTools",
-					DLE_TOOLS_RULE,
-					// ハーネスの入口は確認なしで通す（離席中にここで止まらないように）。どれもガード付きで、
-					// harness-merge は人の承認記録が無ければマージしない
-					...HARNESS_COMMANDS.map((c) => `Bash(${c}:*)`),
-					...cfg.worker.extraArgs,
-				]),
-				initialPrompt: cfg.worker.initialPrompt,
-			}),
-		);
+				...(p.tmuxSession ? { tmuxSession: p.tmuxSession } : {}),
+				command: claudeCommand(
+					cfg,
+					{ ...baseEnv, DLE_ROLE: "worker", DLE_PROJECT: p.name, DLE_LOOP: native ? "native" : "harness" },
+					[
+						...(cfg.worker.model ? ["--model", cfg.worker.model] : []),
+						...channelArgs,
+						"--allowedTools",
+						DLE_TOOLS_RULE,
+						// ハーネスの入口は確認なしで通す（離席中にここで止まらないように）。どれもガード付きで、
+						// harness-merge は人の承認記録が無ければマージしない。native では使わないので渡さない
+						...(native ? [] : HARNESS_COMMANDS.map((c) => `Bash(${c}:*)`)),
+						...READ_ONLY_COMMANDS.map((c) => `Bash(${c}:*)`),
+						...fromProfile,
+						...(p.allow ?? []),
+						...cfg.worker.extraArgs,
+					],
+				),
+				initialPrompt,
+			};
+		});
 	return [concierge, ...workers];
+}
+
+const HARNESS_LABELS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "harness-labels");
+
+/**
+ * dle add の本体（engine の project_add と、engine が止まっているときの CLI の両方から使う）。
+ * 登録 → 作業用ファイルを git の除外に足す → harness モードならラベルを作る → 設定が無ければ調査タスクを作る。
+ */
+export async function registerProject(
+	ledger: Ledger,
+	cfg: Pick<Config, "workspaceDir">,
+	spec: string,
+	opts: AddOptions = {},
+	exec: Run = run,
+): Promise<{ project: Project; ready: boolean; notes: string[] }> {
+	const resolved = await resolveProject(spec, cfg, exec, opts);
+	const prev = ledger.projects().find((p) => p.name === resolved.name);
+	// 登録し直しでは、明示されなかった項目（native の設定など）を引き継ぐ
+	const project = ledger.upsertProject(
+		prev && !opts.native ? { ...prev, path: resolved.path, repo: resolved.repo, active: true } : resolved,
+	);
+	const notes: string[] = [];
+	excludeLocalState(project.path);
+	if (project.mode === "harness") {
+		const r = await exec(HARNESS_LABELS, ["--repo", project.repo]);
+		if (!r.ok)
+			notes.push(`harness:* ラベルを作れませんでした（${r.stderr.trim().slice(0, 200)}）。gh の権限を確認してください`);
+	}
+	const ready = ledger.isReady(project);
+	if (
+		!ready &&
+		!ledger
+			.tasks()
+			.some((t) => t.project === project.name && t.title.startsWith("プロジェクトの調査") && t.status !== "done")
+	) {
+		ledger.createTask({
+			project: project.name,
+			title: "プロジェクトの調査と設定",
+			status: "ai-working",
+			next: "worker がリポジトリを調べて設定の案を作り、A-番号で確認を求める",
+			note: "設定が無いため調査から始める",
+		});
+	}
+	ledger.journal(`[${project.name}] プロジェクトを登録（${project.repo} / ${project.path} / ${project.mode}）`);
+	return { project, ready, notes };
 }

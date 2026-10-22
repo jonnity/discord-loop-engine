@@ -28,6 +28,8 @@ export interface SessionTarget {
 	cwd: string;
 	command: string; // シェルで実行する1行
 	initialPrompt: string;
+	/** 既定以外の tmux セッションで起動したいとき（そのリポジトリのスクリプトが特定のセッション名を前提にしている場合） */
+	tmuxSession?: string;
 }
 
 export function windowName(name: string) {
@@ -88,19 +90,28 @@ export class Supervisor {
 		return s;
 	}
 
-	private target(name: string) {
-		return `${this.o.tmuxSession}:${windowName(name)}`;
+	private sessionOf(t: Pick<SessionTarget, "tmuxSession">) {
+		return t.tmuxSession ?? this.o.tmuxSession;
 	}
 
-	private async windows(): Promise<string[] | null> {
-		const r = await this.o.tmux(["list-windows", "-t", this.o.tmuxSession, "-F", "#{window_name}"]);
+	private target(name: string) {
+		const t = this.o.targets().find((x) => x.name === name);
+		return `${t ? this.sessionOf(t) : this.o.tmuxSession}:${windowName(name)}`;
+	}
+
+	private async windows(session: string): Promise<string[] | null> {
+		const r = await this.o.tmux(["list-windows", "-t", session, "-F", "#{window_name}"]);
 		return r.ok ? r.stdout.split("\n").filter(Boolean) : null; // null = tmux セッション自体が無い
 	}
 
 	async tick() {
-		const wins = await this.windows();
-		for (const t of this.o.targets()) {
+		const targets = this.o.targets();
+		const bySession = new Map<string, string[] | null>();
+		for (const session of new Set(targets.map((t) => this.sessionOf(t))))
+			bySession.set(session, await this.windows(session));
+		for (const t of targets) {
 			const s = this.st(t.name);
+			const wins = bySession.get(this.sessionOf(t)) ?? null;
 			const exists = wins?.includes(windowName(t.name)) ?? false;
 			if (this.o.isLive(t.name)) {
 				s.waitingNotified = false;
@@ -122,7 +133,7 @@ export class Supervisor {
 					s.waitingNotified = true;
 					this.o.notify(
 						t.name,
-						`⚠️ セッションを起動しましたが engine に繋がっていません。\`tmux attach -t ${this.o.tmuxSession}\` で \`${windowName(t.name)}\` を開き、表示されている確認に答えてください。`,
+						`⚠️ セッションを起動しましたが engine に繋がっていません。\`tmux attach -t ${this.sessionOf(t)}\` で \`${windowName(t.name)}\` を開き、表示されている確認に答えてください。`,
 					);
 				}
 				continue;
@@ -138,6 +149,8 @@ export class Supervisor {
 				continue;
 			}
 			await this.spawn(t, wins !== null);
+			// 同じセッションの次の起動は new-window にする
+			if (wins === null) bySession.set(this.sessionOf(t), [windowName(t.name)]);
 		}
 	}
 
@@ -155,16 +168,17 @@ export class Supervisor {
 			s.stuckNotified = true;
 			this.o.notify(
 				name,
-				`⏸ 許可の確認で止まっています。\`tmux attach -t ${this.o.tmuxSession}\` で \`${windowName(name)}\` を開いて答えてください。`,
+				`⏸ 許可の確認で止まっています。\`tmux attach -t ${this.target(name).split(":")[0]}\` で \`${windowName(name)}\` を開いて答えてください。`,
 			);
 		}
 	}
 
 	private async spawn(t: SessionTarget, sessionExists: boolean) {
 		const s = this.st(t.name);
+		const session = this.sessionOf(t);
 		const args = sessionExists
-			? ["new-window", "-d", "-t", this.o.tmuxSession, "-n", windowName(t.name), "-c", t.cwd, t.command]
-			: ["new-session", "-d", "-s", this.o.tmuxSession, "-n", windowName(t.name), "-c", t.cwd, t.command];
+			? ["new-window", "-d", "-t", session, "-n", windowName(t.name), "-c", t.cwd, t.command]
+			: ["new-session", "-d", "-s", session, "-n", windowName(t.name), "-c", t.cwd, t.command];
 		const r = await this.o.tmux(args);
 		s.restarts.push(this.o.now());
 		if (!r.ok) {
@@ -175,14 +189,14 @@ export class Supervisor {
 		s.waitingNotified = false;
 		s.devPromptAnswered = false;
 		s.needsPrompt = Boolean(t.initialPrompt);
-		this.o.log(`supervisor: ${t.name} を起動しました（tmux ${this.o.tmuxSession}:${windowName(t.name)}）`);
+		this.o.log(`supervisor: ${t.name} を起動しました（tmux ${session}:${windowName(t.name)}）`);
 	}
 
 	/** channel が繋がったときに呼ぶ。engine が起動したセッションなら最初のプロンプトを入れる。 */
 	async onRegistered(name: string) {
 		const t = this.o.targets().find((x) => x.name === name);
 		const s = this.state.get(name);
-		if (!t || !s?.needsPrompt) return;
+		if (!t || !s?.needsPrompt || !t.initialPrompt) return;
 		s.needsPrompt = false;
 		await new Promise((r) => setTimeout(r, this.o.promptDelayMs));
 		await this.o.tmux(["send-keys", "-t", this.target(name), "-l", t.initialPrompt]);

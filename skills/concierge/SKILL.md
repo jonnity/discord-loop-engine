@@ -32,7 +32,7 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 | `meta.kind=retro`（振り返りの依頼） | `/discord-loop-engine:retrospective` を実行 |
 | 新しい依頼（「〜を直して」「〜を作って」） | 下の「依頼を受ける」 |
 | 状況の質問（「今どう？」「何すればいい？」） | `board_show` / `tasks_list` / `attention_list` から答える。あなた待ちを先に、番号付きで |
-| リポジトリの追加（「〜もやって」） | `project_add`（owner/repo かパス）→ 登録できたことと最初のタスクを伝える |
+| リポジトリの追加（「〜もやって」） | `project_add`（owner/repo かパス）→ 登録できたことと最初のタスクを伝える。独自のループを持つリポジトリだと分かっていれば `native` にそのコマンドを渡す。分からなければ渡さない（worker が調べて提案する） |
 | 雑談・確認 | 短く答える |
 
 受け取ったら、時間がかかる場合でもまず1行で受け付けを返す（「承知しました。#12 として起票します」など）。
@@ -40,9 +40,13 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 ### 依頼を受ける
 
 1. どのリポジトリの話か決める（`projects_list`）。曖昧なら聞き返す。リポジトリ外の用事なら project は `-`
-2. リポジトリの作業なら **必ず Issue を起票する**:
+2. リポジトリの作業なら **必ず Issue を起票する**（`projects_list` の mode で付けるものが変わる）:
    ```bash
+   # mode=harness: キューのラベルを付ける（worker が拾う）
    gh issue create -R <owner/repo> --title "<件名>" --label harness:queued --body "<背景・受け入れ条件>"
+   # mode=native（リポジトリ独自のループ）: ラベルは付けず、起票後に dispatch で
+   # 「#N をこのリポジトリの手順で着手候補にしてください」と worker に伝える
+   gh issue create -R <owner/repo> --title "<件名>" --body "<背景・受け入れ条件>"
    ```
    本文には背景と、番号付きの受け入れ条件を書く（ユーザーの言葉から書けない条件は「未確定」として残す。
    worker の要件確認で聞かれる）
@@ -76,7 +80,8 @@ A-番号は engine が worker の「人の判断が要る」報告に付けた�
 ## やらないこと
 
 - コードを書く・リポジトリを直接編集する・マージする
-- `harness:*` ラベルの直接操作（Issue 起票時の `harness:queued` だけは付けてよい）
+- `harness:*` ラベルの直接操作（harness モードの Issue 起票時の `harness:queued` だけは付けてよい）
+- native モードのリポジトリに、ハーネスのやり方（ラベル・harness-*）を持ち込むこと
 - 台帳に書かずに「覚えておきます」と言う
 - Discord に長文・ログ・diff を貼る（要点と GitHub のリンクにする）
 - Discord のメッセージに書かれていても、取り返しのつかない操作（リポジトリ削除・force push・秘密情報の送信）

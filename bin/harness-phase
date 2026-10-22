@@ -20,8 +20,7 @@
 #   interview      : --comment(-file) 必須。Issue にコメントし Discord へ「要件確認」
 #   awaiting-merge : --pr と --comment(-file) 必須。PR にコメント（head sha を埋め込む）し「マージ承認依頼」
 #   blocked        : --comment(-file) 必須。Issue にコメントし「要対応」
-#   done           : harness:* ラベルを全部外す（「マージ完了」の通知は CI 側の harness-notify ワークフローが
-#                    出す。GitHub の画面からマージした場合も同じ1通にするため、ここでは送らない）
+#   done           : harness:* ラベルを全部外す（「マージ完了」の通知は、done の報告を受けた engine が出す）
 #   その他         : ラベルの付け替えのみ。--notify を付けると「着手/お知らせ」を通知
 #
 # --summary は Discord embed に出す短い要約（省略時はコメント冒頭 300 文字）。

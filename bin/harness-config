@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# harness-config — プロジェクトの .claude/harness.json を jq フィルタで読む。
+# harness-config — プロジェクトの設定（harness.json）を jq フィルタで読む。
 #
 # 使い方:
 #   harness-config '.project'                 # 値を出力（null/未定義なら空文字で exit 1）
@@ -9,14 +9,16 @@
 #   harness-config --root                     # プロジェクトルートを出力
 #
 # 設定ファイルの探索順:
-#   1) $HARNESS_CONFIG  2) $CLAUDE_PROJECT_DIR/.claude/harness.json  3) <git toplevel>/.claude/harness.json
+#   1) $HARNESS_CONFIG
+#   2) <プロジェクトルート>/.claude/harness.json（リポジトリに置いてある場合。チームで共有したいとき）
+#   3) $DLE_HOME/projects/$DLE_PROJECT/harness.json（discord-loop-engine 側。リポジトリに何も置かない既定の形）
 #
-# worktree 内から呼んでも harness.json はコミット済みなので worktree 側で見つかる。
+# プロジェクトルートは $CLAUDE_PROJECT_DIR（worktree の中で呼ばれても main 側を指すため）、無ければ git toplevel。
 
 set -euo pipefail
 
 resolve_root() {
-	if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -f "$CLAUDE_PROJECT_DIR/.claude/harness.json" ]; then
+	if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
 		printf '%s\n' "$CLAUDE_PROJECT_DIR"
 		return
 	fi
@@ -24,7 +26,19 @@ resolve_root() {
 }
 
 ROOT="$(resolve_root)"
-CONFIG="${HARNESS_CONFIG:-$ROOT/.claude/harness.json}"
+ENGINE_CONFIG=""
+if [ -n "${DLE_PROJECT:-}" ]; then
+	ENGINE_CONFIG="${DLE_HOME:-$HOME/.discord-loop-engine}/projects/$DLE_PROJECT/harness.json"
+fi
+if [ -n "${HARNESS_CONFIG:-}" ]; then
+	CONFIG="$HARNESS_CONFIG"
+elif [ -f "$ROOT/.claude/harness.json" ]; then
+	CONFIG="$ROOT/.claude/harness.json"
+elif [ -n "$ENGINE_CONFIG" ] && [ -f "$ENGINE_CONFIG" ]; then
+	CONFIG="$ENGINE_CONFIG"
+else
+	CONFIG="$ROOT/.claude/harness.json"
+fi
 
 case "${1:-}" in
 --path)
@@ -49,7 +63,7 @@ if [ ! -f "$CONFIG" ]; then
 		printf '%s\n' "$DEFAULT"
 		exit 0
 	fi
-	echo "harness-config: 設定ファイルがありません（$CONFIG）。/discord-loop-engine:harness-init で作成してください。" >&2
+	echo "harness-config: 設定がありません（$CONFIG${ENGINE_CONFIG:+ / $ENGINE_CONFIG}）。/discord-loop-engine:onboard で調査して作成してください。" >&2
 	exit 1
 fi
 

@@ -38,9 +38,9 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
 | `harness-status` | 読み取り専用の状況一覧 |
 
-## 設定（`.claude/harness.json`）
+## 設定（engine 側の `projects/<名前>/harness.json`、またはリポジトリの `.claude/harness.json`）
 
-主に使うキー（全体は discord-loop-engine の `templates/harness.json`）:
+主に使うキー（全体は discord-loop-engine の `templates/profile.example.json`）:
 
 - `project` / `repo` / `baseBranch` / `owners`
 - `maxParallel`（既定 3）/ `worktreeRoot`（既定 `.worktrees`）/ `branchPrefix`（既定 `fix/issue-`）
@@ -48,6 +48,8 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 - `gate`: PR 前ゲート `[{name, run}]`
 - `codex.command`: Codex 起動コマンド（`{worktree}` を置換）
 - `context`: Codex とレビュー役に必ず読ませるファイル（CLAUDE.md・仕様書など）
+- `notes`: リポジトリに規約ファイルが無いときの決まりごと（Phase 2 で worktree の `.harness/notes.md` に書き出して読ませる）
+- `permissions`: worker が確認なしで使ってよいコマンド（engine が起動時に渡す）
 - `demo`: UI 変更の録画手順 `{spec, run, output}`（`{n}` を置換）。無ければ動画なし
 - `specRecordDir`: 設計記録をコミットする場所（`null` ならコミットしない）
 - `humanChecks`: 自動では確認できず、毎回マージ承認依頼に載せる確認項目
@@ -118,12 +120,13 @@ git -C "$ROOT" worktree add "$WT" -b "$(harness-config '.branchPrefix' fix/issue
 (cd "$WT" && harness-config '.setup[]?' | while read -r c; do bash -c "$c"; done)
 mkdir -p "$WT/.harness/spec" "$WT/.harness/impl"
 gh issue view {n} --comments > "$WT/.harness/issue-{n}.md"   # Codex の入力（要件メモを含む）
+harness-config '.notes' '' > "$WT/.harness/notes.md"          # engine 側の設定にある決まりごと
 harness-phase {n} designing --notify
 
 CODEX=$(harness-config '.codex.command' 'codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox')
 tmux new-window -n "codex-spec-{n}" "${CODEX//\{worktree\}/$WT} '
 .harness/issue-{n}.md の Issue と要件メモを読み、詳細設計書を .harness/spec/{n}.md に書いてください。
-先に $(harness-config '.context | join(\", \")' AGENTS.md) を読むこと。
+先に $(harness-config '.context | join(\", \")' AGENTS.md) と .harness/notes.md を読むこと。
 含めるもの: 受け入れ条件の対応表・変更ファイル一覧・実装方針・型/データ構造・テスト方針・
 自動では確認できない点（humanChecks に該当するもの）・未確定事項。
 git add / commit / push はしないこと。書き終えたら終了してください。'"
@@ -268,8 +271,8 @@ tmux kill-window -t "codex-impl-{n}" 2>/dev/null
 ```
 
 `harness-merge` が承認・head の一致・CI・mergeable を確認し、マージ後に `done`（ラベル除去）まで行う。
-拒否されたら理由に従って直す（迂回しない）。「🔵 マージ完了」の Discord 通知はプロジェクトの
-`harness-notify` ワークフロー（CI 側）が出すので、ここでは送らない。
+拒否されたら理由に従って直す（迂回しない）。「🔵 マージ完了」の Discord 通知は、`done` の報告を受けた
+engine が出すので、ここでは送らない。
 
 **人間が GitHub の画面から直接マージした場合**: Issue は `closes #{n}` で閉じるが、ラベルと worktree が残る。
 Step 0 で「closed なのに `harness:*` ラベルが残っている Issue」を見つけたら、`harness-phase {n} done` と
