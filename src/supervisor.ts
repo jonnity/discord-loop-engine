@@ -14,12 +14,14 @@ const DEV_CHANNEL_PROMPT = "I am using this for local development";
 // 許可確認で止まっている画面の目印
 const PERMISSION_PROMPTS = ["Do you want to proceed?", "Do you want to make this edit", "Do you want to create"];
 
-export type Tmux = (args: string[]) => Promise<{ ok: boolean; stdout: string }>;
+export type Tmux = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr?: string }>;
 
 export function tmuxRunner(): Tmux {
 	return (args) =>
 		new Promise((resolve) => {
-			execFile("tmux", args, (err, stdout) => resolve({ ok: !err, stdout: String(stdout ?? "") }));
+			execFile("tmux", args, (err, stdout, stderr) =>
+				resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
+			);
 		});
 }
 
@@ -176,13 +178,15 @@ export class Supervisor {
 	private async spawn(t: SessionTarget, sessionExists: boolean) {
 		const s = this.st(t.name);
 		const session = this.sessionOf(t);
+		// -t は「セッション名:」にする。「dle」だけだと tmux が窓名の前方一致で dle-concierge を指し、
+		// その番号に作ろうとして「index 0 in use」で失敗するため
 		const args = sessionExists
-			? ["new-window", "-d", "-t", session, "-n", windowName(t.name), "-c", t.cwd, t.command]
+			? ["new-window", "-d", "-t", `${session}:`, "-n", windowName(t.name), "-c", t.cwd, t.command]
 			: ["new-session", "-d", "-s", session, "-n", windowName(t.name), "-c", t.cwd, t.command];
 		const r = await this.o.tmux(args);
 		s.restarts.push(this.o.now());
 		if (!r.ok) {
-			this.o.log(`supervisor: ${t.name} の起動に失敗しました`);
+			this.o.log(`supervisor: ${t.name} の起動に失敗しました: ${(r.stderr ?? "").trim().slice(0, 300)}`);
 			return;
 		}
 		s.spawnedAt = this.o.now();

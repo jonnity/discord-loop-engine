@@ -56,6 +56,15 @@ test("セッションが無ければ新しい tmux セッションに起動す�
 	]);
 });
 
+test("セッションが既にあれば「セッション名:」を指定して新しいウィンドウを足す", async () => {
+	// 「-t dle」だと tmux が窓名 dle-concierge の前方一致と解釈し、その番号に作ろうとして失敗する
+	const { sup, calls } = setup({ windows: ["dle-concierge"] });
+	await sup.tick();
+	assert.deepEqual(spawns(calls), [
+		["new-window", "-d", "-t", "dle:", "-n", "dle-kishimen-tool", "-c", "/w/k", "claude --x"],
+	]);
+});
+
 test("繋がっている・ウィンドウがある間は二重に起動しない", async () => {
 	const a = setup({ windows: [], live: new Set(["kishimen-tool"]) });
 	await a.sup.tick();
