@@ -1,0 +1,79 @@
+#!/usr/bin/env bash
+#
+# harness-hook — リポジトリ固有の手順を、フェーズの決まった位置で実行する差し込み口。
+#
+# ループの本体（issue-cycle / issue-loop）はどのリポジトリでも同じにし、リポジトリごとの違い
+# （.env の symlink、独自の PR 前検査、CI の仕分け、マージ前の確認など）は profile の hooks に書く。
+# 本体にリポジトリ固有の手順を書き込むと、リポジトリが増えるたびに本体が分岐していくため。
+#
+# 使い方: harness-hook <phase> [--issue <n>] [--pr <n>] [--dir <実行ディレクトリ>]
+#
+# phase と、呼び出す側・失敗したときの扱い:
+#   afterWorktree  worktree を作った直後（issue-cycle）。失敗したら worktree の準備ができていない
+#   beforePR       PR を作る前の追加の検査（harness-gate が gate の後に呼ぶ）。失敗したら PR を出さない
+#   onCIRed        CI が赤くなったときの仕分け（issue-loop）。終了コード 0 = コード起因ではなく対処済み
+#                  （再実行した等。次の CI の結果を待つ）、0 以外 = コード起因（出力を添えて Codex に差し戻す）
+#   beforeMerge    マージ前の確認（harness-merge が呼ぶ）。失敗したらマージしない
+#
+# profile（harness.json）:
+#   "hooks": { "afterWorktree": ["pnpm install"], "beforePR": ["pnpm ci:local"], ... }
+# コマンドは配列の順に1つずつ実行し、最初の失敗で止める（後のコマンドは前の成功を前提にしてよい）。
+# コマンド中の {n} {pr} {worktree} {main} は置き換えられ、同じ値が環境変数
+# HARNESS_ISSUE / HARNESS_PR / HARNESS_WORKTREE / HARNESS_MAIN にも入る。
+#
+# 互換: 以前の "setup"（afterWorktree の前に実行）と "ciTriage"（hooks.onCIRed が無いときに使う）も読む。
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+PHASE="${1:-}"
+case "$PHASE" in
+afterWorktree | beforePR | onCIRed | beforeMerge) shift ;;
+*)
+	echo "使い方: harness-hook <afterWorktree|beforePR|onCIRed|beforeMerge> [--issue <n>] [--pr <n>] [--dir <dir>]" >&2
+	exit 2
+	;;
+esac
+
+ISSUE=""
+PR=""
+DIR="$(pwd)"
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--issue) ISSUE="${2:-}" && shift 2 ;;
+	--pr) PR="${2:-}" && shift 2 ;;
+	--dir) DIR="${2:-}" && shift 2 ;;
+	*) echo "harness-hook: 不明な引数 $1" >&2 && exit 2 ;;
+	esac
+done
+cd "$DIR" || exit 2
+
+# 設定は worktree の中からでもメインの設定を読む（harness-config が CLAUDE_PROJECT_DIR / git から決める）
+CONFIG="$("$SCRIPT_DIR/harness-config" --path 2>/dev/null || true)"
+[ -n "$CONFIG" ] && [ -f "$CONFIG" ] || exit 0
+
+MAIN="$(dirname "$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null || echo "$DIR/.git")")"
+WORKTREE="$(git rev-parse --show-toplevel 2>/dev/null || echo "$DIR")"
+
+case "$PHASE" in
+afterWorktree) filter='[(.setup // [])[], (.hooks.afterWorktree // [])[]]' ;;
+onCIRed) filter='if (.hooks.onCIRed // null) != null then .hooks.onCIRed else [(.ciTriage // empty)] end' ;;
+*) filter="(.hooks.$PHASE // [])" ;;
+esac
+
+mapfile -t commands < <(jq -r "$filter | .[] | select(type == \"string\" and . != \"\")" "$CONFIG")
+[ "${#commands[@]}" -eq 0 ] && exit 0
+
+export HARNESS_ISSUE="$ISSUE" HARNESS_PR="$PR" HARNESS_WORKTREE="$WORKTREE" HARNESS_MAIN="$MAIN"
+for c in "${commands[@]}"; do
+	c="${c//\{n\}/$ISSUE}"
+	c="${c//\{pr\}/$PR}"
+	c="${c//\{worktree\}/$WORKTREE}"
+	c="${c//\{main\}/$MAIN}"
+	echo "=== [hooks.$PHASE] $c" >&2
+	if ! bash -c "$c"; then
+		echo "harness-hook: hooks.$PHASE が失敗しました: $c" >&2
+		exit 1
+	fi
+done

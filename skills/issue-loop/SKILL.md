@@ -119,11 +119,15 @@ Phase 1 の質問の答えが **CLAUDE.md に明記された規約**から一意
 
 PR の CI が失敗したら（購読イベント、または tick ごとの `gh pr checks <PR>`）:
 
-1. **仕分ける**。`harness-config '.ciTriage'` があればそれを実行する（例: oogiri-doc の `pnpm ci:triage`）。
-   無ければサブエージェントにログを読ませて `REAL`（コード起因）/ `INFRA`（ランナー・ネットワーク・
+1. **仕分ける**。profile に `hooks.onCIRed` があれば `harness-hook onCIRed --issue {n} --pr <PR>` を実行する
+   （例: oogiri-doc の `pnpm ci:triage` → INFRA なら `gh run rerun`）。
+   - 終了コード 0 → コード起因ではなく対処済み（再実行した等）。このフェーズでは何もせず、次の CI の結果を待つ
+   - 0 以外 → `REAL` として 3 へ（出力を根本原因の手がかりとしてサブエージェントに渡す）
+
+   差し込み口が無ければ、サブエージェントにログを読ませて `REAL`（コード起因）/ `INFRA`（ランナー・ネットワーク・
    チェックアウト等、テスト本体が走る前に死んだ）/ `STALE`（新しい run に追い越された）に分けさせる
 2. `INFRA` → `gh run rerun <run-id>` を **1回だけ**。2回目も落ちたら REAL として扱う。
-   **再トリガー目的の空コミットは積まない**
+   **再トリガー目的の空コミットは積まない**（harness-guard が止める）
 3. `REAL` → サブエージェントに「根本原因と、Codex に渡す修正指示を1段落で」まとめさせ、
    `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する
    （Claude はコードを直さない）。直ったら `harness-gate` → push

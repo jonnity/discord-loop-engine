@@ -33,7 +33,8 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 | `harness-config '<jq>' [既定値]` | `.claude/harness.json` を読む |
 | `harness-phase <n> <phase> [...]` | フェーズ遷移（人間ゲートは通知必須） |
 | `harness-inbox` | 人間の返信・承認/差し戻し・通知の鮮度切れを JSON で拾う |
-| `harness-gate [dir]` | PR 前ゲート（CI と同じ検査を全部回して一覧） |
+| `harness-gate [dir]` | PR 前ゲート（CI と同じ検査を全部回して一覧。最後に `hooks.beforePR`） |
+| `harness-hook <phase> [--issue n] [--pr n] [--dir d]` | profile の `hooks.<phase>` を実行する |
 | `harness-merge <n> [--chat-approval "<引用>"]` | 承認・CI・mergeable を確認してマージ → done |
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
 | `harness-status` | 読み取り専用の状況一覧 |
@@ -44,8 +45,13 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 
 - `project` / `repo` / `baseBranch` / `owners`
 - `maxParallel`（既定 3）/ `worktreeRoot`（既定 `.worktrees`）/ `branchPrefix`（既定 `fix/issue-`）
-- `setup`: worktree 作成直後に実行するコマンド配列（依存インストールなど）
-- `gate`: PR 前ゲート `[{name, run}]`
+- `gate`: PR 前ゲート `[{name, run}]`（CI と同じ検査を同じ順で）
+- `hooks`: リポジトリ固有の手順の差し込み口（`harness-hook <phase>` が実行。どれもコマンドの配列で、最初の失敗で止まる。
+  `{n}` `{pr}` `{worktree}` `{main}` を置換）
+  - `afterWorktree`: worktree 作成直後（依存のインストール、`.env` の symlink など）。以前の `setup` もここで先に実行される
+  - `beforePR`: PR 前の追加の検査（`harness-gate` が gate の後に実行）
+  - `onCIRed`: CI が赤くなったときの仕分け（issue-loop が実行。0 = 対処済み、0 以外 = コード起因）
+  - `beforeMerge`: マージ前の確認（`harness-merge` が実行）
 - `codex.command`: Codex 起動コマンド（`{worktree}` を置換）
 - `context`: Codex とレビュー役に必ず読ませるファイル（CLAUDE.md・仕様書など）
 - `notes`: リポジトリに規約ファイルが無いときの決まりごと（Phase 2 で worktree の `.harness/notes.md` に書き出して読ませる）
@@ -117,7 +123,7 @@ ROOT=$(harness-config --root); WT=$ROOT/$(harness-config '.worktreeRoot' .worktr
 git -C "$ROOT" fetch origin "$(harness-config '.baseBranch' main)"
 git -C "$ROOT" worktree add "$WT" -b "$(harness-config '.branchPrefix' fix/issue-){n}" \
   "origin/$(harness-config '.baseBranch' main)"
-(cd "$WT" && harness-config '.setup[]?' | while read -r c; do bash -c "$c"; done)
+harness-hook afterWorktree --issue {n} --dir "$WT" || exit 1   # 失敗したら worktree の準備ができていない。人に渡す
 mkdir -p "$WT/.harness/spec" "$WT/.harness/impl"
 gh issue view {n} --comments > "$WT/.harness/issue-{n}.md"   # Codex の入力（要件メモを含む）
 harness-config '.notes' '' > "$WT/.harness/notes.md"          # engine 側の設定にある決まりごと

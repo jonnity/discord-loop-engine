@@ -10,7 +10,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import { type AttentionKind, KIND_LABEL, Ledger, TASK_STATUSES, type Task, type TaskStatus } from "./ledger.ts";
-import { run as defaultRun, ensureLabels, type Run, registerProject, sessionTargets } from "./projects.ts";
+import {
+	run as defaultRun,
+	ensureLabels,
+	ensureOnboardingTask,
+	type Run,
+	registerProject,
+	sessionTargets,
+} from "./projects.ts";
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
 import type { DiscordApi } from "./rest.ts";
 import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
@@ -58,6 +65,21 @@ const PHASE_STATUS: Record<string, TaskStatus> = {
 	blocked: "waiting-human",
 	done: "done",
 };
+
+// profile.hooks に書けるフェーズ（bin/harness-hook と揃える）
+const HOOK_PHASES = ["afterWorktree", "beforePR", "onCIRed", "beforeMerge"];
+
+/** profile.hooks の形を確かめる。差し込み口の名前の書き間違いは、黙って実行されないまま気づけないため */
+function validateHooks(hooks: unknown) {
+	if (hooks === undefined || hooks === null) return;
+	if (typeof hooks !== "object" || Array.isArray(hooks))
+		throw new Error("profile.hooks は { フェーズ: [コマンド, ...] } の形にしてください");
+	for (const [k, v] of Object.entries(hooks)) {
+		if (!HOOK_PHASES.includes(k)) throw new Error(`profile.hooks.${k} は使えません（${HOOK_PHASES.join(" / ")}）`);
+		if (!Array.isArray(v) || !v.every((c) => typeof c === "string" && c.trim() !== ""))
+			throw new Error(`profile.hooks.${k} はコマンドの配列にしてください`);
+	}
+}
 
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
 
@@ -449,6 +471,40 @@ export class Engine {
 				this.supervisor?.tick().catch(() => {});
 				return r;
 			}
+			case "project_mode": {
+				conciergeOnly();
+				const p = this.ledger.projects().find((x) => x.name === str(a.name));
+				if (!p) throw new Error(`プロジェクト ${str(a.name)} は登録されていません`);
+				const mode = str(a.mode);
+				if (mode !== "harness" && mode !== "native") throw new Error("mode は harness か native です");
+				const command = str(a.command) || (p.mode === "native" ? (p.initialPrompt ?? "") : "");
+				if (mode === "native" && !command)
+					throw new Error("native では command（そのリポジトリのループを始めるコマンド）が必要です");
+				// 起動先のセッションが変わることがあるので、変更前のセッションで動いている worker を閉じる
+				const before = this.targets().find((t) => t.name === p.name);
+				const oldSession = before?.tmuxSession ?? this.config.tmuxSession;
+				const next = this.ledger.upsertProject({
+					...p,
+					mode,
+					initialPrompt: mode === "native" ? command : undefined,
+					tmuxSession: mode === "native" ? str(a.tmux_session) || p.tmuxSession : undefined,
+				});
+				const notes: string[] = [];
+				const ready = this.ledger.isReady(next);
+				if (mode === "harness") {
+					if (ready) {
+						const err = await ensureLabels(next, this.exec);
+						if (err) notes.push(err);
+					} else {
+						ensureOnboardingTask(this.ledger, next.name, "native から harness に切り替えたため、設定を作り直す");
+						notes.push("設定が無いので、worker がリポジトリを調べて設定の案を出します（A-番号で確認が来ます）");
+					}
+				}
+				this.ledger.journal(`[${next.name}] モードを ${p.mode} → ${mode} に切り替え`);
+				await this.supervisor?.restart(next.name, oldSession);
+				this.scheduleBoard();
+				return { project: next, ready, notes };
+			}
 			case "project_set_active": {
 				conciergeOnly();
 				const p = this.ledger.projects().find((x) => x.name === str(a.name));
@@ -532,7 +588,7 @@ export class Engine {
 				return this.notify(who, a);
 			case "restart": {
 				if (!isCli) throw new Error("restart は dle CLI から使います");
-				this.supervisor?.reset(str(a.name));
+				await this.supervisor?.restart(str(a.name));
 				return { ok: true };
 			}
 			default:
@@ -605,6 +661,7 @@ export class Engine {
 					'profile.gate に [{ "name": ..., "run": ... }] を1つ以上入れてください（CI と同じ検査を同じ順で）',
 				);
 			}
+			validateHooks(profile?.hooks);
 		} else if (!str(a.initial_prompt)) {
 			throw new Error("native では initial_prompt（そのリポジトリのループを始めるコマンド）が必要です");
 		}
@@ -622,9 +679,15 @@ export class Engine {
 			summary,
 			proposedAt: new Date().toISOString(),
 		});
+		const hooks = Object.entries((profile?.hooks ?? {}) as Record<string, string[]>).filter(([, v]) => v.length > 0);
 		const draftView =
 			mode === "harness"
-				? `検査（PR 前に CI と同じ順で）:\n${(profile?.gate as { name: string; run: string }[]).map((g) => `- ${g.name}: \`${g.run}\``).join("\n")}`
+				? [
+						`検査（PR 前に CI と同じ順で）:\n${(profile?.gate as { name: string; run: string }[]).map((g) => `- ${g.name}: \`${g.run}\``).join("\n")}`,
+						...(hooks.length
+							? [`差し込み口:\n${hooks.map(([k, v]) => `- ${k}: ${v.map((c) => `\`${c}\``).join(" → ")}`).join("\n")}`]
+							: []),
+					].join("\n")
 				: `このリポジトリ独自のループで進めます: \`${str(a.initial_prompt)}\``;
 		return this.openGate(project, GATE_EVENTS.setup as (typeof GATE_EVENTS)[string], {
 			task,

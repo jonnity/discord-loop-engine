@@ -6,7 +6,7 @@
 	"worktreeRoot": ".worktrees",
 	"branchPrefix": "fix/issue-",
 	"mergeMethod": "merge",
-	"setup": ["npm ci"],
+	"hooks": { "afterWorktree": ["npm ci"] },
 	"gate": [
 		{
 			"name": "types",
@@ -39,7 +39,6 @@
 		"src-tauri/ または src/platform/ を変更した場合: Windows 実機で物理テンキー5台の識別・割り当て・採点ができること（Linux のコンテナでは Raw Input を確認できない）",
 		"投影画面の見た目を変えた場合: 第2ディスプレイの全画面で、点数が出ず色と「達成」だけで状況が伝わること"
 	],
-	"ciTriage": null,
 	"notify": {
 		"required": true,
 		"envFiles": [],

@@ -10,6 +10,7 @@
 #
 # harness.json:
 #   "gate": [ {"name": "types", "run": "npm run typecheck"}, ... ]
+#   "hooks": { "beforePR": ["pnpm ci:local"] }   # gate の後に、リポジトリ独自の PR 前検査として実行する
 
 set -uo pipefail
 
@@ -38,6 +39,16 @@ for i in $(seq 0 $((count - 1))); do
 		failed=1
 	fi
 done
+
+if [ "$(jq '(.hooks.beforePR // []) | length' "$CONFIG" 2>/dev/null || echo 0)" != 0 ]; then
+	start=$(date +%s)
+	if "$SCRIPT_DIR/harness-hook" beforePR --dir "$DIR"; then
+		results+=("✅ hooks.beforePR ($(($(date +%s) - start))s)")
+	else
+		results+=("❌ hooks.beforePR ($(($(date +%s) - start))s)")
+		failed=1
+	fi
+fi
 
 echo "" >&2
 echo "=== harness-gate 結果 ($DIR)" >&2

@@ -40,13 +40,38 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
 
 - `gate`: **CI と同じ検査を同じ順で**。1つずつ実際に main で一度走らせ、通るか確かめる
   （もともと赤いものがあれば、案の要約にそう書く）
-- `setup`: worktree を作った直後に要るもの（依存のインストールなど）
 - `context`: 実在する規約・仕様のファイルだけ
 - `notes`: 規約ファイルが無い・足りないときの、このプロジェクトの決まりごと（Codex とレビュー役が読む）
+- `hooks`: リポジトリ固有の手順を、ループの決まった位置に差し込む（どれもコマンドの配列。最初の失敗で止まる。
+  `{n}` `{pr}` `{worktree}` `{main}` が使える）
+  - `afterWorktree`: worktree を作った直後（依存のインストール、gitignore された `.env` などの symlink）
+  - `beforePR`: CI と同じ検査（gate）の後に回す、リポジトリ独自の PR 前検査（例: `pnpm ci:local`）
+  - `onCIRed`: CI が赤くなったときの仕分け。終了コード 0 = コード起因ではなく対処済み（再実行した等）、
+    0 以外 = コード起因。リポジトリに仕分けのスクリプトがあるときだけ
+  - `beforeMerge`: マージ前の確認（例: 静的解析の新しい指摘が 0 であること）
+  - 規約ファイルに「PR 前に必ず〜」「マージ前に〜を確認」などがあれば、ここに写す。無ければ書かない
 - `permissions`: worker が確認なしで使ってよいコマンド（`Bash(npm:*)` など。広げすぎない）
 - `humanChecks`: 自動では確かめられないもの
 - `demo`: 録画の手順が既にあるときだけ。無ければ `null`
 - `specRecordDir`: 設計記録を PR に含める慣習がリポジトリにあるときだけ。無ければ `null`
+
+### native から harness に切り替えたとき（`dle mode <名前> harness`）
+
+独自のループ（例: `.claude/skills/` の parallel-cycle-loop）を、dle の issue-loop に置き換えるための調査。
+独自のループのスキルを読み、**ループの本体ではなく、そのリポジトリ固有の手順**を拾って設定に写す:
+
+| 独自のループにあるもの | 写す先 |
+|---|---|
+| worktree を作った後の手順（`.env` の symlink・依存のインストール） | `hooks.afterWorktree` |
+| PR 前に必ず通す検査（`pnpm ci:local` など） | `gate`（CI と同じ部分）と `hooks.beforePR`（それ以外） |
+| CI が赤いときの仕分けスクリプト | `hooks.onCIRed` |
+| マージ前の確認（静的解析の指摘 0 など） | `hooks.beforeMerge` |
+| 規約・設計記録の置き場所 | `context`・`specRecordDir` |
+| 自動では確かめられないこと | `humanChecks` |
+
+Issue の拾い方・Codex への委譲・心拍・人への確認は issue-loop が持っているので、写さない。
+独自のループのスキルはリポジトリに残したまま（消すかどうかは、dle で1周回ったのを確かめてから人が決める）。
+summary には、何をどこに写したかと、写さなかったもの（とその理由）を書く。
 
 ## 3. 確認を求める
 

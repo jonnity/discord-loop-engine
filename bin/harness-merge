@@ -6,7 +6,8 @@
 #   - harness-inbox が merge-ok を返す（owner の "OK" コメント / Approve / harness:merge-ok ラベル）
 #   - --chat-approval "<ユーザーの発言の引用>"（対話チャットで OK をもらった場合。PR に記録を残す）
 # マージ前に、承認依頼を出した head sha と現在の head が一致していること、CI が green であること、
-# mergeable であることを確認する。どれかが崩れていたらマージしない。
+# mergeable であること、profile の hooks.beforeMerge（例: SonarCloud の New issues が 0）が通ることを確認する。
+# どれかが崩れていたらマージしない。
 #
 # 使い方: harness-merge <issue> [--chat-approval "<引用>"]
 
@@ -55,6 +56,11 @@ if [ "$mergeable" != "MERGEABLE" ]; then
 fi
 if [ -n "$bad_checks" ]; then
 	echo "harness-merge: green でないチェックがあります: $bad_checks" >&2
+	exit 1
+fi
+
+if ! "$SCRIPT_DIR/harness-hook" beforeMerge --issue "$ISSUE" --pr "$PR"; then
+	echo "harness-merge: hooks.beforeMerge が通らないためマージしません" >&2
 	exit 1
 fi
 

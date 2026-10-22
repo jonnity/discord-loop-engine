@@ -142,15 +142,38 @@ oogiri-doc のように、Issue を拾ってマージ承認まで自分で回す
 その仕組みをそのまま使います。ハーネスの設定もガードも適用しません。
 
 ```bash
-# oogiri-doc: /parallel-cycle-loop で回し、そのスクリプトが前提にしている tmux セッション「dev」で起動する
-dle add /workspace --native /parallel-cycle-loop --tmux-session dev --name oogiri-doc
+# oogiri-doc: リポジトリの /parallel-cycle-loop で回す
+dle add jonnity/oogiri-doc --native /parallel-cycle-loop
 ```
 
 - リポジトリの手順・通知（`scripts/notify-discord.sh` など）・権限の設定はそのまま使われます
 - 窓口からの依頼や A-番号への回答は、ユーザーからの指示として worker に届きます
-- oogiri-doc のスキルは `/workspace` にあることを前提にしているので、engine もそのリポジトリと同じ環境
-  （devcontainer の中など）で動かしてください
+- そのリポジトリのスクリプトが特定の tmux セッション名を前提にしているときは `--tmux-session <名前>` を付けます
 - `--native` を付けずに追加しても、worker が独自のループを見つければ native を提案してきます
+
+### 進め方を切り替える（`dle mode`）
+
+```bash
+dle mode oogiri-doc harness                           # dle の issue-loop で回す（設定が無ければ調べ直して A-番号で確認）
+dle mode oogiri-doc native --command /parallel-cycle-loop   # リポジトリ独自のループに戻す
+```
+
+登録し直し（`dle add`）では今のモードが引き継がれるので、切り替えはこちらで行います。worker は起動し直します。
+harness に切り替えると、worker は独自のループのスキルを読み、**そのリポジトリ固有の手順だけ**を
+設定の差し込み口（下記）に写した案を出します。独自のループのスキルはリポジトリに残ります。
+
+### リポジトリ固有の手順を足す（`hooks`）
+
+ループの本体（issue-loop）はどのリポジトリでも同じで、違いは設定の `hooks` に書きます。
+どれもコマンドの配列で、順に実行し、最初の失敗で止まります。`{n}`（Issue 番号）・`{pr}`・`{worktree}`・
+`{main}`（メインのチェックアウト）が使えます。
+
+| フェーズ | 呼ばれる場所 | 失敗したとき | 例（oogiri-doc） |
+|---|---|---|---|
+| `afterWorktree` | worktree を作った直後 | その Issue を進めない | `.env` / `.wrangler` の symlink、`pnpm install` |
+| `beforePR` | `harness-gate` の最後（gate の後） | PR を出さない | `pnpm ci:local` |
+| `onCIRed` | CI が赤くなったとき | 0 以外 = コード起因として Codex に差し戻す。0 = 対処済み（再実行など） | `pnpm ci:triage` → INFRA なら `gh run rerun` |
+| `beforeMerge` | `harness-merge` の直前 | マージしない | SonarCloud の新しい指摘が 0 か |
 
 ### 更新する
 
@@ -193,6 +216,7 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 | `dle add <owner/repo またはパス> [--native <コマンド>] [--tmux-session <名前>] [--name <名前>]` | リポジトリを登録（worker が自動で起動） |
 | `dle tasks [--all]` / `dle attention` / `dle board` | 台帳を見る |
 | `dle restart <concierge またはプロジェクト名>` | セッションを起動し直す |
+| `dle mode <名前> harness\|native [--command <コマンド>]` | 進め方を切り替える |
 | `dle doctor` | 必要なものが揃っているか |
 
 ## 設定（`~/.discord-loop-engine/config.json`）

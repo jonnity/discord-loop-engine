@@ -472,6 +472,96 @@ test("調査した設定の案は A-番号で確認され、OK の回答を受�
 	}
 });
 
+test("モードを切り替えると、native の設定を消して harness の調査から始め直し、native へは command 付きで戻せる", async () => {
+	const commands: string[] = [];
+	const { engine, home } = setupEngine(5, async (cmd) => {
+		commands.push(path.basename(cmd));
+		return { ok: true, stdout: "", stderr: "" };
+	});
+	await engine.start();
+	engine.ledger.upsertProject({
+		name: "oogiri-doc",
+		repo: "jonnity/oogiri-doc",
+		path: "/w/oogiri-doc",
+		active: true,
+		mode: "native",
+		initialPrompt: "/parallel-cycle-loop",
+		tmuxSession: "dev",
+	});
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	try {
+		await until(() => engine.sessions.has("concierge"));
+		const r = await c.tool("project_mode", { name: "oogiri-doc", mode: "harness" });
+		assert.equal(r.isError, false, r.text);
+		const p = engine.ledger.projects()[0];
+		assert.equal(p?.mode, "harness");
+		assert.equal(p?.initialPrompt, undefined);
+		assert.equal(p?.tmuxSession, undefined, "native 用のセッション指定は引き継がない");
+		assert.deepEqual(
+			engine.ledger.tasks().map((t) => t.title),
+			["プロジェクトの調査と設定"],
+			"設定が無いので調査から始める",
+		);
+		assert.equal(engine.targets().find((t) => t.name === "oogiri-doc")?.initialPrompt, "/discord-loop-engine:onboard");
+		assert.ok(!commands.includes("harness-labels"), "設定が確定するまでラベルは作らない");
+
+		const bad = await c.tool("project_mode", { name: "oogiri-doc", mode: "native" });
+		assert.equal(bad.isError, true, "native に戻すにはループのコマンドが要る");
+		const back = await c.tool("project_mode", { name: "oogiri-doc", mode: "native", command: "/parallel-cycle-loop" });
+		assert.equal(back.isError, false, back.text);
+		assert.equal(engine.targets().find((t) => t.name === "oogiri-doc")?.initialPrompt, "/parallel-cycle-loop");
+	} finally {
+		c.stop();
+		await engine.stop();
+	}
+});
+
+test("設定の案の hooks は、使えるフェーズとコマンドの配列だけを受け付け、確認の依頼に載せる", async () => {
+	const { engine, rest, home } = setupEngine();
+	await engine.start();
+	engine.ledger.upsertProject({
+		name: "oogiri-doc",
+		repo: "jonnity/oogiri-doc",
+		path: "/w/o",
+		active: true,
+		mode: "harness",
+	});
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "oogiri-doc", DLE_LOOP: "harness" });
+	try {
+		await until(() => engine.sessions.has("oogiri-doc"));
+		const gate = [{ name: "lint", run: "pnpm check:ci" }];
+		const typo = await w.tool("profile_propose", {
+			mode: "harness",
+			profile: { gate, hooks: { afterWorkTree: ["x"] } },
+			summary: "s",
+		});
+		assert.equal(typo.isError, true, "フェーズ名の書き間違いは受け付けない");
+		const notList = await w.tool("profile_propose", {
+			mode: "harness",
+			profile: { gate, hooks: { beforePR: "pnpm ci:local" } },
+			summary: "s",
+		});
+		assert.equal(notList.isError, true);
+		const ok = await w.tool("profile_propose", {
+			mode: "harness",
+			profile: {
+				gate,
+				hooks: { afterWorktree: ["ln -sf {main}/.env .env", "pnpm install"], beforePR: ["pnpm ci:local"] },
+			},
+			summary: "s",
+		});
+		assert.equal(ok.isError, false, ok.text);
+		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
+		assert.match(
+			post?.content ?? "",
+			/差し込み口:\n- afterWorktree: `ln -sf \{main\}\/\.env \.env` → `pnpm install`\n- beforePR: `pnpm ci:local`/,
+		);
+	} finally {
+		w.stop();
+		await engine.stop();
+	}
+});
+
 test("native の worker には独自のループで進める案内を出し、ハーネス用の案内は出さない", async () => {
 	const { engine, home } = setupEngine();
 	await engine.start();

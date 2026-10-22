@@ -12,6 +12,7 @@
 //   dle attention            あなた待ち
 //   dle board                ボード
 //   dle restart <名前>       窓口や worker を起動し直す（concierge / プロジェクト名）
+//   dle mode <名前> harness|native [--command <c>]  ループの進め方を切り替える（登録し直しでは引き継がれるため）
 //   dle notify ...           harness-notify から使う（人の判断が要る通知を A-番号付きで出す）
 
 import { execFile } from "node:child_process";
@@ -26,7 +27,7 @@ import { Ledger } from "./ledger.ts";
 import { registerProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
 import { Rest } from "./rest.ts";
-import { Supervisor, tmuxRunner, windowName } from "./supervisor.ts";
+import { Supervisor, tmuxRunner } from "./supervisor.ts";
 
 const SELF = fileURLToPath(import.meta.url);
 const BIN = path.join(path.dirname(SELF), "..", "bin", "dle");
@@ -230,10 +231,30 @@ async function cmdRead(name: string, args: Record<string, unknown>, local: (l: L
 async function cmdRestart(name: string | undefined) {
 	if (!name) fail("dle restart <concierge またはプロジェクト名>");
 	const config = loadConfig(home);
-	await tmux(["kill-window", "-t", `${config.tmuxSession}:${windowName(name)}`]);
+	// ウィンドウは engine が閉じる（プロジェクトごとの tmux セッションを engine だけが知っているため）
 	const r = await callEngine(config, "restart", { name });
 	if (r === null) fail("engine に接続できません（dle up で起動してください）");
 	console.log(`${name} を次の巡回（30 秒以内）で起動し直します`);
+}
+
+async function cmdMode(name: string | undefined, mode: string | undefined, flags: Record<string, string | boolean>) {
+	if (!name || (mode !== "harness" && mode !== "native"))
+		fail("dle mode <名前> harness|native [--command <ループを始めるコマンド>] [--tmux-session <名前>]");
+	const config = loadConfig(home);
+	const r = (await callEngine(config, "project_mode", {
+		name,
+		mode,
+		command: typeof flags.command === "string" ? flags.command : undefined,
+		tmux_session: typeof flags["tmux-session"] === "string" ? flags["tmux-session"] : undefined,
+	}).catch((e: Error) => fail(e.message))) as {
+		project: { mode: string; initialPrompt?: string };
+		notes: string[];
+	} | null;
+	if (r === null) fail("engine に接続できません（dle up で起動してください）");
+	console.log(
+		`${name} を ${r.project.mode === "native" ? `native（${r.project.initialPrompt}）` : "harness（issue-loop）"} に切り替えました。worker は 30 秒以内に起動し直します`,
+	);
+	for (const n of r.notes) console.log(`  ${n}`);
 }
 
 async function cmdNotify(flags: Record<string, string | boolean>) {
@@ -337,6 +358,7 @@ const commands: Record<string, () => unknown> = {
 	attention: () => cmdRead("attention_list", {}, (l) => l.openAttention()),
 	board: () => cmdRead("board_show", {}, (l) => l.renderBoard()),
 	restart: () => cmdRestart(rest[0]),
+	mode: () => cmdMode(rest[0], rest[1], flags),
 	notify: () => cmdNotify(flags),
 };
 const fn = cmd ? commands[cmd] : undefined;

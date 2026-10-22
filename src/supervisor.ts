@@ -212,4 +212,16 @@ export class Supervisor {
 	reset(name: string) {
 		this.state.delete(name);
 	}
+
+	/**
+	 * ウィンドウを閉じて、次の巡回で起動し直させる。session には閉じる側（変更前）のセッションを渡す。
+	 * 今の targets から求めないのは、モードの切り替えで起動先のセッションが変わった直後にも
+	 * 古いウィンドウを閉じられるようにするため（残すと同じプロジェクトの worker が2つ動く）。
+	 */
+	async restart(name: string, session?: string) {
+		const t = this.o.targets().find((x) => x.name === name);
+		const s = session ?? (t ? this.sessionOf(t) : this.o.tmuxSession);
+		await this.o.tmux(["kill-window", "-t", `${s}:${windowName(name)}`]);
+		this.reset(name);
+	}
 }

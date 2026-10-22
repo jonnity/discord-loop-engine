@@ -47,6 +47,7 @@ const READ_ONLY_COMMANDS = [
 
 const HARNESS_COMMANDS = [
 	"harness-config",
+	"harness-hook",
 	"harness-phase",
 	"harness-inbox",
 	"harness-gate",
@@ -221,6 +222,21 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 
 const HARNESS_LABELS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "harness-labels");
 
+/** 調査タスクが無ければ作る（登録し直し・モードの切り替えで重複させない） */
+export function ensureOnboardingTask(ledger: Ledger, project: string, note: string) {
+	const open = ledger
+		.tasks()
+		.some((t) => t.project === project && t.title.startsWith("プロジェクトの調査") && t.status !== "done");
+	if (open) return;
+	ledger.createTask({
+		project,
+		title: "プロジェクトの調査と設定",
+		status: "ai-working",
+		next: "worker がリポジトリを調べて設定の案を作り、A-番号で確認を求める",
+		note,
+	});
+}
+
 /** harness:* ラベルを作る（冪等）。失敗したら理由を返す */
 export async function ensureLabels(project: Pick<Project, "repo">, exec: Run = run): Promise<string | null> {
 	const r = await exec(HARNESS_LABELS, ["--repo", project.repo]);
@@ -255,20 +271,7 @@ export async function registerProject(
 		const err = await ensureLabels(project, exec);
 		if (err) notes.push(err);
 	}
-	if (
-		!ready &&
-		!ledger
-			.tasks()
-			.some((t) => t.project === project.name && t.title.startsWith("プロジェクトの調査") && t.status !== "done")
-	) {
-		ledger.createTask({
-			project: project.name,
-			title: "プロジェクトの調査と設定",
-			status: "ai-working",
-			next: "worker がリポジトリを調べて設定の案を作り、A-番号で確認を求める",
-			note: "設定が無いため調査から始める",
-		});
-	}
+	if (!ready) ensureOnboardingTask(ledger, project.name, "設定が無いため調査から始める");
 	ledger.journal(`[${project.name}] プロジェクトを登録（${project.repo} / ${project.path} / ${project.mode}）`);
 	return { project, ready, notes };
 }

@@ -219,6 +219,22 @@ const TOOLS: ToolDef[] = [
 		roles: ["worker"],
 	},
 	{
+		name: "project_mode",
+		description:
+			"ループの進め方を切り替える。harness は dle の issue-loop（設定が無ければ worker が調べ直して A-番号で確認する）、native はそのリポジトリ独自のループ。worker は起動し直す",
+		inputSchema: {
+			type: "object",
+			properties: {
+				name: s("プロジェクト名"),
+				mode: s("harness か native"),
+				command: s("native のとき、そのリポジトリのループを始めるコマンド（例: /parallel-cycle-loop）"),
+				tmux_session: s("native のとき、そのリポジトリが前提にしている tmux セッション名（あれば）"),
+			},
+			required: ["name", "mode"],
+		},
+		roles: ["concierge"],
+	},
+	{
 		name: "project_set_active",
 		description: "worker を動かすかどうかを切り替える",
 		inputSchema: {

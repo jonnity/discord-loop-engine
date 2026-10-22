@@ -54,6 +54,10 @@ if printf '%s' "$cmd" | grep -Eq 'git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[
 	deny "git add -f は禁止です。ignore 対象（.harness/ 等のローカル状態）をコミットしないでください。必要なファイルはパスを列挙して通常の git add で追加します。"
 fi
 
+if printf '%s' "$cmd" | grep -Eq 'git([[:space:]]+-C[[:space:]]+[^[:space:]]+)?[[:space:]]+commit([[:space:]].*)?[[:space:]]--allow-empty([[:space:]]|$)'; then
+	deny "空コミットは禁止です。CI を再実行したいときは gh run rerun <run-id> を使ってください（履歴に残って原因調査を妨げるため）。"
+fi
+
 if printf '%s' "$cmd" | grep -Eq 'discord(app)?\.com/api/webhooks'; then
 	deny "Discord webhook への直接投稿は禁止です。harness-notify を使ってください（プロジェクト名とリンクの書式を揃えるため）。"
 fi

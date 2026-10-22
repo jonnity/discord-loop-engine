@@ -7,6 +7,8 @@
 #   - リンク・タイトル無しの通知は送らない
 #   - harness-guard がハーネスの入口を迂回するコマンドを止め、通常のコマンドは通す
 #   - harness-config が既定値と設定値を返す
+#   - harness-hook がフェーズの差し込み口を順に実行し、最初の失敗で止め、置換と環境変数を渡す
+#   - harness-gate が gate の後に hooks.beforePR を実行し、失敗を結果に含める
 
 set -uo pipefail
 
@@ -85,6 +87,8 @@ check "guard: webhook 直接 curl を止める" '[ "$(guard "curl -F x=1 https:/
 check "guard: harness-phase は通す" '[ "$(guard "harness-phase 3 awaiting-merge --pr 5 --comment-file /tmp/x")" = 0 ]'
 check "guard: プラグインパス経由の harness-merge は通す" '[ "$(guard "/root/.claude/plugins/x/bin/harness-merge 3")" = 0 ]'
 check "guard: 通常の git add は通す" '[ "$(guard "git add src/a.ts")" = 0 ]'
+check "guard: 空コミットを止める" '[ "$(guard "git commit --allow-empty -m retrigger")" = 2 ]'
+check "guard: 通常のコミットは通す" '[ "$(guard "git commit -m fix")" = 0 ]'
 check "guard: 通常の gh は通す" '[ "$(guard "gh pr view 5 --json url")" = 0 ]'
 rm "$PROJ/.claude/harness.json"
 check "guard: harness.json が無いプロジェクトでは何もしない" '[ "$(guard "gh pr merge 5")" = 0 ]'
@@ -102,6 +106,38 @@ gguard() { jq -nc --arg c "$1" '{tool_input:{command:$c}}' | env "${@:2}" "$BIN/
 check "guard: engine 側の設定があれば働く" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool)" = 2 ]'
 check "guard: native モードでは何もしない（独自のループの gh pr merge を止めない）" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool DLE_LOOP=native)" = 0 ]'
 check "guard: 設定の無いプロジェクトでは何もしない" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=oogiri-doc)" = 0 ]'
+
+# --- harness-hook / harness-gate ------------------------------------------------
+HP="$TMP/hookproj"
+mkdir -p "$HP/.claude"
+git -C "$HP" init -q
+cat >"$HP/.claude/harness.json" <<'JSON'
+{
+  "setup": ["echo setup >> log"],
+  "gate": [{ "name": "ok", "run": "true" }],
+  "hooks": {
+    "afterWorktree": ["echo after {n} >> log", "echo \"$HARNESS_ISSUE:$HARNESS_PR\" >> log"],
+    "beforePR": ["echo before-pr >> log"],
+    "beforeMerge": ["echo one >> log", "false", "echo never >> log"]
+  },
+  "ciTriage": "echo legacy-triage >> log"
+}
+JSON
+hook() { (cd "$HP" && CLAUDE_PROJECT_DIR="$HP" "$BIN/harness-hook" "$@") >/dev/null 2>&1; echo $?; }
+rm -f "$HP/log"
+check "hook: afterWorktree は setup の後に hooks を順に実行し、{n} と環境変数を渡す" '[ "$(hook afterWorktree --issue 7 --pr 9)" = 0 ] && [ "$(cat "$HP/log")" = "$(printf "setup\nafter 7\n7:9")" ]'
+rm -f "$HP/log"
+check "hook: 失敗したら止め、後のコマンドは実行しない" '[ "$(hook beforeMerge)" = 1 ] && [ "$(cat "$HP/log")" = one ]'
+rm -f "$HP/log"
+check "hook: onCIRed が無ければ以前の ciTriage を使う" '[ "$(hook onCIRed)" = 0 ] && [ "$(cat "$HP/log")" = legacy-triage ]'
+check "hook: 不明なフェーズは拒否" '[ "$(hook nope)" = 2 ]'
+check "hook: 設定の無いリポジトリでは何もしない" '[ "$(cd "$TMP" && CLAUDE_PROJECT_DIR="$TMP" "$BIN/harness-hook" beforePR >/dev/null 2>&1; echo $?)" = 0 ]'
+rm -f "$HP/log"
+gate_out="$(cd "$HP" && CLAUDE_PROJECT_DIR="$HP" "$BIN/harness-gate" 2>&1)"
+check "gate: gate の後に hooks.beforePR を実行して結果に載せる" 'grep -q "✅ hooks.beforePR" <<<"$gate_out" && [ "$(cat "$HP/log")" = before-pr ]'
+jq '.hooks.beforePR = ["false"]' "$HP/.claude/harness.json" >"$TMP/h.json" && mv "$TMP/h.json" "$HP/.claude/harness.json"
+(cd "$HP" && CLAUDE_PROJECT_DIR="$HP" "$BIN/harness-gate" >/dev/null 2>&1)
+check "gate: hooks.beforePR が失敗したらゲートも失敗" '[ $? -eq 1 ]'
 
 echo ""
 echo "passed: $pass, failed: $fail"
