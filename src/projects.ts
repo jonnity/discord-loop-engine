@@ -221,9 +221,17 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 
 const HARNESS_LABELS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "harness-labels");
 
+/** harness:* ラベルを作る（冪等）。失敗したら理由を返す */
+export async function ensureLabels(project: Pick<Project, "repo">, exec: Run = run): Promise<string | null> {
+	const r = await exec(HARNESS_LABELS, ["--repo", project.repo]);
+	return r.ok
+		? null
+		: `harness:* ラベルを作れませんでした（${r.stderr.trim().slice(0, 200)}）。gh の権限を確認してください`;
+}
+
 /**
  * dle add の本体（engine の project_add と、engine が止まっているときの CLI の両方から使う）。
- * 登録 → 作業用ファイルを git の除外に足す → harness モードならラベルを作る → 設定が無ければ調査タスクを作る。
+ * 登録 → 作業用ファイルを git の除外に足す → 設定が確定済みの harness ならラベルを作る → 設定が無ければ調査タスクを作る。
  */
 export async function registerProject(
 	ledger: Ledger,
@@ -240,12 +248,13 @@ export async function registerProject(
 	);
 	const notes: string[] = [];
 	excludeLocalState(project.path);
-	if (project.mode === "harness") {
-		const r = await exec(HARNESS_LABELS, ["--repo", project.repo]);
-		if (!r.ok)
-			notes.push(`harness:* ラベルを作れませんでした（${r.stderr.trim().slice(0, 200)}）。gh の権限を確認してください`);
-	}
 	const ready = ledger.isReady(project);
+	// 設定が未確定なら作らない。調査の結果 native（リポジトリ独自のループ）になるかもしれず、
+	// その場合は使わないラベルをリポジトリに残すことになるため（確定時に profile_activate で作る）
+	if (project.mode === "harness" && ready) {
+		const err = await ensureLabels(project, exec);
+		if (err) notes.push(err);
+	}
 	if (
 		!ready &&
 		!ledger

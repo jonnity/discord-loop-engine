@@ -10,7 +10,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import { type AttentionKind, KIND_LABEL, Ledger, TASK_STATUSES, type Task, type TaskStatus } from "./ledger.ts";
-import { run as defaultRun, type Run, registerProject, sessionTargets } from "./projects.ts";
+import { run as defaultRun, ensureLabels, type Run, registerProject, sessionTargets } from "./projects.ts";
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
 import type { DiscordApi } from "./rest.ts";
 import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
@@ -513,6 +513,7 @@ export class Engine {
 			case "profile_activate": {
 				const name = who.role === "worker" ? who.name : str(a.project);
 				const p = this.ledger.activateDraft(name);
+				const labelError = p.mode === "harness" ? await ensureLabels(p, this.exec) : null;
 				const task = this.ledger
 					.tasks()
 					.find((t) => t.project === name && t.title.startsWith("プロジェクトの調査") && t.status !== "done");
@@ -524,6 +525,7 @@ export class Engine {
 						p.mode === "native"
 							? `以後は ${p.initialPrompt} で進める`
 							: "以後は /discord-loop-engine:issue-loop で進める。permissions は次の起動（dle restart）から反映される",
+					...(labelError ? { warning: labelError } : {}),
 				};
 			}
 			case "notify":

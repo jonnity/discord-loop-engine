@@ -414,7 +414,11 @@ test("harness-notify は engine が動いていれば webhook ではなく engin
 });
 
 test("調査した設定の案は A-番号で確認され、OK の回答を受けた worker が確定するとリポジトリの外に保存される", async () => {
-	const { engine, rest, home } = setupEngine();
+	const commands: string[] = [];
+	const { engine, rest, home } = setupEngine(5, async (cmd) => {
+		commands.push(path.basename(cmd));
+		return { ok: true, stdout: "", stderr: "" };
+	});
 	await engine.start();
 	const repo = mkdtempSync(path.join(os.tmpdir(), "dle-r-"));
 	engine.ledger.upsertProject({
@@ -456,6 +460,7 @@ test("調査した設定の案は A-番号で確認され、OK の回答を受�
 		assert.equal(saved.repo, "jonnity/kishimen-tool");
 		assert.ok(!existsSync(path.join(repo, ".claude")), "リポジトリには何も置かない");
 		assert.equal(engine.ledger.tasks()[0]?.status, "done");
+		assert.ok(commands.includes("harness-labels"), "harness に確定したらラベルを作る");
 		assert.equal(
 			engine.targets().find((t) => t.name === "kishimen-tool")?.initialPrompt,
 			"/discord-loop-engine:issue-loop",

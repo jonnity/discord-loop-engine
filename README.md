@@ -125,11 +125,12 @@ Discord で窓口に「kishimen-tool もやって」と頼んでも同じです�
 
 追加したあとの流れ:
 
-1. engine が `harness:*` ラベルを作り、作業用のディレクトリ（`.harness/`・`.worktrees/`）を
+1. engine が作業用のディレクトリ（`.harness/`・`.worktrees/`）を
    `.git/info/exclude`（コミットされない除外設定）に足す。リポジトリのファイルは変えない
 2. worker がリポジトリを調べ（CI・テストのコマンド・規約・UI の有無・実機でしか確かめられないこと）、
    **「⚙️ A-1 設定の確認」** を出す
-3. 「A-1 OK」と返すと設定が確定し、ループが始まる。設定は `~/.discord-loop-engine/projects/<名前>/harness.json`
+3. 「A-1 OK」と返すと設定が確定し、ループが始まる。設定は `~/.discord-loop-engine/projects/<名前>/harness.json`。
+   issue-loop で進めることに決まったときだけ、ここで `harness:*` ラベルを作る（独自のループを使うなら作らない）
 
 **リポジトリ側の準備は要りません。** CI の失敗とマージ完了は engine が `gh` で見て Discord に知らせるので、
 通知用のワークフローや Secrets も不要です。チームで設定を共有したいときだけ、同じ内容をリポジトリの

@@ -58,7 +58,7 @@ test("作業用ディレクトリはリポジトリの .gitignore ではなく .
 	assert.ok(!existsSync(path.join(dir, ".gitignore")), "リポジトリには何も置かない");
 });
 
-test("登録すると、設定が無ければ調査タスクを作り、ラベルを作る（native はラベルを作らない）", async () => {
+test("登録すると、設定が無ければ調査タスクを作り、ラベルは設定の確定まで作らない（native も作らない）", async () => {
 	const home = mkdtempSync(path.join(os.tmpdir(), "dle-h-"));
 	const ledger = new Ledger(home);
 	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-r-"));
@@ -71,13 +71,21 @@ test("登録すると、設定が無ければ調査タスクを作り、ラベ�
 	};
 	const r = await registerProject(ledger, { workspaceDir: "/nowhere" }, dir, {}, exec);
 	assert.equal(r.ready, false);
-	assert.ok(calls.includes("harness-labels"));
+	assert.ok(!calls.includes("harness-labels"), "調査の結果 native になるかもしれないので、まだ作らない");
 	assert.deepEqual(
 		ledger.tasks().map((t) => t.title),
 		["プロジェクトの調査と設定"],
 	);
 	await registerProject(ledger, { workspaceDir: "/nowhere" }, dir, {}, exec);
 	assert.equal(ledger.tasks().length, 1, "登録し直しても調査タスクは増やさない");
+
+	// 設定が確定済みなら、登録し直しのときにラベルを作る（冪等）
+	mkdirSync(path.dirname(ledger.profilePath("kishimen-tool")), { recursive: true });
+	writeFileSync(ledger.profilePath("kishimen-tool"), JSON.stringify({ gate: [{ name: "t", run: "true" }] }));
+	calls.length = 0;
+	const again = await registerProject(ledger, { workspaceDir: "/nowhere" }, dir, {}, exec);
+	assert.equal(again.ready, true);
+	assert.ok(calls.includes("harness-labels"));
 
 	calls.length = 0;
 	const n = await registerProject(
