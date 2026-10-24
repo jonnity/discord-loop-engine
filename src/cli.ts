@@ -8,7 +8,7 @@
 //   dle status               engine・Discord・セッションの状態
 //   dle add <owner/repo|パス> リポジトリを登録する（--native <コマンド> で独自ループのまま、
 //                            --harness で独自ループがあっても dle のループで回す）
-//   dle projects             登録済みのリポジトリ
+//   dle projects [--json]    登録済みのリポジトリ（モード・接続・設定の状態）
 //   dle tasks [--all]        台帳のタスク
 //   dle attention            あなた待ち
 //   dle board                ボード
@@ -24,7 +24,7 @@ import { fileURLToPath } from "node:url";
 import { CONFIG_TEMPLATE, type Config, loadConfig, readToken } from "./config.ts";
 import { Engine } from "./engine.ts";
 import { Gateway } from "./gateway.ts";
-import { Ledger } from "./ledger.ts";
+import { Ledger, type Project } from "./ledger.ts";
 import { registerProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
 import { Rest } from "./rest.ts";
@@ -234,6 +234,28 @@ async function cmdRead(name: string, args: Record<string, unknown>, local: (l: L
 	show(r ?? local(new Ledger(home)));
 }
 
+async function cmdProjects(json: boolean) {
+	const config = loadConfig(home);
+	const viaEngine = (await callEngine(config, "projects_list", {}).catch(() => null)) as
+		| (Project & { live: boolean; ready: boolean })[]
+		| null;
+	const ledger = new Ledger(home);
+	const list = viaEngine ?? ledger.projects().map((p) => ({ ...p, live: false, ready: ledger.isReady(p) }));
+	if (json) return show(list);
+	if (list.length === 0) return console.log("登録されているリポジトリはありません（dle add で登録）");
+	if (!viaEngine) console.log("※ engine が止まっているため、接続の状態は分かりません\n");
+	for (const p of list) {
+		const how =
+			p.mode === "native"
+				? `native（${p.initialPrompt ?? "コマンドなし"}${p.tmuxSession ? ` / tmux ${p.tmuxSession}` : ""}）`
+				: p.ready
+					? "harness"
+					: `harness・設定の確認待ち${p.harnessOnly ? "（独自ループから写す）" : ""}`;
+		const state = !p.active ? "⏸ 停止中" : !viaEngine ? "　" : p.live ? "🟢 接続中" : "⚪ 未接続";
+		console.log(`${state} ${p.name}  ${how}\n    ${p.repo}  ${p.path}`);
+	}
+}
+
 async function cmdRestart(name: string | undefined) {
 	if (!name) fail("dle restart <concierge またはプロジェクト名>");
 	const config = loadConfig(home);
@@ -356,7 +378,7 @@ const commands: Record<string, () => unknown> = {
 	down: cmdDown,
 	status: cmdStatus,
 	add: () => cmdAdd(rest[0], flags),
-	projects: () => cmdRead("projects_list", {}, (l) => l.projects()),
+	projects: () => cmdProjects(flags.json === true),
 	tasks: () =>
 		cmdRead("tasks_list", { all: flags.all === true }, (l) =>
 			l.tasks().filter((t) => flags.all || t.status !== "done"),

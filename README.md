@@ -216,6 +216,7 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 | `dle up` / `dle down` | 常駐の開始・停止（窓口と worker のセッションは止めない） |
 | `dle status` | engine・Discord・セッションの状態とボード |
 | `dle add <owner/repo またはパス> [--native <コマンド> \| --harness] [--tmux-session <名前>] [--name <名前>]` | リポジトリを登録（worker が自動で起動） |
+| `dle projects [--json]` | 登録済みのリポジトリ（モード・接続中か・設定の確認待ちか） |
 | `dle tasks [--all]` / `dle attention` / `dle board` | 台帳を見る |
 | `dle restart <concierge またはプロジェクト名>` | セッションを起動し直す |
 | `dle mode <名前> harness\|native [--command <コマンド>]` | 進め方を切り替える |
