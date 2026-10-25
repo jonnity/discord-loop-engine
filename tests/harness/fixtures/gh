@@ -15,5 +15,8 @@ case "$*" in
 "pr view 15 --json comments,reviews,headRefOid,url") cat "$D/pr15.json" ;;
 "pr view 16 --json comments,reviews,headRefOid,url") cat "$D/pr16.json" ;;
 "pr view 17 --json comments,reviews,headRefOid,url") cat "$D/pr17.json" ;;
+"issue view 20 --json number,title,body,comments") cat "$D/issue20.json" ;;
+"issue view 21 --json number,title,body,comments") cat "$D/issue21.json" ;;
+"issue view 22 --json number,title,body,comments") cat "$D/issue22.json" ;;
 *) echo "gh stub: unexpected: $*" >&2; exit 1 ;;
 esac

@@ -4,6 +4,7 @@
 // - あなた待ちは A-番号で採番され、同じタスクの同じ種類は新しい依頼に置き換わる
 // - worker がいない間の指示は outbox に残り、取り出すと空になる
 // - ボードには「あなた待ち」「作業中」「次に着手」が出る
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync } from "node:fs";
 import os from "node:os";

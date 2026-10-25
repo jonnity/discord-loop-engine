@@ -11,6 +11,11 @@ export const PLUGIN_SPEC = "plugin:discord-loop-engine@discord-loop-engine";
 // reply などの dle ツールを許可確認なしで使えるようにする（離席中に返事だけで止まらないように）
 export const DLE_TOOLS_RULE = "mcp__plugin_discord-loop-engine_dle";
 
+export interface GitIdentity {
+	name: string;
+	email: string;
+}
+
 export interface WorkerRefresh {
 	enabled: boolean;
 	maxTokens: number;
@@ -40,6 +45,8 @@ export interface Config {
 	worker: { model: string | null; extraArgs: string[]; initialPrompt: string; refresh: WorkerRefresh };
 	retro: { everyDoneTasks: number; everyDays: number; promoteAfter: number };
 	board: { enabled: boolean };
+	/** worker が git commit するときの作者。任意（型付きの Config リテラルを壊さない）。null は未設定 */
+	git?: GitIdentity | null;
 }
 
 export const CONFIG_TEMPLATE = {
@@ -63,7 +70,16 @@ export const CONFIG_TEMPLATE = {
 	},
 	retro: { everyDoneTasks: 5, everyDays: 7, promoteAfter: 3 },
 	board: { enabled: true },
+	// 空は未設定として扱う。個人情報は雛形に書かない
+	git: { name: "", email: "" },
 };
+
+/** 名前とメールの両方がそろっているときだけ採る。片方だけだと git が別の作者と組み合わせてしまうため */
+function readGit(v: unknown): GitIdentity | null {
+	if (typeof v !== "object" || v === null) return null;
+	const { name, email } = v as Record<string, unknown>;
+	return typeof name === "string" && name.trim() && typeof email === "string" && email.trim() ? { name, email } : null;
+}
 
 export function expandHome(p: string): string {
 	return p.startsWith("~/") ? path.join(os.homedir(), p.slice(2)) : p;
@@ -148,5 +164,6 @@ export function loadConfig(home = dleHome()): Config {
 			promoteAfter: num(r.promoteAfter, 3),
 		},
 		board: { enabled: (raw.board as Record<string, unknown> | undefined)?.enabled !== false },
+		git: readGit(raw.git),
 	};
 }

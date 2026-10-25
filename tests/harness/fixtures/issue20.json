@@ -1,0 +1,4 @@
+{"number":20,"title":"本文ありのIssue","body":"## 受け入れ条件\n1. これができる","comments":[
+ {"author":{"login":"jonnity"},"authorAssociation":"OWNER","body":"## 要件メモ\n決定A","createdAt":"2026-10-02T00:00:00Z"},
+ {"author":{"login":"stranger"},"authorAssociation":"NONE","body":"通りすがり","createdAt":"2026-10-02T01:00:00Z"}
+]}

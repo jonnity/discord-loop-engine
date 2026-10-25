@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+#
+# harness-codex-status — Codex が使えるか・Codex のウィンドウがどうなっているかを読むだけのスクリプト。
+#
+# 何も起動しない（起動は harness-codex start）。毎 tick 呼んでも確認なしで通せるよう、読み取り専用に分けてある。
+# tmux・.exit ファイル・codex login status を読むだけで、Codex の起動経路を増やさない。
+#
+# 使い方:
+#   harness-codex-status check
+#       0=使える / 10=使えない。理由は stderr の先頭行に `reason=<not-installed|not-logged-in>`
+#   harness-codex-status status <window> [worktree]
+#       running | exited:<code> | exited:unknown | none を1行で出す
+#       worktree 省略時は window 名（codex-<spec|impl>-<n>）の n から <root>/<worktreeRoot>/issue-<n> を使う
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+do_check() {
+	if ! command -v codex >/dev/null 2>&1; then
+		echo "reason=not-installed (codex コマンドがありません)" >&2
+		return 10
+	fi
+	local out
+	if ! out="$(codex login status 2>&1)"; then
+		# 全文は出さない（認証情報に近い文字列が混ざりうるため、1行だけ・短く）
+		echo "reason=not-logged-in ($(printf '%s' "$out" | head -n1 | cut -c1-120))" >&2
+		return 10
+	fi
+	return 0
+}
+
+do_status() {
+	local window="$1" wt="${2:-}"
+	if [ -z "$wt" ]; then
+		local n="${window##*-}" root wroot
+		root="$("$SCRIPT_DIR/harness-config" --root 2>/dev/null || pwd)"
+		wroot="$("$SCRIPT_DIR/harness-config" '.worktreeRoot' .worktrees 2>/dev/null || echo .worktrees)"
+		wt="$root/$wroot/issue-$n"
+	fi
+	local exitfile="$wt/.harness/$window.exit" idfile="$wt/.harness/$window.id" dead="" rows=""
+	# window 名では引かない: 別のセッション・別のプロジェクトに同名のウィンドウがあると取り違える。
+	# harness-codex start が保存した window-id だけで見る。
+	# id は tmux サーバーの再起動で振り直されるので、名前も照合する（古い .id が無関係なウィンドウと一致しても running にしない）。id が無い・消えているときは .exit を見る
+	if [ -f "$idfile" ]; then
+		rows="$(tmux list-panes -a -F '#{window_id} #{window_name} #{pane_dead}' 2>/dev/null | awk -v w="$(head -n1 "$idfile")" -v n="$window" '$1 == w && $2 == n { print $3 }')"
+	fi
+	if grep -q '^0$' <<<"$rows"; then
+		echo running
+		return 0
+	fi
+	[ -n "$rows" ] && dead=1
+	if [ -f "$exitfile" ]; then
+		echo "exited:$(sed -n 's/^EXIT=//p' "$exitfile" | tail -n1)"
+	elif [ -n "$dead" ]; then
+		echo "exited:unknown"
+	else
+		echo none
+	fi
+}
+
+case "${1:-}" in
+check) do_check ;;
+status)
+	[ -n "${2:-}" ] || { echo "使い方: harness-codex-status status <window> [worktree]" >&2; exit 2; }
+	do_status "$2" "${3:-}"
+	;;
+*)
+	echo "使い方: harness-codex-status check | status <window> [worktree]" >&2
+	exit 2
+	;;
+esac

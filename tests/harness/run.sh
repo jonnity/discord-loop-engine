@@ -17,11 +17,20 @@ BIN="$ROOT/bin"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
+# 実行中の engine（worker の中で走らせる場合）の環境を拾わない。拾うと harness-notify / harness-phase が
+# 実 engine のソケットに繋がり、本物の Discord に投稿してしまう
+unset DLE_ROLE DLE_PROJECT DLE_LOOP DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN
+export DLE_HOME="$TMP/iso-home"
+export DLE_SOCKET="$DLE_HOME/engine.sock"
+mkdir -p "$DLE_HOME"
+
 pass=0
 fail=0
 ok() { pass=$((pass + 1)); echo "ok   - $1"; }
 ng() { fail=$((fail + 1)); echo "FAIL - $1"; }
 check() { if eval "$2"; then ok "$1"; else ng "$1"; fi; }
+
+check "isolate: engine のソケットは一時ディレクトリで、存在しない" '[ "$DLE_SOCKET" = "$TMP/iso-home/engine.sock" ] && [ ! -S "$DLE_SOCKET" ]'
 
 # --- テスト用プロジェクト ------------------------------------------------------
 PROJ="$TMP/proj"
@@ -74,6 +83,114 @@ check "inbox: 質問後の owner の返信だけを回答にする" '[ "$(jq -sc
 check "inbox: 第三者の OK は承認にしない・最新の owner 判断を採る" '[ "$(jq -sc "[.[] | select(.issue==5) | .kind + \":\" + .url]" <<<"$inbox")" = "[\"merge-ok:c4\"]" ]'
 check "inbox: 依頼後に head が進んだら stale-notify" '[ "$(jq -sr ".[] | select(.issue==6) | .kind" <<<"$inbox")" = stale-notify ]'
 check "inbox: harness:merge-ok ラベルは承認" '[ "$(jq -sr ".[] | select(.issue==7) | .kind" <<<"$inbox")" = merge-ok ]'
+
+# --- harness-issue-md（gh はスタブ） --------------------------------------------
+GHSTUB="$ROOT/tests/harness/fixtures"
+md20="$(PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" 20 2>&1)"
+check "issue-md: 見出しにタイトルと番号" 'head -n1 <<<"$md20" | grep -q "^# #20 本文ありのIssue$"'
+check "issue-md: 本文（受け入れ条件）が入る" 'grep -q "1. これができる" <<<"$md20"'
+check "issue-md: 本文がコメントより前" '[ "$(grep -n "これができる" <<<"$md20" | cut -d: -f1)" -lt "$(grep -n "要件メモ" <<<"$md20" | cut -d: -f1)" ]'
+check "issue-md: コメントの見出しに author と authorAssociation" 'grep -q "^### jonnity（OWNER, 2026-10-02T00:00:00Z）$" <<<"$md20" && grep -q "^### stranger（NONE, " <<<"$md20"'
+check "issue-md: 本文が重複しない" '[ "$(grep -c "これができる" <<<"$md20")" = 1 ]'
+md21="$(PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" 21 2>&1)"
+check "issue-md: コメント 0 件でも本文を出す" 'grep -q "本文だけ" <<<"$md21" && ! grep -q "^### " <<<"$md21"'
+md22="$(PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" 22 2>&1)"
+check "issue-md: 本文が空でもエラーにしない" '[ -n "$md22" ] && grep -q "^# #22 " <<<"$md22"'
+PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" >/dev/null 2>&1
+check "issue-md: 番号無しは拒否(2)" '[ $? -eq 2 ]'
+
+# --- harness-codex / harness-codex-status（codex・tmux はスタブ） ------------------
+STUBS="$ROOT/tests/harness/fixtures"
+CW="$TMP/cwt dir"   # 空白入りの worktree
+mkdir -p "$CW/.harness"
+echo "依頼 'quote' です" >"$TMP/prompt.md"
+export TMUX_STUB_LOG="$TMP/tmux.log" TMUX_STUB_PANES="$TMP/panes"
+cs() { (cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-codex-status" "$@"); }
+cx() { (cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-codex" "$@"); }
+
+cs check >/dev/null 2>&1
+check "codex check: ログイン済みなら 0" '[ $? -eq 0 ]'
+err="$(CODEX_STUB_LOGIN=1 cs check 2>&1 >/dev/null)"; rc=$?
+check "codex check: 未ログインは 10 と reason=not-logged-in" '[ $rc -eq 10 ] && head -n1 <<<"$err" | grep -q "^reason=not-logged-in"'
+MIN="$TMP/minbin"; mkdir -p "$MIN"
+for t in dirname head cut cat; do ln -sf "$(command -v $t)" "$MIN/$t"; done
+err="$(PATH="$MIN" "$(command -v bash)" "$BIN/harness-codex-status" check 2>&1 >/dev/null)"; rc=$?
+check "codex check: codex が無ければ 10 と reason=not-installed" '[ $rc -eq 10 ] && head -n1 <<<"$err" | grep -q "^reason=not-installed"'
+
+: >"$TMUX_STUB_LOG"
+CODEX_STUB_LOGIN=1 cx start codex-spec-9 "$CW" "$TMP/prompt.md" >/dev/null 2>&1
+check "codex start: 未ログインは 10 で、tmux のウィンドウを作らない" '[ $? -eq 10 ] && ! grep -q new-window "$TMUX_STUB_LOG"'
+echo old >"$CW/.harness/codex-spec-9.exit"
+: >"$TMUX_STUB_LOG"
+cx start codex-spec-9 "$CW" "$TMP/prompt.md" >/dev/null 2>&1
+check "codex start: ログイン済みなら起動できる" '[ $? -eq 0 ] && grep -q "^new-window -n codex-spec-9 -P -F #{window_id} " "$TMUX_STUB_LOG"'
+check "codex start: new-window と remain-on-exit が同じ tmux 呼び出し（\; 連結）で、名前では -t しない" 'grep -c "^new-window" "$TMUX_STUB_LOG" | grep -qx 1 && grep -q "^new-window .* ; set-option -w remain-on-exit on$" "$TMUX_STUB_LOG" && ! grep -q "set-option .* -t " "$TMUX_STUB_LOG"'
+check "codex start: window-id を .id に保存し、フォーカスを元に戻す" '[ "$(cat "$CW/.harness/codex-spec-9.id")" = @7 ] && grep -qx "select-window -t @1" "$TMUX_STUB_LOG"'
+check "codex start: 前回の .exit を消す" '[ ! -e "$CW/.harness/codex-spec-9.exit" ]'
+check "codex start: EXIT= を残す" 'grep -q "echo EXIT=" "$TMUX_STUB_LOG"'
+# 起動文字列を実際に sh で動かし、空白入りのパス・引用符入りの依頼文が壊れずに codex へ渡ることを確かめる
+inner="$(grep "^new-window" "$TMUX_STUB_LOG" | sed -e "s/^new-window -n codex-spec-9 -P -F #{window_id} //" -e "s/ ; set-option.*$//")"
+mkdir -p "$TMP/echobin"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"$ECHO_OUT"\n' >"$TMP/echobin/codex"; chmod +x "$TMP/echobin/codex"
+ECHO_OUT="$TMP/echo.out" PATH="$TMP/echobin:$PATH" bash -c "$inner" >/dev/null 2>&1
+check "codex start: 空白入りの worktree と引用符入りの依頼文が壊れない" 'grep -qx "$CW" "$TMP/echo.out" && grep -qx "依頼 '"'"'quote'"'"' です" "$TMP/echo.out"'
+check "codex start: 終了コードを .exit に残す" 'grep -qx "EXIT=0" "$CW/.harness/codex-spec-9.exit"'
+cx start codex-spec-9 >/dev/null 2>&1
+check "codex start: 引数不正は 2" '[ $? -eq 2 ]'
+
+# status は window 名ではなく start が保存した window-id で引く
+: >"$TMUX_STUB_PANES"; rm -f "$CW/.harness/codex-impl-4.exit" "$CW/.harness/codex-impl-4.id"
+check "codex status: ウィンドウも .exit も無ければ none" '[ "$(cs status codex-impl-4 "$CW")" = none ]'
+echo "@4" >"$CW/.harness/codex-impl-4.id"
+echo "@4 codex-impl-4 0" >"$TMUX_STUB_PANES"
+check "codex status: 生きていれば running" '[ "$(cs status codex-impl-4 "$CW")" = running ]'
+echo "@4 codex-impl-4 1" >"$TMUX_STUB_PANES"
+check "codex status: 死んでいて .exit が無ければ exited:unknown" '[ "$(cs status codex-impl-4 "$CW")" = exited:unknown ]'
+echo "EXIT=1" >"$CW/.harness/codex-impl-4.exit"
+check "codex status: 死んでいて .exit があれば exited:<code>" '[ "$(cs status codex-impl-4 "$CW")" = exited:1 ]'
+: >"$TMUX_STUB_PANES"
+check "codex status: ウィンドウが消えていても .exit から読む" '[ "$(cs status codex-impl-4 "$CW")" = exited:1 ]'
+printf '@9 codex-impl-4 0\n@3 codex-impl-4 0\n' >"$TMUX_STUB_PANES"
+check "codex status: 別のウィンドウ（同名の別プロジェクトを含む）が生きていても、自分の id が無ければ running にしない" '[ "$(cs status codex-impl-4 "$CW")" = exited:1 ]'
+printf '@9 codex-impl-4 0\n@4 codex-impl-4 1\n' >"$TMUX_STUB_PANES"
+check "codex status: 同名の別ウィンドウが生きていても、自分の id が死んでいれば exited" '[ "$(cs status codex-impl-4 "$CW")" = exited:1 ]'
+rm -f "$CW/.harness/codex-impl-4.exit"
+check "codex status: 自分の id が死んでいて .exit が無ければ、他が生きていても exited:unknown" '[ "$(cs status codex-impl-4 "$CW")" = exited:unknown ]'
+rm -f "$CW/.harness/codex-impl-4.id"
+printf '@9 codex-impl-4 0\n' >"$TMUX_STUB_PANES"
+check "codex status: id ファイルが無ければ他のウィンドウは見ず none" '[ "$(cs status codex-impl-4 "$CW")" = none ]'
+echo "@4" >"$CW/.harness/codex-impl-4.id"
+printf '@4 other-window 0\n' >"$TMUX_STUB_PANES"
+check "codex status: id が一致しても名前が違えば（tmux 再起動で振り直された id）running にしない" '[ "$(cs status codex-impl-4 "$CW")" = none ]'
+
+# stop: 空・不在の id では tmux に -t "" を渡さない（今いるウィンドウ＝worker 自身を消してしまう）
+rm -f "$CW/.harness/codex-impl-4.id"; : >"$TMUX_STUB_LOG"
+cx stop codex-impl-4 "$CW" >/dev/null 2>&1
+check "codex stop: id ファイルが無ければ何もせず 0（kill-window しない）" '[ $? -eq 0 ] && ! grep -q kill-window "$TMUX_STUB_LOG"'
+: >"$CW/.harness/codex-impl-4.id"; : >"$TMUX_STUB_LOG"
+cx stop codex-impl-4 "$CW" >/dev/null 2>&1
+check "codex stop: id が空でも kill-window しない" '[ $? -eq 0 ] && ! grep -q kill-window "$TMUX_STUB_LOG"'
+echo "@4" >"$CW/.harness/codex-impl-4.id"; echo "EXIT=0" >"$CW/.harness/codex-impl-4.exit"
+printf '@4 other-window 0\n' >"$TMUX_STUB_PANES"; : >"$TMUX_STUB_LOG"
+cx stop codex-impl-4 "$CW" >/dev/null 2>&1
+check "codex stop: 名前が違うウィンドウは kill しない" '! grep -q kill-window "$TMUX_STUB_LOG"'
+echo "@4" >"$CW/.harness/codex-impl-4.id"; echo "EXIT=0" >"$CW/.harness/codex-impl-4.exit"
+printf '@4 codex-impl-4 1\n' >"$TMUX_STUB_PANES"; : >"$TMUX_STUB_LOG"
+cx stop codex-impl-4 "$CW" >/dev/null 2>&1
+check "codex stop: id と名前が一致すれば id で kill-window し、.id と .exit を消す" 'grep -qx "kill-window -t @4" "$TMUX_STUB_LOG" && [ ! -e "$CW/.harness/codex-impl-4.id" ] && [ ! -e "$CW/.harness/codex-impl-4.exit" ]'
+check "codex stop: 片付けた後の status は none（exited:0 を返し続けない）" '[ "$(cs status codex-impl-4 "$CW")" = none ]'
+cx stop codex-impl-4 >/dev/null 2>&1
+check "codex stop: 引数不正は 2" '[ $? -eq 2 ]'
+mkdir -p "$PROJ/.worktrees/issue-5/.harness"; echo "EXIT=0" >"$PROJ/.worktrees/issue-5/.harness/codex-spec-5.exit"; : >"$TMUX_STUB_PANES"
+check "codex status: worktree 省略時は window 名の番号から探す" '[ "$(cs status codex-spec-5)" = exited:0 ]'
+
+# harness-status は自分のプロジェクトの id ファイルにあるウィンドウだけを表示する
+mkdir -p "$PROJ/.worktrees/issue-4/.harness"
+echo "@4" >"$PROJ/.worktrees/issue-4/.harness/codex-impl-4.id"; echo "EXIT=1" >"$PROJ/.worktrees/issue-4/.harness/codex-impl-4.exit"
+echo "@5" >"$PROJ/.worktrees/issue-5/.harness/codex-spec-5.id"; rm -f "$PROJ/.worktrees/issue-5/.harness/codex-spec-5.exit"
+printf '@4 codex-impl-4 1\n@5 codex-spec-5 0\n@8 codex-impl-8 0\n' >"$TMUX_STUB_PANES"
+st="$(cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-status" 2>/dev/null)"
+check "status: 自分の codex ウィンドウを終了コード付きで見分けられる" 'grep -q "codex-impl-4: exited:1" <<<"$st" && grep -q "codex-spec-5: running" <<<"$st" && ! grep -q "@8" <<<"$st"'
 
 # --- harness-guard -------------------------------------------------------------
 guard() { jq -nc --arg c "$1" '{tool_input:{command:$c}}' | "$BIN/harness-guard" >/dev/null 2>&1; echo $?; }

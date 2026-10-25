@@ -24,7 +24,16 @@ done
 
 echo ""
 echo "[tmux codex windows]"
-tmux list-windows -a -F '  #{window_name} (#{session_name})' 2>/dev/null | grep 'codex-' || echo "  (なし)"
+# このプロジェクトの worktree にある id ファイル（harness-codex start が保存）から数える。
+# tmux 全体の名前一覧は、別プロジェクトの同名ウィンドウを拾い、終了済み（remain-on-exit）も区別できない
+found=0
+for idf in "$ROOT/$(cfg '.worktreeRoot' | grep . || echo .worktrees)"/issue-*/.harness/codex-*.id; do
+	[ -f "$idf" ] || continue
+	window="$(basename "$idf" .id)"
+	echo "  $window: $("$SCRIPT_DIR/harness-codex-status" status "$window" "$(dirname "$(dirname "$idf")")")"
+	found=1
+done
+[ "$found" = 1 ] || echo "  (なし)"
 
 echo ""
 hb="$ROOT/.harness/loop-heartbeat"

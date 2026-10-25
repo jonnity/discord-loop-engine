@@ -21,7 +21,7 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 
 ## 前提
 
-- `issue-cycle` の前提（codex・tmux・gh、`.claude/harness.json`、`harness-labels` 済み）
+- `issue-cycle` の前提（tmux・gh。codex は無くても `harness-implementer` で進む。`.claude/harness.json`、`harness-labels` 済み）
 - `CronCreate` / `CronList` / `CronDelete` が使えること。使えない環境では手動で `/discord-loop-engine:issue-loop`
   を繰り返す運用に落とす
 - 人の判断が要る通知を出せること。discord-loop-engine の engine が動いていれば engine 経由で出る。
@@ -56,14 +56,24 @@ printf 'last_tick_at=%s\nheartbeat_interval=%s\n' "$(date -u +%FT%TZ)" "${INTERV
 
 ### 1. Codex のシェパード（サブエージェントに丸ごと任せる）
 
-まず無料のチェックだけを本体で行う: `tmux list-windows -a | grep -E 'codex-(spec|impl)-' || true`。
-**ウィンドウが無ければこの節は飛ばす**（サブエージェントを起動しない）。
+まず無料のチェックだけを本体で行う: **このプロジェクトの worktree** にある id ファイル
+（`$(harness-config --root)/<worktreeRoot>/issue-*/.harness/codex-*.id`。`harness-codex start` が保存）のウィンドウごとに
+`harness-codex-status status <window>` を呼ぶ。`tmux list-windows -a | grep` のような名前での検索はしない
+（別プロジェクトの同名ウィンドウを拾い、終了済みのウィンドウ（`remain-on-exit` で残る）も区別できず、
+サブエージェントを毎 tick 起こしてしまう）。
 
-あれば `model: "haiku"` のサブエージェント1体に、全ウィンドウの監視を最大3分任せる:
+- **`running` が無ければこの節のサブエージェントは起動しない**
+- `exited:*` はサブエージェントを起こさず、成果物の有無で分ける:
+  - `exited:0` で成果物あり（spec なら `.harness/spec/{n}.md`、impl なら `.harness/impl/{n}.md`）→ 正常終了。
+    再起動せず `harness-codex stop <window> <worktree>` で片付けるだけ（`.id`・`.exit` も消えるので次の tick から拾わない）
+  - 成果物なし、または非 0 → `issue-cycle` の「Codex の監視と再起動」の判定
+    （認証切れ・usage limit → フォールバック、それ以外 → `harness-codex stop` して `harness-codex start` で再起動）
+
+`running` のウィンドウがあれば `model: "haiku"` のサブエージェント1体に、全ウィンドウの監視を最大3分任せる:
 
 ```
-tmux ウィンドウ {codex-impl-12, ...} を最大3分監視し、結論だけを1ウィンドウ1行で返してください。
-`tmux capture-pane -t {window} -p | tail -5` を繰り返し見て:
+tmux ウィンドウ {codex-impl-12 の window-id, ...} を最大3分監視し、結論だけを1ウィンドウ1行で返してください。
+`tmux capture-pane -t {window-id} -p | tail -5`（window-id は `.id` ファイルの値） を繰り返し見て:
 - y/n の承認待ち: 対象 worktree 内の編集・テスト・lint・型チェック・診断なら Enter で承認して続行。
   main への push、force push、worktree 外の削除（rm -rf 等）、git add -f は承認せず内容を報告。
 - usage/rate limit: 承認せず、復帰予定時刻をそのまま報告。
@@ -73,8 +83,9 @@ tmux ウィンドウ {codex-impl-12, ...} を最大3分監視し、結論だけ�
 ```
 
 - 本体は報告（数行）だけを受け取る。危険な操作の判断は本体（必要なら人間）が行う
-- usage limit は復帰時刻を `handoff.md` の `loop_meta.codex_limit_until` に書き、その時刻に one-shot の
-  `CronCreate(recurring: false)` を張って正確に起こす
+- usage limit は**待たずに** `issue-cycle` の「フォールバック」へ入る（info で一度知らせ、`harness-implementer` に
+  続きを渡す。Codex が制限で止まっているなら Claude 側に余裕がある、という判断）。
+  `loop_meta.codex_limit_until` は新しくは書かない（古い handoff にあれば読むだけ）
 - 「動作中・変化なし」が 2〜3 tick 続いたら stall とみなし、`issue-cycle` の「Codex の監視と再起動」へ
 
 ### 2. 人間からの返事を取り込む
@@ -158,6 +169,10 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 - **設定（リポジトリの `.claude/harness.json` か engine 側の設定）が無いプロジェクトでは、
   最初に `/discord-loop-engine:onboard` を行う**（調べて案を出し、A-番号で確認をもらってから確定する。
   リポジトリには何も置かない）
+- **onboard の前に起票された Issue**（設定が確定するまで harness:* ラベルが無く、窓口が `harness:queued` を付けられない）:
+  窓口の依頼に「確定後に #N へ `harness:queued` を付けて」とあれば、`profile_activate` の後（ラベルは確定時に
+  engine が作る）に `harness-phase {n} queued` で付ける。`profile_activate` が `warning`（ラベルを作れなかった）を
+  返したら、付けずに窓口へ知らせる
 
 ### 6. 何も変化が無い tick
 

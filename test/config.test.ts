@@ -1,11 +1,15 @@
+// 設定ファイルの読み込みが保証すること:
+// - git の作者は名前とメールが両方そろっているときだけ採用し、それ以外（欠落・片方・空・型違い）は未設定にする
+//   （既存の config.json を壊さず、雛形の空文字は未設定として扱う）
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { loadConfig } from "../src/config.ts";
+import { CONFIG_TEMPLATE, loadConfig } from "../src/config.ts";
 
-function config(extra: Record<string, unknown>) {
+function load(extra: Record<string, unknown>) {
 	const home = mkdtempSync(path.join(os.tmpdir(), "dle-config-"));
 	try {
 		writeFileSync(
@@ -18,8 +22,28 @@ function config(extra: Record<string, unknown>) {
 	}
 }
 
+test("git の作者は名前とメールがそろっているときだけ採用する", () => {
+	assert.deepEqual(load({ git: { name: "A B", email: "a@example.com" } }).git, { name: "A B", email: "a@example.com" });
+	for (const git of [
+		undefined,
+		null,
+		{},
+		{ name: "A" },
+		{ email: "a@example.com" },
+		{ name: "", email: "" },
+		{ name: 1, email: 2 },
+		"x",
+	])
+		assert.equal(load({ git }).git ?? null, null, JSON.stringify(git));
+});
+
+test("雛形の git は空で、未設定として読まれる（個人情報を雛形に書かない）", () => {
+	assert.deepEqual(CONFIG_TEMPLATE.git, { name: "", email: "" });
+	assert.equal(load({ git: CONFIG_TEMPLATE.git }).git ?? null, null);
+});
+
 test("refresh の既定値は有効・100k・180秒・30分、Codex の待機上限は120分", () => {
-	const c = config({});
+	const c = load({});
 	assert.deepEqual(c.concierge.refresh, { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 });
 	assert.deepEqual(c.worker.refresh, {
 		enabled: true,
@@ -32,13 +56,13 @@ test("refresh の既定値は有効・100k・180秒・30分、Codex の待機上
 });
 
 test("旧 maxEvents: 0 は全無効を保ち、enabled の明示を優先する", () => {
-	assert.equal(config({ concierge: { refresh: { maxEvents: 0 } } }).concierge.refresh.enabled, false);
-	assert.equal(config({ concierge: { refresh: { maxEvents: 0, enabled: true } } }).concierge.refresh.enabled, true);
-	assert.equal(config({ concierge: { refresh: { enabled: false } } }).concierge.refresh.enabled, false);
+	assert.equal(load({ concierge: { refresh: { maxEvents: 0 } } }).concierge.refresh.enabled, false);
+	assert.equal(load({ concierge: { refresh: { maxEvents: 0, enabled: true } } }).concierge.refresh.enabled, true);
+	assert.equal(load({ concierge: { refresh: { enabled: false } } }).concierge.refresh.enabled, false);
 });
 
 test("負数・文字列・範囲外は既定値に戻し、0 のトークン閾値は保持する", () => {
-	const c = config({
+	const c = load({
 		concierge: { refresh: { maxEvents: -1, maxTokens: "100", contextPercent: 101 } },
 		worker: {
 			refresh: { enabled: false, maxTokens: 0, idleSeconds: -1, cooldownMinutes: "30", codexIgnoreAfterMinutes: -1 },

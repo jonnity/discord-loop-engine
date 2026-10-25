@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# テスト用の codex スタブ。CODEX_STUB_LOGIN=0 でログイン済み、それ以外は未ログイン
+if [ "$1 $2" = "login status" ]; then
+	if [ "${CODEX_STUB_LOGIN:-0}" = 0 ]; then echo "Logged in using ChatGPT"; exit 0; fi
+	echo "Not logged in (401 Unauthorized)"
+	exit 1
+fi
+echo "codex stub: unexpected: $*" >&2
+exit 1
