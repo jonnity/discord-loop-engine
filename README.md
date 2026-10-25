@@ -73,7 +73,8 @@ dle init
 	"allowedUserIds": ["<自分のユーザー ID>"],
 	"workspaceDir": "~/dle/workspaces",   // dle add owner/repo の clone 先
 	"concierge": { "model": "sonnet" },
-	"worker": { "model": null, "extraArgs": [] }
+	"worker": { "model": null, "extraArgs": [] },
+	"git": { "name": "<コミットの作者名>", "email": "<コミットの作者メール>" }   // 任意。無いとコミットできない環境で必要
 	// 残りの項目は既定のままで良い（「設定」の表を参照）
 }
 ```
@@ -231,6 +232,7 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 | `concierge.model` | `sonnet` | 窓口のモデル |
 | `concierge.refresh` | 40 件 / 15% | 窓口とのやり取りがこの件数に達するか、コンテキストの残りがこの割合を切ったら、手が空いたとき（3分やり取りが無く、応答中でない）に engine が `/clear` して始め直す。直前のやり取りは渡し直し、挨拶は出さない。`maxEvents: 0` で無効 |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
+| `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
 | `retro` | 5 件 / 7 日 / 3 回 | 振り返りの頻度と、仮ルールにする再現回数（仮置き。振り返りで見直す） |
 | `permissionRelay` | `false` | 許可の確認に Discord から `yes <id>` で答えられるようにする |
@@ -254,6 +256,8 @@ projects/<名前>/       プロジェクトごとの設定（harness.json）と�
 - Claude Code の channels はリサーチプレビューです。自作の channel を使うため `--dangerously-load-development-channels`
   で起動しています。仕様が変わったら engine の起動コマンドと channel を直します
 - Team / Enterprise の組織アカウントでは、管理者が channels を有効にする必要があります（個人の Pro / Max なら不要）
+- Codex が使えないとき（未ログイン・起動が権限判定で拒否された・usage limit）は、worker が Discord に info で一度だけ知らせ、
+  設計・実装を Claude（`harness-implementer`）に自動で切り替えます。Codex が戻れば次の段階から Codex に戻ります
 - 届くのはセッションが動いている間だけです。窓口が止まっている間の発言は保存しておき、起動したら渡します
 
 ## 開発

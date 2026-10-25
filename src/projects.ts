@@ -55,6 +55,9 @@ const HARNESS_COMMANDS = [
 	"harness-status",
 	"harness-notify",
 	"harness-labels",
+	"harness-issue-md",
+	// 読み取り専用の check / status だけ。起動（harness-codex）は許可に含めない
+	"harness-codex-status",
 ];
 
 export function repoFromRemote(url: string): string {
@@ -157,6 +160,18 @@ function claudeCommand(cfg: Config, env: Record<string, string>, args: string[])
 	return `env ${envPart} ${[cfg.claudeBin, ...args].map(shq).join(" ")}`;
 }
 
+/** worker が Author identity unknown でコミットに失敗しないよう、engine の設定の作者を渡す。
+ *  Why not: リポジトリごとの user.email を見て出し分けることはしない（設定されていれば常に渡す。Issue #1 の決定） */
+export function gitIdentityEnv(cfg: Config): Record<string, string> {
+	if (!cfg.git) return {};
+	return {
+		GIT_AUTHOR_NAME: cfg.git.name,
+		GIT_AUTHOR_EMAIL: cfg.git.email,
+		GIT_COMMITTER_NAME: cfg.git.name,
+		GIT_COMMITTER_EMAIL: cfg.git.email,
+	};
+}
+
 export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger): SessionTarget[] {
 	const baseEnv = { DLE_HOME: cfg.home, DLE_SOCKET: cfg.socketPath };
 	const channelArgs = ["--dangerously-load-development-channels", PLUGIN_SPEC];
@@ -202,7 +217,13 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 				...(p.tmuxSession ? { tmuxSession: p.tmuxSession } : {}),
 				command: claudeCommand(
 					cfg,
-					{ ...baseEnv, DLE_ROLE: "worker", DLE_PROJECT: p.name, DLE_LOOP: native ? "native" : "harness" },
+					{
+						...baseEnv,
+						...gitIdentityEnv(cfg),
+						DLE_ROLE: "worker",
+						DLE_PROJECT: p.name,
+						DLE_LOOP: native ? "native" : "harness",
+					},
 					[
 						...(cfg.worker.model ? ["--model", cfg.worker.model] : []),
 						...channelArgs,

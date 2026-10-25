@@ -56,6 +56,9 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
    # 「#N をこのリポジトリの手順で着手候補にしてください」と worker に伝える
    gh issue create -R <owner/repo> --title "<件名>" --body "<背景・受け入れ条件>"
    ```
+   プロジェクトがまだ onboard 前（設定が確定していない）のときは harness:* ラベルがリポジトリに無く、
+   `--label harness:queued` を付けられない。その場合はラベル無しで起票し、worker への依頼に
+   「設定の確定後に #N へ `harness:queued` を付けてください」と書く
    本文には背景と、番号付きの受け入れ条件を書く（ユーザーの言葉から書けない条件は「未確定」として残す。
    worker の要件確認で聞かれる）
 3. `task_create`（project・title・issue）で台帳に載せる

@@ -7,6 +7,7 @@
 // - worker がいない間の指示は、worker が繋がった時に届く
 // - フェーズ done で台帳が完了になり、閾値に達すると窓口へ振り返りの依頼が届く
 // - ボードは1通を投稿・ピン留めし、以後は書き換える
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -687,4 +688,57 @@ test("窓口を /clear している間に届いた発言は溜めて、終わっ
 		c.stop();
 		await engine.stop();
 	}
+});
+
+// 設定の案を出し、OK の回答を受けて worker が確定するまで（ラベルの作成の有無を見るための共通の流れ）
+async function activateProfile(exec: Run, propose: Record<string, unknown>) {
+	const { engine, home } = setupEngine(5, exec);
+	await engine.start();
+	const repo = mkdtempSync(path.join(os.tmpdir(), "dle-r-"));
+	engine.ledger.upsertProject({
+		name: "kishimen-tool",
+		repo: "jonnity/kishimen-tool",
+		path: repo,
+		active: true,
+		mode: "harness",
+	});
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "kishimen-tool", DLE_LOOP: "harness" });
+	try {
+		await until(() => engine.sessions.has("concierge") && engine.sessions.has("kishimen-tool"));
+		const r = await w.tool("profile_propose", { summary: "調べました", ...propose });
+		assert.equal(r.isError, false, r.text);
+		await c.tool("attention_answer", { id: "A-1", answer: "OK" });
+		await w.event((p) => (p.meta as Record<string, string>).attention === "A-1");
+		return await w.tool("profile_activate", {});
+	} finally {
+		c.stop();
+		w.stop();
+		await engine.stop();
+	}
+}
+
+test("native に確定したときは harness:* ラベルを作らない（使わないラベルをリポジトリに残さない）", async () => {
+	const commands: string[] = [];
+	const act = await activateProfile(
+		async (cmd) => {
+			commands.push(path.basename(cmd));
+			return { ok: true, stdout: "", stderr: "" };
+		},
+		{ mode: "native", initial_prompt: "/parallel-cycle-loop" },
+	);
+	assert.equal(act.isError, false, act.text);
+	assert.ok(!commands.includes("harness-labels"));
+});
+
+test("ラベルを作れなくても harness の確定は成功し、warning で知らせる", async () => {
+	const act = await activateProfile(
+		async (cmd) =>
+			path.basename(cmd) === "harness-labels"
+				? { ok: false, stdout: "", stderr: "HTTP 403: forbidden" }
+				: { ok: true, stdout: "", stderr: "" },
+		{ mode: "harness", profile: { gate: [{ name: "test", run: "npm test" }] } },
+	);
+	assert.equal(act.isError, false, act.text);
+	assert.match(act.text, /harness:\* ラベルを作れませんでした.*403/);
 });

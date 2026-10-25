@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+#
+# harness-issue-md — Issue の本文とコメントを、設計の入力用の Markdown にして標準出力へ出す。
+#
+# `gh issue view --comments` だけだと Issue 本文が入らず、受け入れ条件が設計の入力から抜けるため、
+# --json で本文→コメントの順に組み立てる（1 回の呼び出しなので、本文とコメントの間で更新が入っても矛盾しない）。
+# コメントの見出しに authorAssociation を入れるのは、owner の要件メモを見分けるため。
+#
+# 使い方: harness-issue-md <issue番号> [--repo owner/repo] > .harness/issue-<n>.md
+
+set -euo pipefail
+
+ISSUE="" repo_args=()
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--repo) repo_args=(--repo "$2"); shift 2 ;;
+	-*)
+		echo "harness-issue-md: 不明な引数 $1" >&2
+		exit 2
+		;;
+	*) ISSUE="$1"; shift ;;
+	esac
+done
+if ! [[ "$ISSUE" =~ ^[0-9]+$ ]]; then
+	echo "使い方: harness-issue-md <issue番号> [--repo owner/repo]" >&2
+	exit 2
+fi
+
+gh issue view "$ISSUE" "${repo_args[@]}" --json number,title,body,comments | jq -r '
+	"# #\(.number) \(.title)\n\n## 本文\n\(.body // "")\n\n---\n# コメント",
+	(.comments[] | "### \(.author.login)（\(.authorAssociation // "?"), \(.createdAt)）\n\(.body)\n")'

@@ -24,6 +24,11 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
 - **UI があるか**・録画で受け入れ条件を確かめられるか
 - **自動では確かめられないもの**: 実機・特定 OS・外部機器・本番環境など
 - worker が無人で使うことになるコマンド（テスト・ビルド・パッケージマネージャなど）
+- **このマシンの worker がコミットできるか**: `[ -n "${GIT_AUTHOR_EMAIL:-}" ] || git -C <repo> config user.email`
+  （engine の設定の作者は環境変数で渡るため、`git config` だけでは見えない。両方を見る）。どちらも空なら、
+  次の「確認を求める」の `summary` に「このマシンの worker はコミットできない（git の作者が未設定）。
+  `~/.discord-loop-engine/config.json` の `git`（name・email）を設定して `dle restart <名前>`」と書く。
+  メールアドレスの値は summary に書かない
 
 ## 2. 進め方を決める
 
@@ -54,7 +59,9 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
     0 以外 = コード起因。リポジトリに仕分けのスクリプトがあるときだけ
   - `beforeMerge`: マージ前の確認（例: 静的解析の新しい指摘が 0 であること）
   - 規約ファイルに「PR 前に必ず〜」「マージ前に〜を確認」などがあれば、ここに写す。無ければ書かない
-- `permissions`: worker が確認なしで使ってよいコマンド（`Bash(npm:*)` など。広げすぎない）
+- `permissions`: worker が確認なしで使ってよいコマンド（`Bash(npm:*)` など。広げすぎない）。
+  Codex の起動（`harness-codex` / `tmux new-window` / `codex exec`）の許可は**足さない**（権限判定が拒否したときは
+  issue-cycle が info で知らせて Claude に切り替える。判定を回避する許可を雛形で配らない）
 - `humanChecks`: 自動では確かめられないもの
 - `demo`: 録画の手順が既にあるときだけ。無ければ `null`
 - `specRecordDir`: 設計記録を PR に含める慣習がリポジトリにあるときだけ。無ければ `null`
@@ -84,6 +91,7 @@ profile_propose（mode・profile または initial_prompt / tmux_session・summa
 ```
 
 `summary` には、調べて分かったこと・mode をそう決めた理由・自動では確かめられないこと・
+（コミットできないときは）その旨・
 「リポジトリには何も置かない」ことを短く書く。engine が A-番号（設定の確認）で Discord に出す。
 
 ## 4. 回答を受けたら

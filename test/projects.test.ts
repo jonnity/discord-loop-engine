@@ -3,6 +3,7 @@
 // - パス指定は既存の場所を使い、harness.json が無ければ導入から始める印を付ける
 // - owner/repo 指定は workspaceDir に clone する（済みなら clone しない）
 // - 窓口は Sonnet で、worker は DLE_PROJECT 付きで、どちらも開発用 channel と dle ツールの許可付きで起動する
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
@@ -185,6 +186,10 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	assert.match(k?.command ?? "", /DLE_ROLE=worker DLE_PROJECT=kishimen-tool DLE_LOOP=harness claude /);
 	assert.match(k?.command ?? "", /'Bash\(harness-merge:\*\)'.* --permission-mode acceptEdits$/);
 
+	assert.match(k?.command ?? "", /'Bash\(harness-issue-md:\*\)'/);
+	assert.match(k?.command ?? "", /'Bash\(harness-codex-status:\*\)'/, "読み取り専用の確認は無人で通す");
+	assert.doesNotMatch(k?.command ?? "", /harness-codex:|harness-codex\)/, "Codex の起動（start）は許可しない");
+
 	assert.equal(o?.initialPrompt, "/parallel-cycle-loop", "native はそのリポジトリのループで始める");
 	assert.equal(o?.tmuxSession, "dev");
 	assert.match(o?.command ?? "", /DLE_LOOP=native/);
@@ -199,4 +204,36 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	const k2 = sessionTargets(cfg, projects, ledger)[1];
 	assert.equal(k2?.initialPrompt, "/discord-loop-engine:issue-loop");
 	assert.match(k2?.command ?? "", /'Bash\(cargo:\*\)'/);
+});
+
+test("git の作者を設定していれば worker にだけ GIT_* で渡し、無い Config でも落ちない", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-t-"));
+	const ledger = new Ledger(home);
+	const base = {
+		home,
+		socketPath: `${home}/engine.sock`,
+		claudeBin: "claude",
+		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
+		worker: { model: null, extraArgs: [], initialPrompt: "/discord-loop-engine:issue-loop" },
+	};
+	const p = { repo: "x/y", active: true, addedAt: "" };
+	const projects: Project[] = [
+		{ ...p, name: "kishimen-tool", path: "/w/k", mode: "harness" },
+		{ ...p, name: "oogiri-doc", path: "/w/o", mode: "native", initialPrompt: "/loop" },
+	];
+
+	const none = sessionTargets(base as unknown as Config, projects, ledger);
+	assert.doesNotMatch(none.map((t) => t.command).join("\n"), /GIT_/, "git が無い Config では何も渡さない");
+	const nul = sessionTargets({ ...base, git: null } as unknown as Config, projects, ledger);
+	assert.doesNotMatch(nul.map((t) => t.command).join("\n"), /GIT_/);
+
+	const cfg = { ...base, git: { name: "Taro 'T' Yamada", email: "taro@example.com" } } as unknown as Config;
+	const [c, k, o] = sessionTargets(cfg, projects, ledger);
+	assert.doesNotMatch(c?.command ?? "", /GIT_/, "窓口はコミットしないので渡さない");
+	for (const t of [k, o]) {
+		assert.match(t?.command ?? "", /GIT_AUTHOR_EMAIL=taro@example\.com /);
+		assert.match(t?.command ?? "", /GIT_COMMITTER_EMAIL=taro@example\.com /);
+		assert.match(t?.command ?? "", /GIT_AUTHOR_NAME='Taro '\\''T'\\'' Yamada' /, "空白・引用符を含む名前も引用される");
+		assert.match(t?.command ?? "", /GIT_COMMITTER_NAME='Taro '\\''T'\\'' Yamada' /);
+	}
 });

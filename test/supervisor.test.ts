@@ -6,6 +6,7 @@
 // - 短時間に落ち続けたら自動起動を止めて知らせ、reset で再開する
 // - 繋がったら最初のプロンプトを一度だけ入れる
 // - 許可確認で止まり続けていたら一度だけ知らせる
+import "./isolate.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type SessionTarget, Supervisor, shq } from "../src/supervisor.ts";

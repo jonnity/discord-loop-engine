@@ -19,7 +19,8 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
    ラベルの直接操作・`gh pr merge`・Discord への直接 curl は `harness-guard` hook が止める。
    **「通知したつもり」を構造的に起こさない**ための設計なので、迂回策を探さない。
 3. **設計・実装は Codex**。Claude は設計書もコードも直接書かない（NG 時も Codex に差し戻す）。
-   Codex が使えないときだけ「フォールバック」節に従う。
+   Codex が使えないとき（未ログイン・起動の拒否・usage limit など）は、info で知らせて
+   `harness-implementer` に自動で切り替える（「フォールバック」節）。
 4. **主セッションを薄く保つ**。設計書・diff・CI ログ・tmux ログ全文は主セッションに読み込まず、
    サブエージェントに読ませて結論だけ受け取る。
 5. **マージは人間が決める**。どれだけ green でも `harness-merge` は人間の承認記録なしには通らない。
@@ -35,6 +36,9 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 | `harness-inbox` | 人間の返信・承認/差し戻し・通知の鮮度切れを JSON で拾う |
 | `harness-gate [dir]` | PR 前ゲート（CI と同じ検査を全部回して一覧。最後に `hooks.beforePR`） |
 | `harness-hook <phase> [--issue n] [--pr n] [--dir d]` | profile の `hooks.<phase>` を実行する |
+| `harness-issue-md <n>` | Issue 本文＋コメントを設計の入力用 Markdown にして出力する |
+| `harness-codex-status check` / `status <window>` | Codex が使えるか・ウィンドウの状態（読み取り専用。確認なしで通る） |
+| `harness-codex start <window> <worktree> <prompt-file>` | Codex を tmux で起動する（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**） |
 | `harness-merge <n> [--chat-approval "<引用>"]` | 承認・CI・mergeable を確認してマージ → done |
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
 | `harness-status` | 読み取り専用の状況一覧 |
@@ -80,7 +84,7 @@ PR 作成・ゲート・CI green ──▶ harness:awaiting-merge ──(owner �
 ## Step 0: 状態の把握
 
 ```bash
-command -v codex && codex --version          # 使えなければ「フォールバック」節へ
+harness-codex-status check                    # 10 なら「フォールバック」節へ（理由は stderr の reason=）
 tmux ls >/dev/null 2>&1 || tmux new-session -d -s harness
 harness-status
 harness-inbox                                 # 人間からの返事・承認・鮮度切れ
@@ -125,19 +129,27 @@ git -C "$ROOT" worktree add "$WT" -b "$(harness-config '.branchPrefix' fix/issue
   "origin/$(harness-config '.baseBranch' main)"
 harness-hook afterWorktree --issue {n} --dir "$WT" || exit 1   # 失敗したら worktree の準備ができていない。人に渡す
 mkdir -p "$WT/.harness/spec" "$WT/.harness/impl"
-gh issue view {n} --comments > "$WT/.harness/issue-{n}.md"   # Codex の入力（要件メモを含む）
+harness-issue-md {n} > "$WT/.harness/issue-{n}.md"           # Codex の入力（本文→コメント＝要件メモの順）
 harness-config '.notes' '' > "$WT/.harness/notes.md"          # engine 側の設定にある決まりごと
 harness-phase {n} designing --notify
 
-CODEX=$(harness-config '.codex.command' 'codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox')
-tmux new-window -n "codex-spec-{n}" "${CODEX//\{worktree\}/$WT} '
+cat > "$WT/.harness/prompt-spec-{n}.md" <<EOF
 .harness/issue-{n}.md の Issue と要件メモを読み、詳細設計書を .harness/spec/{n}.md に書いてください。
-先に $(harness-config '.context | join(\", \")' AGENTS.md) と .harness/notes.md を読むこと。
+先に $(harness-config '.context | join(", ")' AGENTS.md) と .harness/notes.md を読むこと。
 含めるもの: 受け入れ条件の対応表・変更ファイル一覧・実装方針・型/データ構造・テスト方針・
 自動では確認できない点（humanChecks に該当するもの）・未確定事項。
-git add / commit / push はしないこと。書き終えたら終了してください。'"
-sleep 5; tmux capture-pane -t "codex-spec-{n}" -p -S -30 | grep "workdir:"   # $WT であること（必須）
+git add / commit / push はしないこと。書き終えたら終了してください。
+EOF
+harness-codex start "codex-spec-{n}" "$WT" "$WT/.harness/prompt-spec-{n}.md"   # 10 なら「フォールバック」節へ
+sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-spec-{n}.id")" -p -S -30 | grep "workdir:"   # $WT であること（必須）
 ```
+
+> `harness-codex start` が `codex login status` で認証を確かめ、終了時に `EXIT=<code>` を
+> ペインと `$WT/.harness/<window>.exit` に残し、ウィンドウを終了後も残す（`remain-on-exit`）。
+> **`tmux new-window` で直接 codex を起こさない**（失敗が見えなくなる）。
+> ウィンドウは名前ではなく **window-id**（`$WT/.harness/<window>.id`）で指す（Issue 番号はリポジトリ間で重複し、
+> 別プロジェクトや死んだ同名ウィンドウと取り違えるため。`status` / `capture-pane` / `stop` とも id）。
+> 起動コマンドは `codex.command`（`-C <worktree>` を含む）を使う。
 
 > ⚠️ **`-C <worktree>` は必須**（tmux の `-c` や `cd` では Codex の作業ルートが変わらない。
 > oogiri-doc で main の作業ツリーが直接書き換わり `.worktrees/` が消えた事故がある）。
@@ -147,14 +159,21 @@ sleep 5; tmux capture-pane -t "codex-spec-{n}" -p -S -30 | grep "workdir:"   # $
 > コミットは常に Claude がパスを列挙して行う。
 
 `$WT/.harness/spec/{n}.md` の出現を **最大2分だけ** 出力なしでポーリングし（`until ...; do sleep 10; done`
-を12回で打ち切り）、出たら `harness-phase {n} spec-review` → Phase 3。出なければ次の心拍に任せる。
+を12回で打ち切り。各回 `harness-codex-status status codex-spec-{n}` も見て、`exited:*` で成果物が無ければ
+待たずに「Codex の監視と再起動」の判定に入る）、出たら `harness-phase {n} spec-review` → Phase 3。出なければ次の心拍に任せる。
 
 ### Codex の監視と再起動（全 Phase 共通）
 
-15分経っても出力が無ければ `tmux capture-pane -pt codex-*-{n} | tail -30` を **サブエージェントに**
+**終了済みのウィンドウ**（`harness-codex-status status` が `exited:<code>` / `exited:unknown`）は、
+サブエージェントを起こさずに判定する: ペイン末尾（`tmux capture-pane -pt "$(cat "$WT/.harness/<window>.id")" | tail -30`）か
+`$WT/.harness/<window>.exit` を見て、認証切れ・usage limit なら「フォールバック」節へ、それ以外は
+`harness-codex stop <window> "$WT"`（ウィンドウと `.id`・`.exit` を消す。`tmux kill-window` を直接打たない）で片付けてから同じ依頼で `harness-codex start` し直す。**終了済みのウィンドウは必ず
+`harness-codex stop` で片付ける**（残すとシェパードが毎 tick 拾う）。
+
+15分経っても出力が無ければ `tmux capture-pane -pt "$(cat "$WT/.harness/codex-<spec|impl>-{n}.id")" | tail -30` を **サブエージェントに**
 読ませて状態だけ受け取る。
 
-- 異常終了・無応答 → `tmux kill-window` して同じ依頼で `new-window` し直す（`exec` は一回実行なので
+- 異常終了・無応答 → `harness-codex stop <window> "$WT"` して同じ依頼で `harness-codex start` し直す（`exec` は一回実行なので
   `send-keys` で追い依頼しない）
 - 承認プロンプト・usage limit で止まっている → issue-loop の「codex シェパード」に従う
 - 同じ依頼で2回失敗 → 依頼を具体化（対象ファイル・期待出力）して再依頼
@@ -180,13 +199,13 @@ Phase 3・5 のレビューは、成果物を作った文脈から切り離し�
 
 - **OK** → 設計書を Issue にコメント（`## 実装プラン` 見出し＋本文、末尾 `<!-- harness:note -->`）し、
   `harness-phase {n} implementing` → Phase 4
-- **NG** → 指摘を添えて `codex-spec-{n}` を再起動し、spec を書き直させる（Claude は直さない）
+- **NG** → 指摘を添えて `codex-spec-{n}` を `harness-codex start` で再起動し、spec を書き直させる（Claude は直さない）
 
 ## Phase 4: 実装（Codex）
 
 ```bash
-tmux kill-window -t "codex-spec-{n}" 2>/dev/null
-tmux new-window -n "codex-impl-{n}" "${CODEX//\{worktree\}/$WT} '
+harness-codex stop codex-spec-{n} "$WT"   # id が無くても安全（harness-implementer で書いた場合など）
+cat > "$WT/.harness/prompt-impl-{n}.md" <<EOF
 .harness/spec/{n}.md の設計書に従って実装してください。テストを先に書き、既存テストを壊さないこと。
 完了したら .harness/impl/{n}.md に完了サマリ（変更ファイル・受け入れ条件ごとの確認方法・
 自動では確認できない点）を書いてください。
@@ -194,12 +213,14 @@ tmux new-window -n "codex-impl-{n}" "${CODEX//\{worktree\}/$WT} '
 $(harness-config '.demo.run') で pass させ、動画が $(harness-config '.demo.output') に 0 バイトでなく
 出ていることを確認して、そのパスをサマリに書いてください。
 Issue と無関係なファイルの差分（フォーマッタの巻き込み等）は git checkout HEAD -- <file> で戻すこと。
-git add / commit / push はしないこと。'"
-sleep 5; tmux capture-pane -t "codex-impl-{n}" -p -S -30 | grep "workdir:"
+git add / commit / push はしないこと。
+EOF
+harness-codex start "codex-impl-{n}" "$WT" "$WT/.harness/prompt-impl-{n}.md"   # 10 なら「フォールバック」節へ
+sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-impl-{n}.id")" -p -S -30 | grep "workdir:"
 ```
 
 （`{n}` の置換は `harness-config` の出力に対しても行う。）
-`$WT/.harness/impl/{n}.md` を最大2分ポーリングし、出たら `harness-phase {n} impl-review` → Phase 5。
+`$WT/.harness/impl/{n}.md` を最大2分ポーリングし（Phase 2 と同じく `harness-codex-status status` も見る）、出たら `harness-phase {n} impl-review` → Phase 5。
 
 ## Phase 5: 実装レビュー → PR → 承認依頼
 
@@ -209,7 +230,7 @@ sleep 5; tmux capture-pane -t "codex-impl-{n}" -p -S -30 | grep "workdir:"
 `git -C $WT diff origin/<base>...` と未コミット差分を対象に、spec との乖離・境界値・失敗経路・回帰・
 規約違反・スコープ外変更を壊しに行かせる（可能ならテスト・最小再現を実行させる）。
 
-- **NG** → 指摘を添えて `codex-impl-{n}` を再起動（軽微でも Claude は直さない）
+- **NG** → 指摘を添えて `codex-impl-{n}` を `harness-codex start` で再起動（軽微でも Claude は直さない）
 
 ### 5-2. 実動作の確認（UI 変更のとき）
 
@@ -269,11 +290,11 @@ harness-phase {n} awaiting-merge --pr <PR番号> --comment-file /tmp/harness-mer
 
 ```bash
 git -C "$WT" fetch origin && git -C "$WT" merge "origin/$(harness-config '.baseBranch' main)"   # base が進んでいれば
-# 衝突したコードの解消は Codex に依頼。push 後は CI green を待ち、head が変わったので承認依頼をやり直す
+# 衝突したコードの解消は Codex に依頼（`harness-codex start`）。push 後は CI green を待ち、head が変わったので承認依頼をやり直す
 harness-merge {n}                                   # PR 上の承認
 harness-merge {n} --chat-approval "<ユーザーの発言>"  # チャットでの承認
+harness-codex stop codex-impl-{n} "$WT"   # worktree を消す前に（消した後は id を読めない）
 git -C "$(harness-config --root)" worktree remove "$WT"
-tmux kill-window -t "codex-impl-{n}" 2>/dev/null
 ```
 
 `harness-merge` が承認・head の一致・CI・mergeable を確認し、マージ後に `done`（ラベル除去）まで行う。
@@ -289,16 +310,34 @@ worktree・tmux ウィンドウの片付けだけを行う。
 1. PR は閉じない。worktree も残す
 2. `learning_add`（tag: `user-ng`）で記録する（自己改善の材料）。engine が無い環境では `.harness/failure-log.jsonl` に1行追記:
    `jq -nc --arg ts "$(date -u +%FT%TZ)" --argjson issue {n} --arg tag user-ng --arg summary "..." --arg detail "..." '{ts:$ts,issue:$issue,tag:$tag,summary:$summary,detail:$detail,promoted:false}' >> "$(harness-config --root)/.harness/failure-log.jsonl"`
-3. 指摘を添えて `codex-impl-{n}` を再起動し、`harness-phase {n} impl-review` で Phase 5 へ戻す
+3. 指摘を添えて `codex-impl-{n}` を `harness-codex start` で再起動し、`harness-phase {n} impl-review` で Phase 5 へ戻す
 
-## フォールバック: Codex が使えない（クレジット枯渇など、時間で戻らない場合）
+## フォールバック: Codex が使えない（自動で Claude に切り替える）
 
-1. `harness-notify --event info ...` で一度だけ状況を知らせる（Issue は止めないので blocked にはしない）
-2. 設計・実装を `harness-implementer` サブエージェント（このプラグインの agent）に委譲する。
+次のどれも「Codex 不可」として同じに扱う。**Codex の起動・再起動は、どの場面でも**（Phase 2/4、Phase 3/5/6 の
+NG 差し戻し、マージ前の衝突解消、issue-loop の CI 差し戻しを含む）`harness-codex start` を通し、
+exit 10 ならこの節に入る。
+
+- `harness-codex-status check` / `harness-codex start` が exit 10（`reason=not-installed` / `not-logged-in` / `launch-failed`）
+- `harness-codex start` を含む Bash 呼び出しが**権限判定で拒否された**。別のコマンド・別のフラグ・別の経路を
+  探さない（判定を回避しない）。拒否の理由を info の本文に入れる
+- 監視中に usage limit・認証切れ・起動直後の即終了（`exited:*` で原因が認証か limit）を確認した
+
+動作:
+
+1. `harness-notify --event info --title "Codex が使えないため Claude で進めます（#{n}）" --url <Issue の URL> --body "<reason と対処（codex login・許可・復帰時刻）>"`
+   を**同じ原因につき一度だけ**出す（`handoff.md` の `loop_meta.codex_unavailable: <reason>@<時刻>` に記録し、
+   `harness-codex-status check` が 0 になるまで再通知しない）。info なので人の返事は待たず、blocked にもしない。
+   Codex が制限で止まっているなら Claude 側に余裕があるはず、という前提で待たずに切り替える
+2. 動いていた `codex-*-{n}` ウィンドウは `harness-codex stop <window> "$WT"` で片付ける。実装の途中（usage limit など）で
+   切り替えるときは、worktree の**未コミット差分をそのまま残し**（`git checkout`・`stash` で消さない）、
+   `harness-implementer` に「続きから」と渡す
+3. 設計・実装を `harness-implementer` サブエージェント（このプラグインの agent）に委譲する。
    渡すのは Issue 番号・`$WT`・入出力ファイルのパスだけ
-3. レビューは引き続き別のサブエージェントで行う（書いた agent に自己採点させない）
-4. 確認ゲート・承認依頼・マージ条件は一切緩めない
-5. Codex が戻ったら次の Issue から Codex に戻す
+4. レビューは引き続き別のサブエージェントで行う（書いた agent に自己採点させない）
+5. 確認ゲート・承認依頼・マージ条件は一切緩めない。`git add / commit / push` は implementer にも任せない
+6. 次の Phase を始める前に `harness-codex-status check` を見て、0 ならその Phase から Codex に戻す
+   （途中の Phase を巻き戻して作り直さない）
 
 ## やらないこと
 

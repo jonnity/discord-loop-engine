@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+#
+# harness-codex — Codex を tmux のウィンドウで起動する。起動だけを担い、状態の確認は harness-codex-status。
+#
+# 起動前に harness-codex-status check で認証を確かめ、使えなければウィンドウを作らず exit 10 で返す
+# （理由は stderr の `reason=`）。呼び出し側（issue-cycle）は exit 10 を「Codex 不可」として info 通知し、
+# harness-implementer に切り替える。
+#
+# 起動したウィンドウは、終了しても (1) ペインに EXIT=<code> (2) <worktree>/.harness/<window>.exit
+# (3) remain-on-exit で残る。ウィンドウの id は <worktree>/.harness/<window>.id に保存する。即終了（未ログインの 401 など）でも原因を後から読める。
+#
+# 片付けは stop。ウィンドウ（id と名前が一致するときだけ）を kill-window し、.id と .exit も消す。
+# id ファイルが無い・空でも何もせず 0 で返す（空の -t は今いるウィンドウ＝呼び出し元を消してしまうため、決して tmux に渡さない）。
+#
+# 使い方: harness-codex start <window> <worktree> <prompt-file>
+#         harness-codex stop <window> <worktree>
+# 終了コード: 0=起動した / 10=Codex 不可（check が失敗、または tmux の起動に失敗） / 2=引数不正
+
+set -uo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+if [ "${1:-}" = stop ] && [ $# -eq 3 ]; then
+	WINDOW="$2" WT="$3"
+	IDFILE="$WT/.harness/$WINDOW.id"
+	ID=""
+	[ -f "$IDFILE" ] && ID="$(head -n1 "$IDFILE" | tr -d '[:space:]')"
+	if [ -n "$ID" ] && tmux list-panes -a -F '#{window_id} #{window_name}' 2>/dev/null | awk -v i="$ID" -v n="$WINDOW" '$1 == i && $2 == n { f = 1 } END { exit !f }'; then
+		tmux kill-window -t "$ID" >/dev/null 2>&1
+	fi
+	rm -f "$IDFILE" "$WT/.harness/$WINDOW.exit" # 残すと status が exited を返し続け、シェパードが毎 tick 拾う
+	exit 0
+fi
+if [ "${1:-}" != start ] || [ $# -ne 4 ]; then
+	echo "使い方: harness-codex start <window> <worktree> <prompt-file> | stop <window> <worktree>" >&2
+	exit 2
+fi
+WINDOW="$2" WT="$3" PROMPT="$4"
+[ -f "$PROMPT" ] || { echo "harness-codex: 依頼文が見つかりません: $PROMPT" >&2; exit 2; }
+
+"$SCRIPT_DIR/harness-codex-status" check || exit 10
+
+mkdir -p "$WT/.harness"
+EXITFILE="$WT/.harness/$WINDOW.exit" IDFILE="$WT/.harness/$WINDOW.id"
+rm -f "$EXITFILE" "$IDFILE" # 前回の終了ファイルが残っていると、起動直後の status が古い結果を返してしまう
+
+# 設定の codex.command はシェルのコマンドなので、そのまま使う（引用し直すと1語になって壊れる）。
+# 引用するのは埋め込むパスだけ（空白入りのパスに耐える）
+DEFAULT_CODEX='codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox'
+CODEX="$("$SCRIPT_DIR/harness-config" '.codex.command' "$DEFAULT_CODEX")"
+CODEX="${CODEX//\{worktree\}/$(printf '%q' "$WT")}"
+INNER="$CODEX \"\$(cat $(printf '%q' "$PROMPT"))\"; rc=\$?; echo EXIT=\$rc | tee $(printf '%q' "$EXITFILE"); exit \$rc"
+
+# new-window と remain-on-exit は同じ tmux 呼び出しに連結する。別々だと、即終了したときに
+# 設定より先にウィンドウが消える。
+# - -d を付けない: 付けると連結した set-option が元の（アクティブな）ウィンドウに効いてしまう。
+#   フォーカスは後で戻す（Why not: 名前で -t すると、同名の死んだウィンドウが残っていたとき古いほうに効く）
+# - window-id（@N。tmux サーバーの中で一意）を <window>.id に保存し、status は名前ではなくこの id で引く
+#   （Issue 番号はリポジトリ間で重複するので、別プロジェクトの同名ウィンドウを自分のものと取り違えない）
+PREV="$(tmux display-message -p '#{window_id}' 2>/dev/null || true)"
+if ! ID="$(tmux new-window -n "$WINDOW" -P -F '#{window_id}' "$INNER" \; set-option -w remain-on-exit on)" || [ -z "$ID" ]; then
+	echo "reason=launch-failed (tmux new-window に失敗しました)" >&2
+	exit 10
+fi
+printf '%s\n' "$ID" >"$IDFILE"
+[ -n "$PREV" ] && tmux select-window -t "$PREV" >/dev/null 2>&1
+echo "started: $WINDOW ($ID)"

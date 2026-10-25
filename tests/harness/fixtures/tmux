@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# テスト用の tmux スタブ。呼び出しを TMUX_STUB_LOG に1行ずつ記録する。
+# list-panes には TMUX_STUB_PANES の中身（"<window_id> <window_name> <pane_dead>" の行）を、
+# new-window -P には TMUX_STUB_NEXT_ID（既定 @7）を、display-message には @1（今のウィンドウ）を返す
+printf '%s\n' "$*" >>"${TMUX_STUB_LOG:-/dev/null}"
+case "$1" in
+list-panes) [ -f "${TMUX_STUB_PANES:-}" ] && cat "$TMUX_STUB_PANES" ;;
+new-window) echo "${TMUX_STUB_NEXT_ID:-@7}" ;;
+display-message) echo "@1" ;;
+esac
+exit 0
