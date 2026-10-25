@@ -1,6 +1,6 @@
 ---
 name: issue-loop
-description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上位のループ制御スキル。harness:queued の Issue からのキュー自動補充、CI red の仕分けと Codex への差し戻し、Codex ウィンドウのシェパード、人間からの返信の取り込み、自己コンテキスト管理（clear/resume）を担う。マージ承認は自動化しない。
+description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上位のループ制御スキル。harness:queued の Issue からのキュー自動補充、CI red の仕分けと Codex への差し戻し、Codex ウィンドウのシェパード、人間からの返信の取り込みを担う。マージ承認は自動化しない。
 ---
 
 # issue-loop
@@ -8,12 +8,11 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 `issue-cycle` を道具として繰り返し呼ぶ、ハーネスの一つ上の階層。oogiri-doc の `parallel-cycle-loop` を
 プロジェクト非依存にしたもの。`issue-cycle` の手順・禁止事項はすべてそのまま適用される。
 
-このスキルが自律化するのは次の4つだけ:
+このスキルが自律化するのは次の3つだけ:
 
 1. **次に何を着手するか**（キュー補充）
 2. **CI が落ちたら直す**（仕分け → Codex へ差し戻し）
 3. **Codex が止まっていたら面倒を見る**（承認プロンプト・未送信・usage limit）
-4. **自分のコンテキストを薄く保つ**（サブエージェント委譲・clear/resume）
 
 > ⚠️ **緩めない安全ゲート**
 > - Phase 1 の質問は必ず作る（推定で進める場合も、質問と推定回答を Issue に残し通知する）
@@ -166,19 +165,13 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 
 ## コンテキスト管理
 
+コンテキストの `/clear` は engine が行う。cron による自己 clear・自己 resume は予約しない。
+clear 後は「起動時」の状態把握からやり直し、`CronList` で心拍を確認して、無ければ張り直す。
+
 1. **本体を薄く保つ（根本策）**: 本体で直接やるのは、ループ判断・`harness-*` コマンド・`handoff.md` の
    読み書き・cron 管理・Codex 起動・人間ゲートだけ。ソース調査・tmux ログ・CI ログ・diff・大きな `gh`
    出力はサブエージェントに読ませて結論だけ受け取る。`gh` は `--json`/`-q` で必要な項目に絞る
-2. **自己 clear → 自己 resume**（保険）: Issue が1件マージされた区切り、または
-   `loop_meta.ticks_since_clear` が 4 以上になったら、**メインの心拍には触らず** one-shot を2本張る:
-   ```
-   CronCreate({ prompt: "/clear", recurring: false, durable: true })               # 約1分後
-   CronCreate({ prompt: "/discord-loop-engine:issue-loop", recurring: false, durable: true }) # 約4分後
-   ```
-   張ったら `ticks_since_clear=0`、`pending_self_resume_at=<時刻>` を記録。次の起動時に
-   `pending_self_resume_at` を過ぎているのに clear されていなければ失敗回数を数え、2回続いたら
-   この仕組みを止めて手動 `/clear` を促す
-3. **人間待ちだけのときは心拍を緩める**: アクティブが全部 `interview` / `awaiting-merge` / `blocked` で、
+2. **人間待ちだけのときは心拍を緩める**: アクティブが全部 `interview` / `awaiting-merge` / `blocked` で、
    Codex も CI も動いていなければ、心拍を `*/60` に張り替える（2時間変化が無ければ `*/120`）。
    Codex・CI が動き出すか人間の返事でフェーズが進んだら `*/15` に戻す。
    ※ Issue コメントでの返事はセッションを起こさないので、緩めた分だけ取り込みが遅れる
@@ -190,9 +183,6 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 ```
 ## loop_meta
 - heartbeat_interval: 15min
-- ticks_since_clear: 0
-- pending_self_resume_at: none
-- self_clear_fail_count: 0
 - codex_limit_until: none
 ## subscribed_prs
 - #12: PR#34

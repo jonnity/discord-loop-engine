@@ -120,7 +120,8 @@ async function cmdStart() {
 		isLive: (n) => engine?.sessions.has(n) ?? false,
 		notify: (n, t) => engine?.notifyOps(n === "concierge" ? "窓口" : n, t),
 		activity: (n) => engine?.activity(n) ?? { events: 0, lastAt: 0 },
-		onRefresh: (n, phase) => engine?.onRefresh(n, phase),
+		onRefresh: (n, phase, result) => engine?.onRefresh(n, phase, result),
+		onRefreshSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
 		log,
 	});
 	engine = new Engine({ config, rest, ledger, supervisor, log, gatewayFactory: (h) => new Gateway({ token, ...h }) });

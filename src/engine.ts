@@ -21,7 +21,7 @@ import {
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
 import type { DiscordApi } from "./rest.ts";
 import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
-import type { Supervisor } from "./supervisor.ts";
+import type { RefreshResult, Supervisor } from "./supervisor.ts";
 
 export interface GatewayLike {
 	start(): void;
@@ -165,6 +165,11 @@ export class Engine {
 		this.gateway.start();
 		this.writeStatus();
 		this.log(`engine: 待ち受け開始 ${this.config.socketPath}`);
+		const c = this.config.concierge.refresh;
+		const w = this.config.worker.refresh;
+		this.log(
+			`engine: 自動コンテキスト整理 concierge: ${c.enabled ? `${c.maxTokens / 1000}k / ${c.maxEvents} 件` : "無効"}、worker: ${w.enabled ? `${w.maxTokens / 1000}k` : "無効"}`,
+		);
 	}
 
 	async stop() {
@@ -262,15 +267,11 @@ export class Engine {
 		});
 		this.log(`engine: ${name} が接続しました（pid ${msg.pid}）`);
 		this.writeStatus();
-		// 起動していない間に届いていたものと、今の仮ルールを渡す
-		const rules = this.ledger.rules().trim();
-		if (rules)
-			send(socket, {
-				type: "event",
-				content: `現在の仮ルール（learnings/rules.md）:\n${rules}`,
-				meta: { kind: "rules" },
-			});
-		for (const item of this.ledger.drain(name)) send(socket, { type: "event", content: item.content, meta: item.meta });
+		// clear 中の再接続では、rules と保留分を done まで待つ。
+		if (!this.refreshing.has(name)) {
+			this.sendRules(session);
+			this.flushOutbox(session);
+		}
 		this.supervisor?.onRegistered(name).catch(() => {});
 		return session;
 	}
@@ -307,25 +308,55 @@ export class Engine {
 		if (this.recentChat.length > 12) this.recentChat.shift();
 	}
 
+	private sendRules(session: Session) {
+		const rules = this.ledger.rules().trim();
+		if (rules)
+			send(session.socket, {
+				type: "event",
+				content: `現在の仮ルール（learnings/rules.md）:\n${rules}`,
+				meta: { kind: "rules" },
+			});
+	}
+
+	private flushOutbox(session: Session) {
+		let disconnected = false;
+		for (const item of this.ledger.drain(session.name)) {
+			if (disconnected || !send(session.socket, { type: "event", content: item.content, meta: item.meta })) {
+				disconnected = true;
+				this.ledger.enqueue(session.name, item);
+			}
+		}
+	}
+
 	/** supervisor が /clear する前後に呼ぶ */
-	onRefresh(name: string, phase: "start" | "done") {
+	onRefresh(
+		name: string,
+		phase: "start" | "done",
+		result: RefreshResult = { success: true, reason: "手が空いたため" },
+	) {
 		if (phase === "start") {
 			this.refreshing.add(name);
 			return;
 		}
 		this.refreshing.delete(name);
-		this.activityBy.set(name, { events: 0, lastAt: Date.now() });
-		this.ledger.journal(`[${name}] コンテキストを整理（/clear して始め直し）`);
+		if (result.success) {
+			this.activityBy.set(name, { events: 0, lastAt: Date.now() });
+			this.ledger.journal(`[${name}] コンテキストを整理（/clear して始め直し）: ${result.reason}`);
+		} else {
+			this.ledger.journal(`[${name}] コンテキストの整理に失敗（${result.reason}）`);
+		}
 		const s = this.sessions.get(name);
 		if (!s) return;
-		if (name === "concierge" && this.recentChat.length > 0)
-			send(s.socket, {
-				type: "event",
-				content: `/clear する前の直近のやり取り（古い順）:\n${this.recentChat.join("\n")}`,
-				meta: { kind: "handoff" },
-			});
-		for (const item of this.ledger.drain(name))
-			send(s.socket, { type: "event", content: item.content, meta: item.meta });
+		if (result.success) {
+			this.sendRules(s);
+			if (name === "concierge" && this.recentChat.length > 0)
+				send(s.socket, {
+					type: "event",
+					content: `/clear する前の直近のやり取り（古い順）:\n${this.recentChat.join("\n")}`,
+					meta: { kind: "handoff" },
+				});
+		}
+		this.flushOutbox(s);
 	}
 
 	// --- Discord から ---------------------------------------------------------------------
