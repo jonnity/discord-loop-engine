@@ -11,6 +11,15 @@ export const PLUGIN_SPEC = "plugin:discord-loop-engine@discord-loop-engine";
 // reply などの dle ツールを許可確認なしで使えるようにする（離席中に返事だけで止まらないように）
 export const DLE_TOOLS_RULE = "mcp__plugin_discord-loop-engine_dle";
 
+export interface WorkerRefresh {
+	enabled: boolean;
+	maxTokens: number;
+	contextPercent: number;
+	idleSeconds: number;
+	cooldownMinutes: number;
+	codexIgnoreAfterMinutes: number;
+}
+
 export interface Config {
 	home: string;
 	socketPath: string;
@@ -25,10 +34,10 @@ export interface Config {
 		model: string;
 		extraArgs: string[];
 		allowedTools: string[];
-		/** maxEvents 件のやり取りか、コンテキストの残りが contextPercent% 以下で、手が空いたら /clear する。0 で無効 */
-		refresh: { maxEvents: number; contextPercent: number };
+		/** 件数または文脈量が閾値以上で、待機を確認したら /clear する */
+		refresh: { enabled: boolean; maxTokens: number; maxEvents: number; contextPercent: number };
 	};
-	worker: { model: string | null; extraArgs: string[]; initialPrompt: string };
+	worker: { model: string | null; extraArgs: string[]; initialPrompt: string; refresh: WorkerRefresh };
 	retro: { everyDoneTasks: number; everyDays: number; promoteAfter: number };
 	board: { enabled: boolean };
 }
@@ -39,8 +48,19 @@ export const CONFIG_TEMPLATE = {
 	permissionRelay: false,
 	tmuxSession: "dle",
 	workspaceDir: "~/dle/workspaces",
-	concierge: { model: "sonnet", refresh: { maxEvents: 40, contextPercent: 15 } },
-	worker: { model: null, extraArgs: [] },
+	concierge: { model: "sonnet", refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 } },
+	worker: {
+		model: null,
+		extraArgs: [],
+		refresh: {
+			enabled: true,
+			maxTokens: 100000,
+			contextPercent: 15,
+			idleSeconds: 180,
+			cooldownMinutes: 30,
+			codexIgnoreAfterMinutes: 120,
+		},
+	},
 	retro: { everyDoneTasks: 5, everyDays: 7, promoteAfter: 3 },
 	board: { enabled: true },
 };
@@ -82,8 +102,11 @@ export function loadConfig(home = dleHome()): Config {
 	const c = (raw.concierge ?? {}) as Record<string, unknown>;
 	const cr = (c.refresh ?? {}) as Record<string, unknown>;
 	const w = (raw.worker ?? {}) as Record<string, unknown>;
+	const wr = (w.refresh ?? {}) as Record<string, unknown>;
 	const r = (raw.retro ?? {}) as Record<string, unknown>;
-	const num = (v: unknown, d: number) => (typeof v === "number" && v > 0 ? v : d);
+	const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
+	const nonnegative = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
+	const percent = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 100 ? v : 15);
 	return {
 		home,
 		socketPath: typeof raw.socketPath === "string" ? raw.socketPath : socketPath(home),
@@ -99,15 +122,25 @@ export function loadConfig(home = dleHome()): Config {
 			extraArgs: strList(c.extraArgs),
 			allowedTools: strList(c.allowedTools),
 			refresh: {
-				// 0 で無効にできるよう、num（正の数だけ受け付ける）は使わない
-				maxEvents: typeof cr.maxEvents === "number" && cr.maxEvents >= 0 ? cr.maxEvents : 40,
-				contextPercent: num(cr.contextPercent, 15),
+				// 旧設定で maxEvents: 0 にしていた利用者は、明示しない限り無効のままにする。
+				enabled: typeof cr.enabled === "boolean" ? cr.enabled : cr.maxEvents !== 0,
+				maxTokens: nonnegative(cr.maxTokens, 100000),
+				maxEvents: nonnegative(cr.maxEvents, 40),
+				contextPercent: percent(cr.contextPercent),
 			},
 		},
 		worker: {
 			model: typeof w.model === "string" ? w.model : null,
 			extraArgs: strList(w.extraArgs),
 			initialPrompt: typeof w.initialPrompt === "string" ? w.initialPrompt : "/discord-loop-engine:issue-loop",
+			refresh: {
+				enabled: typeof wr.enabled === "boolean" ? wr.enabled : true,
+				maxTokens: nonnegative(wr.maxTokens, 100000),
+				contextPercent: percent(wr.contextPercent),
+				idleSeconds: num(wr.idleSeconds, 180),
+				cooldownMinutes: num(wr.cooldownMinutes, 30),
+				codexIgnoreAfterMinutes: num(wr.codexIgnoreAfterMinutes, 120),
+			},
 		},
 		retro: {
 			everyDoneTasks: num(r.everyDoneTasks, 5),

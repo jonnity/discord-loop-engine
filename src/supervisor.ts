@@ -3,6 +3,8 @@
 // `tmux attach -t dle` でいつでも同じ画面を覗いて手で操作できるようにするため。
 
 import { execFile } from "node:child_process";
+import path from "node:path";
+import { type ClaudeSession, contextReader, type TranscriptContext } from "./context.ts";
 
 const RESTART_WINDOW_MS = 10 * 60_000;
 const MAX_RESTARTS = 3;
@@ -15,10 +17,47 @@ const DEV_CHANNEL_PROMPT = "I am using this for local development";
 const PERMISSION_PROMPTS = ["Do you want to proceed?", "Do you want to make this edit", "Do you want to create"];
 // 応答の途中に出る目印（この間は /clear を入れない）
 const WORKING_MARK = "esc to interrupt";
-// コンテキストの残りの表示（Claude Code が残り少なくなると出す。表記の揺れに備えて2通り）
-const CONTEXT_LEFT = [/Context left until auto-compact: (\d+)%/i, /(\d+)% context left/i];
-// 最後のやり取りからこれだけ経つまでは /clear しない（会話の途中で記憶を消さないため）
-const REFRESH_IDLE_MS = 3 * 60_000;
+// 旧版向けの表記も残す。画面だけで待機を決めず、内部ファイルの idle と併用する。
+const CONTEXT_LEFT = [/Context left until auto-compact: (\d+)%/i, /(\d+)% context left/i, /(\d+)% until auto-compact/i];
+
+export interface RefreshResult {
+	success: boolean;
+	reason: string;
+}
+
+export interface RefreshTarget {
+	prompt: string;
+	maxTokens: number;
+	maxEvents: number;
+	contextPercent: number;
+	idleSeconds: number;
+	cooldownMinutes: number;
+	waitForCodex: boolean;
+	codexIgnoreAfterMinutes: number;
+	cwd: string;
+}
+
+function emptyPrompt(pane: string): boolean {
+	const lines = pane.split("\n").slice(-15);
+	const index = lines.findLastIndex((line) => /^\s*❯/.test(line));
+	if (index < 0 || !/^\s*❯\s*$/.test(lines[index] ?? "")) return false;
+	// 区切り線より上に続きの入力があれば、先頭行が空でも割り込まない。
+	const below = lines.slice(index + 1);
+	const divider = below.findIndex((line) => /^\s*[─━-]{3,}\s*$/.test(line));
+	return (divider < 0 ? below : below.slice(0, divider)).every((line) => !line.trim());
+}
+
+function screenContext(pane: string): { tokens: number | null; left: number | null } {
+	const uncached = /~([\d.]+)k uncached/i.exec(pane);
+	const remaining = CONTEXT_LEFT.map((re) => re.exec(pane)).find(Boolean);
+	const used = /(\d+)% context used/i.exec(pane);
+	const left = remaining ? Number(remaining[1]) : used ? 100 - Number(used[1]) : null;
+	const tokens = uncached ? Number(uncached[1]) * 1000 : null;
+	return {
+		tokens: tokens !== null && Number.isFinite(tokens) ? tokens : null,
+		left: left !== null && left >= 0 && left <= 100 ? left : null,
+	};
+}
 
 export type Tmux = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr?: string }>;
 
@@ -36,11 +75,8 @@ export interface SessionTarget {
 	cwd: string;
 	command: string; // シェルで実行する1行
 	initialPrompt: string;
-	/**
-	 * コンテキストが溜まったら、手が空いているときに /clear して prompt で始め直す（窓口用）。
-	 * maxEvents 件のやり取りか、コンテキストの残りが contextPercent% 以下になったら行う。
-	 */
-	refresh?: { prompt: string; maxEvents: number; contextPercent: number };
+	/** worker・窓口の待機中に文脈を整理する設定 */
+	refresh?: RefreshTarget;
 	/** 既定以外の tmux セッションで起動したいとき（そのリポジトリのスクリプトが特定のセッション名を前提にしている場合） */
 	tmuxSession?: string;
 }
@@ -63,6 +99,11 @@ interface SlotState {
 	devPromptAnswered: boolean;
 	stuckTicks: number;
 	stuckNotified: boolean;
+	lastRefreshAt: number | null;
+	transitionSession: string | null;
+	unknownSession: string | null;
+	codexSince: Map<string, number>;
+	refreshing: boolean;
 }
 
 export interface SupervisorOptions {
@@ -74,7 +115,12 @@ export interface SupervisorOptions {
 	/** 前回の /clear 以降に流し込んだ件数と、最後にやり取りした時刻 */
 	activity?: (name: string) => { events: number; lastAt: number };
 	/** /clear の前後に呼ぶ（その間に届いたものは engine が溜めておき、終わってから渡す） */
-	onRefresh?: (name: string, phase: "start" | "done") => void;
+	onRefresh?: (name: string, phase: "start" | "done", result?: RefreshResult) => void;
+	onRefreshSkipped?: (name: string, reason: string) => void;
+	readSession?: (pid: string) => Promise<ClaudeSession | null>;
+	readTranscript?: (session: ClaudeSession) => Promise<TranscriptContext | null>;
+	clearConfirmMs?: number;
+	wait?: (ms: number) => Promise<void>;
 	log?: (msg: string) => void;
 	now?: () => number;
 	promptDelayMs?: number;
@@ -83,10 +129,16 @@ export interface SupervisorOptions {
 export class Supervisor {
 	private o: Required<SupervisorOptions>;
 	private state = new Map<string, SlotState>();
+	private startedAt: number;
+	private ticking = false;
 
 	constructor(opts: SupervisorOptions) {
 		// channel の接続直後は入力欄がまだ準備できていないことがあるため、少し待ってから入力する
 		this.o = {
+			...contextReader(),
+			clearConfirmMs: 15000,
+			wait: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+			onRefreshSkipped: () => {},
 			log: () => {},
 			now: Date.now,
 			promptDelayMs: 5000,
@@ -94,6 +146,7 @@ export class Supervisor {
 			onRefresh: () => {},
 			...opts,
 		};
+		this.startedAt = this.o.now();
 	}
 
 	private st(name: string): SlotState {
@@ -108,6 +161,11 @@ export class Supervisor {
 				devPromptAnswered: false,
 				stuckTicks: 0,
 				stuckNotified: false,
+				lastRefreshAt: null,
+				transitionSession: null,
+				unknownSession: null,
+				codexSince: new Map(),
+				refreshing: false,
 			};
 			this.state.set(name, s);
 		}
@@ -129,6 +187,16 @@ export class Supervisor {
 	}
 
 	async tick() {
+		if (this.ticking) return;
+		this.ticking = true;
+		try {
+			await this.tickOnce();
+		} finally {
+			this.ticking = false;
+		}
+	}
+
+	private async tickOnce() {
 		const targets = this.o.targets();
 		const bySession = new Map<string, string[] | null>();
 		for (const session of new Set(targets.map((t) => this.sessionOf(t))))
@@ -233,34 +301,153 @@ export class Supervisor {
 		this.o.log(`supervisor: ${name} に「${t.initialPrompt}」を入力しました`);
 	}
 
-	/**
-	 * 窓口のコンテキストが溜まっていて、手が空いていれば /clear して始め直す。
-	 * 窓口が自分で /clear を予約する形（oogiri-doc の parallel-cycle-loop の one-shot 連鎖）を採らないのは、
-	 * 予約が空振りすると気づけないため。ペインを持っている engine が入力するほうが確実。
-	 */
+	private async session(name: string): Promise<{ pid: string; session: ClaudeSession } | null> {
+		const r = await this.o.tmux(["display-message", "-p", "-t", this.target(name), "#{pane_pid}"]);
+		if (!r.ok || !/^\d+$/.test(r.stdout.trim())) return null;
+		const pid = r.stdout.trim();
+		const session = await this.o.readSession(pid);
+		return session ? { pid, session } : null;
+	}
+
+	private async codexBusy(r: RefreshTarget, s: SlotState): Promise<boolean> {
+		const result = await this.o.tmux(["list-panes", "-a", "-F", "#{window_name}\t#{pane_current_path}\t#{window_id}"]);
+		if (!result.ok) return true;
+		const seen = new Set<string>();
+		let busy = false;
+		for (const line of result.stdout.split("\n").filter(Boolean)) {
+			const [name, cwd, id] = line.split("\t");
+			if (!name || !cwd || !id) return true;
+			const relative = path.relative(r.cwd, cwd);
+			if (
+				!/^codex-(spec|impl)-/.test(name) ||
+				relative === ".." ||
+				relative.startsWith(`..${path.sep}`) ||
+				path.isAbsolute(relative)
+			)
+				continue;
+			const key = `${id}:${cwd}`;
+			seen.add(key);
+			const since = s.codexSince.get(key) ?? this.o.now();
+			s.codexSince.set(key, since);
+			if (this.o.now() - since < r.codexIgnoreAfterMinutes * 60000) busy = true;
+		}
+		for (const key of s.codexSince.keys()) if (!seen.has(key)) s.codexSince.delete(key);
+		return busy;
+	}
+
+	private async confirmClear(
+		name: string,
+		pid: string,
+		oldSession: string,
+		before: string,
+	): Promise<ClaudeSession | null> {
+		// 時刻注入が固定でも必ず上限内で終わるよう、試行回数でポーリングする。
+		const attempts = Math.ceil(this.o.clearConfirmMs / 1000);
+		for (let i = 0; i <= attempts; i++) {
+			if (i > 0) await this.o.wait(Math.min(1000, this.o.clearConfirmMs - (i - 1) * 1000));
+			const session = await this.o.readSession(pid);
+			if (session && session.sessionId !== oldSession) return session;
+			if (!session) {
+				const pane = await this.o.tmux(["capture-pane", "-p", "-t", this.target(name)]);
+				// 同じ空プロンプトを再観測しただけでは、会話が消えた証拠にしない。
+				if (
+					pane.ok &&
+					pane.stdout !== before &&
+					emptyPrompt(pane.stdout) &&
+					pane.stdout.split("\n").every((line) => !line.trim() || /^\s*❯\s*$/.test(line))
+				)
+					return { sessionId: "", cwd: "", status: "idle", updatedAt: this.o.now() };
+			}
+		}
+		return null;
+	}
+
+	private contextUnknown(t: SessionTarget, s: SlotState, sessionId: string) {
+		if (s.transitionSession !== null || s.unknownSession === sessionId) return;
+		s.unknownSession = sessionId;
+		this.o.onRefreshSkipped(t.name, "文脈量が読めないため自動の整理を見送り中");
+	}
+
+	/** cron の空振りを避けるため、engine が待機と clear の成功を確認してから再開する。 */
 	private async maybeRefresh(t: SessionTarget) {
 		const r = t.refresh;
-		if (!r || r.maxEvents <= 0) return;
-		const a = this.o.activity(t.name);
-		if (a.events === 0 || this.o.now() - a.lastAt < REFRESH_IDLE_MS) return;
-		const pane = await this.o.tmux(["capture-pane", "-p", "-t", this.target(t.name)]);
-		if (!pane.ok || pane.stdout.includes(WORKING_MARK) || PERMISSION_PROMPTS.some((p) => pane.stdout.includes(p)))
+		if (!r) return;
+		const s = this.st(t.name);
+		const now = this.o.now();
+		const idleMs = r.idleSeconds * 1000;
+		if (
+			s.refreshing ||
+			now - this.startedAt < idleMs ||
+			(s.lastRefreshAt !== null && now - s.lastRefreshAt < r.cooldownMinutes * 60000)
+		)
 			return;
-		const left = CONTEXT_LEFT.map((re) => re.exec(pane.stdout)).find(Boolean);
-		const low = left ? Number(left[1]) <= r.contextPercent : false;
-		if (!low && a.events < r.maxEvents) return;
+		const a = this.o.activity(t.name);
+		if (now - a.lastAt < idleMs) return;
+		const pane = await this.o.tmux(["capture-pane", "-p", "-t", this.target(t.name)]);
+		if (
+			!pane.ok ||
+			pane.stdout.includes(WORKING_MARK) ||
+			PERMISSION_PROMPTS.some((p) => pane.stdout.includes(p)) ||
+			!emptyPrompt(pane.stdout)
+		)
+			return;
+		const current = await this.session(t.name);
+		if (!current) {
+			this.contextUnknown(t, s, "unreadable");
+			return;
+		}
+		if (current.session.status !== "idle" || path.resolve(current.session.cwd) !== path.resolve(r.cwd)) return;
+		const transcript = await this.o.readTranscript(current.session);
+		if (!transcript) {
+			this.contextUnknown(t, s, current.session.sessionId);
+			return;
+		}
+		if (now - transcript.mtimeMs < idleMs || now - transcript.subagentMtimeMs < idleMs) return;
+		if (r.waitForCodex && (await this.codexBusy(r, s))) return;
+		if (s.transitionSession !== null) {
+			if (s.transitionSession === "") s.transitionSession = current.session.sessionId;
+			if (s.transitionSession === current.session.sessionId && transcript?.tokens == null) return;
+			s.transitionSession = null;
+		}
+		const screen = screenContext(pane.stdout);
+		const tokens = transcript?.tokens ?? screen.tokens;
+		let reason: string | null = null;
+		if (r.maxTokens > 0 && tokens !== null && tokens >= r.maxTokens)
+			reason = `文脈 ${tokens / 1000}k（閾値 ${r.maxTokens / 1000}k）`;
+		if (r.maxTokens > 0 && tokens === null && screen.left !== null && screen.left <= r.contextPercent)
+			reason = `残り ${screen.left}%`;
+		if (!reason && r.maxEvents > 0 && a.events >= r.maxEvents) reason = `${a.events} 件のやり取り`;
+		if (!reason && r.maxTokens > 0 && tokens === null && screen.left === null) {
+			this.contextUnknown(t, s, current.session.sessionId);
+		} else s.unknownSession = null;
+		if (!reason) return;
+		// ファイルや tmux を読む間に入力が届いていたら、古い待機判定では clear しない。
+		if (this.o.now() - this.o.activity(t.name).lastAt < idleMs) return;
+		s.refreshing = true;
+		let result: RefreshResult = { success: false, reason: "clear の成功を確認できませんでした" };
 		this.o.onRefresh(t.name, "start");
 		try {
-			await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", "/clear"]);
-			await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
-			await new Promise((res) => setTimeout(res, this.o.promptDelayMs));
-			await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", r.prompt]);
-			await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
-			this.o.log(
-				`supervisor: ${t.name} のコンテキストを整理しました（${low ? `残り ${left?.[1]}%` : `${a.events} 件のやり取り`}）`,
-			);
+			const clear = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", "/clear"]);
+			if (!clear.ok) throw new Error("/clear を入力できませんでした");
+			const enter = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			if (!enter.ok) throw new Error("/clear を送信できませんでした");
+			const next = await this.confirmClear(t.name, current.pid, current.session.sessionId, pane.stdout);
+			if (!next) return;
+			s.transitionSession = next.sessionId;
+			s.unknownSession = null;
+			await this.o.wait(this.o.promptDelayMs);
+			const prompt = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", r.prompt]);
+			if (!prompt.ok) throw new Error("再開プロンプトを入力できませんでした");
+			const resumed = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			if (!resumed.ok) throw new Error("再開プロンプトを送信できませんでした");
+			result = { success: true, reason };
+		} catch (error) {
+			result = { success: false, reason: error instanceof Error ? error.message : String(error) };
 		} finally {
-			this.o.onRefresh(t.name, "done");
+			s.lastRefreshAt = this.o.now();
+			s.refreshing = false;
+			this.o.log(`supervisor: ${t.name} のコンテキスト整理${result.success ? "完了" : "失敗"}（${result.reason}）`);
+			this.o.onRefresh(t.name, "done", result);
 		}
 	}
 
