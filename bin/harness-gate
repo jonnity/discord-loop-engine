@@ -19,13 +19,41 @@ DIR="${1:-$(pwd)}"
 cd "$DIR" || exit 2
 
 CONFIG="$("$SCRIPT_DIR/harness-config" --path)"
-count="$(jq '.gate | length' "$CONFIG" 2>/dev/null || echo 0)"
-if [ "$count" = 0 ]; then
+if [ ! -f "$CONFIG" ] || ! jq -e 'type == "object" and (.gate | type == "array")' "$CONFIG" >/dev/null 2>&1; then
+	echo "harness-gate: harness.json に gate が定義されていません" >&2
+	exit 2
+fi
+# 設定不備は環境コマンドを実行する前に止める。
+if ! jq -e '
+	((.preflight == null) or (.preflight | type == "array" and all(.[];
+		type == "object" and
+		(.name | type == "string" and test("\\S")) and
+		(.run | type == "string" and test("\\S")))))
+' "$CONFIG" >/dev/null 2>&1; then
+	echo "harness-gate: preflight の設定が不正です（name/run は空でない文字列の配列、exit 2）" >&2
+	exit 2
+fi
+count="$(jq '.gate | length' "$CONFIG" 2>/dev/null)" || count=""
+if [ -z "$count" ] || [ "$count" = 0 ]; then
 	echo "harness-gate: harness.json に gate が定義されていません" >&2
 	exit 2
 fi
 
 results=()
+preflight_count="$(jq '(.preflight // []) | length' "$CONFIG")"
+for ((i = 0; i < preflight_count; i++)); do
+	name="$(jq -r ".preflight[$i].name" "$CONFIG")"
+	run="$(jq -r ".preflight[$i].run" "$CONFIG")"
+	echo "=== [preflight: $name] $run" >&2
+	if bash -c "$run"; then
+		results+=("✅ preflight: $name")
+	else
+		results+=("❌ preflight: $name")
+		printf '%s\n' "${results[@]}" >&2
+		echo "harness-gate: 環境確認に失敗しました。環境を整えて再実行してください（exit 3）" >&2
+		exit 3
+	fi
+done
 failed=0
 for i in $(seq 0 $((count - 1))); do
 	name="$(jq -r ".gate[$i].name" "$CONFIG")"

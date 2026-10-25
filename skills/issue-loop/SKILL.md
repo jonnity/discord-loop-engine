@@ -140,7 +140,11 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
    **再トリガー目的の空コミットは積まない**（harness-guard が止める）
 3. `REAL` → サブエージェントに「根本原因と、Codex に渡す修正指示を1段落で」まとめさせ、
    `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する
-   （Claude はコードを直さない）。直ったら `harness-gate` → push
+   （Claude はコードを直さない）。直ったら `harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
+   0なら push、1ならコード検査失敗として差し戻し、2なら設定を修正する。
+   3なら環境不備なので push を止め、Codex へ再差し戻しせず、この失敗は REAL の回数に加算しない。
+   自動解消できなければ `harness-phase {n} blocked --comment-file ...` で項目名・失敗理由・必要な環境対応を依頼する。
+   環境解消後に gate 全体を再実行して0を確認してから push する
 4. **同じ PR で REAL が3回続いたら**自動リトライをやめ、
    `harness-phase {n} blocked --comment-file ...`（失敗しているチェック・試したこと・必要な判断）で人間に渡す
 5. CI が green になったら Phase 5-4 の承認依頼へ（head が変わっているので必ず出し直す）

@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# 子プロセスを作らず、中断と回収を検証する。
+echo convert >> "$MEDIA_LOG"
+case "${CONVERT_MODE:-}" in
+fail) exit 1 ;;
+empty) : > "${!#}"; exit ;;
+wait|ignore)
+	[ "$CONVERT_MODE" = ignore ] && trap '' TERM
+	echo "$$" > "$MEDIA_PID"
+	while :; do :; done ;;
+esac
+printf 'converted' > "${!#}"

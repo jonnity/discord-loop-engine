@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
 # テスト用の gh スタブ。harness-inbox が呼ぶ問い合わせにだけ fixture を返す。
 D="$(cd "$(dirname "$0")" && pwd)"
+if [ "${PHASE_STUB:-0}" = 1 ]; then
+	case "$*" in
+	"issue view 3 --json title -q .title") echo テスト ;;
+	"issue view 3 --json url -q .url") echo https://example.test/issue/3 ;;
+	"issue view 3 --json labels -q .labels[].name") echo harness:impl-review ;;
+	"pr view 5 --json headRefOid -q .headRefOid") echo abc123456789 ;;
+	"pr comment 5 --body-file "*|"issue comment 3 --body-file "*)
+		echo comment >> "$MEDIA_LOG"; cp "${!#}" "$POST_BODY"; echo https://example.test/comment ;;
+	"issue edit 3 "*) echo label >> "$MEDIA_LOG" ;;
+	*) echo "gh stub: unexpected: $*" >&2; exit 1 ;;
+	esac
+	exit
+fi
+if [ "${RUNNER_STUB:-0}" = 1 ]; then
+	[ "$*" = "api --paginate repos/example/project/actions/runners" ] || exit 1
+	[ "${RUNNER_FAIL:-0}" = 1 ] && exit 1
+	cat "$RUNNER_PAGES"
+	exit
+fi
 case "$*" in
 "repo view --json owner -q .owner.login") echo jonnity ;;
 *"issue list --state open --label harness:interview"*) echo 3 ;;

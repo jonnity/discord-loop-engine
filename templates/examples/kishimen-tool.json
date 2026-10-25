@@ -7,6 +7,7 @@
 	"branchPrefix": "fix/issue-",
 	"mergeMethod": "merge",
 	"hooks": { "afterWorktree": ["npm ci"] },
+	"preflight": [],
 	"gate": [
 		{
 			"name": "types",
@@ -45,5 +46,5 @@
 		"maxAttachMB": 10
 	},
 	"permissions": ["Bash(npm:*)", "Bash(npx:*)", "Bash(cargo:*)"],
-	"notes": "正本は回答履歴（累積点などは毎回再計算）。src/core は UI に依存しない純粋関数。投影画面に点数を渡さない。環境差分は src/platform に閉じ込める。保存ファイルと localStorage の後方互換を壊さない。npm を使う（pnpm-lock.yaml は使っていない）。"
+	"notes": "正本は回答履歴（累積点などは毎回再計算）。src/core は UI に依存しない純粋関数。投影画面に点数を渡さない。環境差分は src/platform に閉じ込める。保存ファイルと localStorage の後方互換を壊さない。npm を使う（pnpm-lock.yaml は使っていない）。Tauri の npm/cargo の連動依存名・版の対応・package.json/package-lock.json と src-tauri/Cargo.toml/Cargo.lock・更新時の検証方法は再調査して notes に記録する。未調査の版やランナー要件は固定しない。"
 }

@@ -81,6 +81,96 @@ if [ "$gate" = 1 ] && [ -z "$COMMENT" ]; then
 	exit 2
 fi
 
+# 動画と投稿本文の一時ファイルは通知の完了まで保持する。
+media_tmp="" comment_tmp="" convert_pid=""
+cleanup() {
+	if [ -n "$convert_pid" ]; then
+		kill -TERM "$convert_pid" 2>/dev/null || true
+		for ((attempt = 0; attempt < 20; attempt++)); do
+			kill -0 "$convert_pid" 2>/dev/null || break
+			sleep 0.05
+		done
+		kill -KILL "$convert_pid" 2>/dev/null || true
+		wait "$convert_pid" 2>/dev/null || true
+	fi
+	[ -z "$comment_tmp" ] || rm -f -- "$comment_tmp"
+	[ -z "$media_tmp" ] || rm -rf -- "$media_tmp"
+	return 0
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+video_error() {
+	echo "harness-phase: 動画準備失敗: $*（exit 6）。対応後に再実行してください。" >&2
+	exit 6
+}
+video_file() { [ -f "$1" ] && [ -r "$1" ] && [ -s "$1" ]; }
+probe_video() {
+	if ! probe_json="$(ffprobe -v error -select_streams v:0 \
+		-show_entries stream=codec_name,pix_fmt:format=format_name,duration:format_tags=major_brand \
+		-of json "$FILE")"; then
+		video_error "ffprobe の検査失敗。入力を確認するか再録画が必要です"
+	fi
+	if ! jq -e '
+		(.streams | type == "array" and length > 0) and
+		(.streams[0].codec_name | type == "string" and length > 0) and
+		(.streams[0].pix_fmt | type == "string" and length > 0) and
+		(.format.format_name | type == "string" and length > 0) and
+		(.format.duration | tonumber | . > 0 and . < 1.7976931348623157e308)
+	' <<<"$probe_json" >/dev/null 2>&1; then
+		video_error "probe の JSON・映像・再生時間が不正です。再録画が必要です"
+	fi
+}
+compatible_video() {
+	[[ "${FILE,,}" = *.mp4 ]] && jq -e '
+		(.format.format_name | split(",") | index("mp4") != null) and
+		(.format.tags.major_brand as $brand | ["isom","iso2","mp41","mp42","avc1"] | index($brand) != null) and
+		.streams[0].codec_name == "h264" and .streams[0].pix_fmt == "yuv420p"
+	' <<<"$probe_json" >/dev/null 2>&1
+}
+
+# 要約は UTF-8 の文字単位で切る。位置の説明は切り出しの後に付ける。
+if [ -z "$SUMMARY" ] && [ -n "$COMMENT" ]; then
+	SUMMARY="$(printf '%s' "$COMMENT" | jq -Rrs '.[0:300]')"
+fi
+if [ "$PHASE" = awaiting-merge ] && [ -n "$FILE" ]; then
+	video_file "$FILE" || video_error "入力が通常の読取可能な非空ファイルではありません。録画ファイルを指定してください"
+	FILE="$(cd -- "$(dirname -- "$FILE")" && pwd)/$(basename -- "$FILE")"
+	command -v ffprobe >/dev/null || video_error "ffprobe が必要です。FFmpeg のツールを導入してください"
+	probe_video
+	if ! compatible_video; then
+		command -v ffmpeg >/dev/null || video_error "変換に ffmpeg が必要です。FFmpeg を導入してください"
+		media_tmp="$(mktemp -d)" || video_error "一時ディレクトリを作成できません。空き容量と権限を確認してください"
+		output="$media_tmp/demo-$ISSUE-h264.mp4"
+		ffmpeg -nostdin -v error -y -i "$FILE" \
+			-map 0:v:0 -map '0:a:0?' -vf 'pad=ceil(iw/2)*2:ceil(ih/2)*2' \
+			-c:v libx264 -pix_fmt yuv420p -c:a aac -movflags +faststart -f mp4 "$output" &
+		convert_pid=$!
+		if wait "$convert_pid"; then
+			convert_pid=""
+		else
+			convert_pid=""
+			video_error "ffmpeg の変換に失敗しました。codec の利用可否と入力を確認してください"
+		fi
+		FILE="$output"
+		video_file "$FILE" || video_error "変換成果物が空または読取不能です。入力と空き容量を確認してください"
+		probe_video
+		compatible_video || video_error "変換後の形式が不適合です。ffmpeg の機能を確認してください"
+	fi
+	video_file "$FILE" || video_error "最終動画が欠落・空・読取不能です。録画を確認してください"
+	max_mb="$("$SCRIPT_DIR/harness-config" '.notify.maxAttachMB' 10)" || video_error "添付上限設定を確認してください"
+	[[ "$max_mb" =~ ^[1-9][0-9]*$ ]] || video_error "notify.maxAttachMB は正整数にしてください"
+	size="$(wc -c < "$FILE")" || video_error "最終動画を読み取れません。録画を確認してください"
+	jq -en --arg size "$size" --arg max "$max_mb" '($size | tonumber) <= (($max | tonumber) * 1048576)' >/dev/null \
+		|| video_error "最終動画が添付上限を超えています。短い録画を用意してください"
+	location="動画: この通知の Discord メッセージに添付（ファイル名 $(basename -- "$FILE")）。長文で分かれる場合は最後の投稿にあります。"
+	COMMENT="$COMMENT
+
+$location"
+	SUMMARY="$(jq -nr --arg text "$SUMMARY" --arg location "$location" '$text[0:(3500 - ($location | length) - 2)] + "\n\n" + $location')"
+fi
+
 TITLE="$(gh issue view "$ISSUE" --json title -q .title)"
 ISSUE_URL="$(gh issue view "$ISSUE" --json url -q .url)"
 
@@ -97,19 +187,16 @@ if [ -n "$COMMENT" ]; then
 ---
 _discord-loop-engine · \`$PHASE\`${sha:+ · head \`${sha:0:7}\`}_
 $marker"
-	tmp="$(mktemp)"
-	printf '%s\n' "$body" >"$tmp"
+	comment_tmp="$(mktemp)"
+	printf '%s\n' "$body" >"$comment_tmp"
 	if [ "$PHASE" = "awaiting-merge" ]; then
-		LINK="$(gh pr comment "$PR" --body-file "$tmp" | tail -n 1)"
+		LINK="$(gh pr comment "$PR" --body-file "$comment_tmp" | tail -n 1)"
 	else
-		LINK="$(gh issue comment "$ISSUE" --body-file "$tmp" | tail -n 1)"
+		LINK="$(gh issue comment "$ISSUE" --body-file "$comment_tmp" | tail -n 1)"
 	fi
-	rm -f "$tmp"
+	rm -f "$comment_tmp"
+	comment_tmp=""
 	echo "harness-phase: コメントを投稿しました: $LINK" >&2
-fi
-
-if [ -z "$SUMMARY" ] && [ -n "$COMMENT" ]; then
-	SUMMARY="$(printf '%s' "$COMMENT" | head -c 300)"
 fi
 
 # --- 2) Discord 通知（人間ゲートは必須。失敗したらラベルを変えずに終了） ---------

@@ -120,6 +120,30 @@ harness-phase {n} interview --comment-file /tmp/harness-q-{n}.md \
   （`gh issue comment {n} --body-file ...`、本文末尾に `<!-- harness:note -->` を付ける）、Phase 2 へ。
 - 回答が CLAUDE.md の明記規約から一意に導ける質問だけなら、issue-loop の「非ブロッキング進行」に従ってよい。
 
+### 認証情報を人に依頼した後（Phase 1・blocked 解除の共通手順）
+
+値は Discord/Issue に貼らせず、環境変数・秘密ファイル等の設定先だけを案内する。
+設定完了の回答後、公式の読取り専用 API（whoami 等）で、値を見ずに疎通を確認する。
+シェルのトレース・verbose は使わず、レスポンス本文・認証ヘッダを保存/表示せず HTTP ステータスか終了値だけを見る。
+成功時のみ依存作業を再開する。401は認証、403は権限、通信失敗は接続の問題として、
+値と応答本文を含めず正規の人間ゲートで対応を依頼する。専用 config キーは追加しない。
+
+例えばサービスの仕様に合わせ、秘密は設定済み環境変数から渡し、次の形で本文を捨てる。
+認証の仕組みが異なるサービスでは公式クライアントの安全な読取りコマンドを使う。
+
+```bash
+# AUTH_PROBE_BEGIN
+set +x
+status="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $SERVICE_TOKEN" "$AUTH_CHECK_URL" 2>/dev/null)" || status=network
+case "$status" in
+200) echo '疎通成功'; exit 0 ;;
+401) echo '認証を確認してください'; exit 1 ;;
+403) echo '必要な権限を確認してください'; exit 1 ;;
+*) echo '通信先・接続状態を確認してください'; exit 1 ;;
+esac
+# AUTH_PROBE_END
+```
+
 ## Phase 2: 設計書生成（Codex・並列）
 
 ```bash
@@ -140,6 +164,28 @@ cat > "$WT/.harness/prompt-spec-{n}.md" <<EOF
 自動では確認できない点（humanChecks に該当するもの）・未確定事項。
 git add / commit / push はしないこと。書き終えたら終了してください。
 EOF
+cat >> "$WT/.harness/prompt-spec-{n}.md" <<'CHECKLIST'
+
+設計品質チェックリスト（正本。レビューと再依頼でもこの依頼ファイルを参照する）:
+- 先頭に人向けの要約と Issue 本文の受け入れ条件の逐語引用を置く。番号を復元・推定しない。
+  要件メモの回答と引用元は別記する。入力に本文がなければ harness-issue-md または GitHub の読取りで
+  再取得し、取得できなければ不足を明記して確定設計にしない。
+- 現状の各記述には `path:line` の根拠を付け、新しい提案と区別する。lockfile・vite/vitest 等の挙動は
+  安全な一時ディレクトリで一度実行し、コマンド・終了コード・結果・実ファイルの検証を記す。
+- 外部ツール・API は公式資料または使うラッパーの実装/README の URL・確認日・既知の制限を調べ、
+  「本当に効くか」を最小プローブで確かめる。未実行なら理由・影響・後の確認手順を未確定事項に残す。
+- 連動するエコシステムは notes/context から依存名・版の対応・双方の manifest/lockfile・更新時の検証を
+  列挙する。該当しなければ非該当と理由を書く。
+- 実装環境で道具の存在と機能を確認して検証手順を選ぶ。ログだけで成功にせず、成果物ファイルの
+  存在・サイズ・内容/形式を調べる。シェル例の `$VAR` や `$(...)` も実際の環境で使える形にする。
+- 録画・プロセス起動・タイミング依存には数値の N と独立した試行の初期化・成果物条件を決め、
+  N 回連続成功を完了条件にする。中途失敗で連続回数を数え直す。SIGHUP・親の終了・プロセスグループの
+  中断・孤児と一時ファイルの回収を扱う。
+- 環境の前提（認証の疎通・self-hosted ランナー）を先に確認し、受け入れ条件ごとのテスト/確認手順と
+  自動では確認できない humanChecks、未確認の前提を明記する。
+CHECKLIST
+# 完成した prompt-spec を読み、導入部とチェックリストが揃ったことを確認してから起動する。
+cat "$WT/.harness/prompt-spec-{n}.md"
 harness-codex start "codex-spec-{n}" "$WT" "$WT/.harness/prompt-spec-{n}.md"   # 10 なら「フォールバック」節へ
 sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-spec-{n}.id")" -p -S -30 | grep "workdir:"   # $WT であること（必須）
 ```
@@ -190,16 +236,21 @@ Phase 3・5 のレビューは、成果物を作った文脈から切り離し�
    `[深刻度][確度] 箇所 — 指摘 — 根拠`、最後に `反証を試みたが壊せなかった点:` を1〜2行。
 
 主セッションは検証役の結果（数行）だけを受け取り、採否を決める。過剰設計になる指摘は棄却してよい。
-渡すのはパスだけ（`$WT`、spec、Issue ファイル、`context`）。Codex の説明や主セッションの会話は渡さない。
+渡すのはパスだけ（`$WT`、spec、Issue ファイル、`context`。Phase 3 は生成済みの `prompt-spec-{n}.md` も渡す）。Codex の説明や主セッションの会話は渡さない。
 
 ## Phase 3: 設計書レビュー
 
 懐疑役の観点: 受け入れ条件の取りこぼし・要件メモとの矛盾・実装不能な前提・変更ファイル一覧の誤り・
 既存の仕様書（`context`）との齟齬・テスト方針の欠落。
+加えて `.harness/prompt-spec-{n}.md` の「設計品質チェックリスト」を正本として全項目を照合する。
+参照行を実コードと、外部制限を一次資料と、挙動を実行結果・成果物と突き合わせる。
+未確認の前提を推測で通さず、未実行の理由と確認方法を明示させる。
 
 - **OK** → 設計書を Issue にコメント（`## 実装プラン` 見出し＋本文、末尾 `<!-- harness:note -->`）し、
   `harness-phase {n} implementing` → Phase 4
-- **NG** → 指摘を添えて `codex-spec-{n}` を `harness-codex start` で再起動し、spec を書き直させる（Claude は直さない）
+- **NG** → `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストを残した同じファイルを渡して
+  `codex-spec-{n}` を `harness-codex stop` → `harness-codex start` で再起動し、spec を書き直させる（Claude は直さない）。
+  フォールバックにもこの同じ依頼ファイルのパスを渡す
 
 ## Phase 4: 実装（Codex）
 
@@ -248,22 +299,42 @@ if [ -n "$REC" ]; then mkdir -p "$WT/$REC"; { cat "$WT/.harness/spec/{n}.md"; \
   printf '\n\n---\n\n# 実装完了サマリ\n\n'; cat "$WT/.harness/impl/{n}.md"; } > "$WT/$REC/{n}.md"; fi
 git -C "$WT" add <変更ファイルを列挙> ${REC:+$REC/{n}.md}   # .harness/ は絶対に add しない
 git -C "$WT" commit -m "<Why が分かるメッセージ>"
-(cd "$WT" && harness-gate) || exit 1   # 全部 ✅ になるまで PR を出さない（失敗は Codex に差し戻す）
+gate_rc=0
+(cd "$WT" && harness-gate) || gate_rc=$?
+# 0=成功、1=コード検査失敗、2=設定不備、3=環境不備。非0ならこのブロックを止める。
+if [ "$gate_rc" -ne 0 ]; then exit "$gate_rc"; fi
 git -C "$WT" push -u origin "$(harness-config '.branchPrefix' fix/issue-){n}"
 gh pr create --base "$(harness-config '.baseBranch' main)" --head "$(harness-config '.branchPrefix' fix/issue-){n}" \
   --title "<種別>: <要約> (#{n})" --body-file /tmp/harness-pr-{n}.md   # 本文に必ず "closes #{n}"
 ```
+
+gate の終了1は Codex にコード修正を差し戻し、終了2は設定を修正する。終了3は環境不備として
+push/PR 作成を止める。ランナー停止・権限不足をコード修正へ差し戻さず、REAL の回数にも数えない。
+自動解消できなければ `harness-phase {n} blocked --comment-file ...` で項目名・失敗理由・必要な対応を通知し、
+解消後に gate 全体を再実行する。
 
 PR を作ったら CI の結果を待つ（issue-loop 経由なら `subscribe_pr_activity` のイベントで、単体なら次の心拍で）。
 CI が赤なら issue-loop の「CI red 対応」に従う。**CI が green になってから**承認依頼を出す。
 
 ### 5-4. 承認依頼（必ず harness-phase で）
 
+UI 変更では現 head の実アプリの動画を `--file` に指定する。動画の検査・必要時 H.264 MP4 への変換と
+添付位置の追記は harness-phase が行う。UI 非変更や demo=null の案件に一律に録画を強制しない。
+変換に時間がかかるため、Bash ツールの timeout は既定120秒から延ばす（例: 600000 ms。長さに応じて調整）。
+終了値を保存し、0 のときだけ承認依頼済みと扱う。
+
 ```bash
 harness-phase {n} awaiting-merge --pr <PR番号> --comment-file /tmp/harness-merge-{n}.md \
   --summary "判定 ✅ / 受け入れ条件 1✅ 2✅ / 要実機確認 1件" \
   --file "<demo の mp4（UI 変更時・現 head で撮ったもの）>"
 ```
+
+終了6なら stderr の不足ツール名・失敗段階と必要な対応（FFmpeg 導入・再録画・短縮等）を、
+秘密を含めず別の本文ファイルにまとめ、`harness-phase {n} blocked --comment-file ...` で通知する。
+動画準備に失敗した awaiting-merge 自体は投稿しない。blocked の通知失敗も成功扱いせず原因を解消して再実行する。
+6以外の非0も仕分ける: 2は引数/設定、4は通知、5はラベルの問題を解消して同じ head で再実行する。
+143/137等の中断・timeout は残存プロセスと一時ファイルを確認し、timeout を延ばして再実行できるか判断する。
+自動解消できなければ blocked で対応を依頼する。対応後に動画準備から承認依頼をやり直す。
 
 コメント本文（PR に載る。Discord のリンク先はこのコメント）には次を書く:
 
@@ -333,7 +404,8 @@ exit 10 ならこの節に入る。
    切り替えるときは、worktree の**未コミット差分をそのまま残し**（`git checkout`・`stash` で消さない）、
    `harness-implementer` に「続きから」と渡す
 3. 設計・実装を `harness-implementer` サブエージェント（このプラグインの agent）に委譲する。
-   渡すのは Issue 番号・`$WT`・入出力ファイルのパスだけ
+   渡すのは Issue 番号・`$WT`・入出力ファイルのパスだけ。
+   設計時は生成済みの `$WT/.harness/prompt-spec-{n}.md` も必ず渡し、同じ依頼とチェックリストに従わせる
 4. レビューは引き続き別のサブエージェントで行う（書いた agent に自己採点させない）
 5. 確認ゲート・承認依頼・マージ条件は一切緩めない。`git add / commit / push` は implementer にも任せない
 6. 次の Phase を始める前に `harness-codex-status check` を見て、0 ならその Phase から Codex に戻す

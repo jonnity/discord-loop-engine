@@ -34,6 +34,8 @@ interface Call {
 	replyTo?: string;
 	messageId?: string;
 	emoji?: string;
+	files?: string[];
+	fileContents?: string[];
 }
 
 function fakeRest() {
@@ -41,8 +43,15 @@ function fakeRest() {
 	let n = 0;
 	return {
 		calls,
-		sendMessage: async (channelId: string, m: { content: string; replyTo?: string }) => {
-			calls.push({ kind: "send", channelId, content: m.content, replyTo: m.replyTo });
+		sendMessage: async (channelId: string, m: { content: string; replyTo?: string; files?: string[] }) => {
+			calls.push({
+				kind: "send",
+				channelId,
+				content: m.content,
+				replyTo: m.replyTo,
+				files: m.files,
+				fileContents: m.files?.map((f) => readFileSync(f, "utf8")),
+			});
 			return { id: `sent${++n}` };
 		},
 		editMessage: async (channelId: string, messageId: string, content: string) => {
@@ -905,3 +914,138 @@ test("clear の start 後に engine を作り直しても、ディスクの outb
 		await recovered.stop();
 	}
 });
+
+test("preflight は不正形を保存前に拒否し、確認本文と保存に有効な設定を含める", async () => {
+	const { engine, rest, home } = setupEngine();
+	await engine.start();
+	engine.ledger.upsertProject({ name: "quality", repo: "example/project", path: home, active: true, mode: "harness" });
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "quality", DLE_LOOP: "harness" });
+	try {
+		await until(() => engine.sessions.has("quality"));
+		const gate = [{ name: "test", run: "true" }];
+		for (const preflight of [{}, [null], [{ name: " ", run: "true" }], [{ name: "x", run: "" }]]) {
+			const r = await w.tool("profile_propose", { mode: "harness", profile: { gate, preflight } });
+			assert.equal(r.isError, true, JSON.stringify(preflight));
+			assert.equal(engine.ledger.openAttention().length, 0);
+			assert.ok(!existsSync(path.join(home, "projects", "quality", "draft.json")));
+		}
+		const preflight = [{ name: "runners", run: "echo online" }];
+		const r = await w.tool("profile_propose", { mode: "harness", profile: { gate, preflight } });
+		assert.equal(r.isError, false, r.text);
+		assert.ok(rest.calls.some((c) => c.content?.includes("環境確認（CI 検査より前）:\n- runners: `echo online`")));
+		assert.deepEqual(engine.ledger.draft("quality")?.profile?.preflight, preflight);
+	} finally {
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("承認の明示添付は欠落・空・ディレクトリを拒否し、長文の最後の投稿に実ファイルを渡す", async () => {
+	const { engine, rest, home } = setupEngine();
+	await engine.start();
+	const file = path.join(home, "demo.mp4");
+	const args = [
+		"notify",
+		"--project",
+		"quality",
+		"--event",
+		"merge-request",
+		"--title",
+		"動画",
+		"--url",
+		"https://example.test",
+		"--file",
+	];
+	try {
+		for (const invalid of [file, home]) {
+			const r = await dle(home, [...args, invalid]);
+			assert.equal(r.code, 1, r.stderr);
+			assert.equal(engine.ledger.openAttention().length, 0);
+		}
+		writeFileSync(file, "");
+		assert.equal((await dle(home, [...args, file])).code, 1);
+		writeFileSync(file, "movie");
+		const r = await dle(home, [...args, file, "--body", `${"あ".repeat(5000)}\n動画 demo.mp4 は最後の投稿に添付`]);
+		assert.equal(r.code, 0, r.stderr);
+		const posts = rest.calls.filter((c) => c.kind === "send" && !c.content?.includes("📋 ボード"));
+		assert.ok(posts.length > 1);
+		assert.deepEqual(posts.at(-1)?.files, [file]);
+		assert.deepEqual(posts.at(-1)?.fileContents, ["movie"]);
+		assert.ok(posts.some((c) => c.content?.includes("最後の投稿")));
+		assert.ok(posts.slice(0, -1).every((c) => !c.files?.length));
+	} finally {
+		await engine.stop();
+	}
+});
+
+for (const mode of ["success", "send-failure", "read-failure"] as const) {
+	test(`承認動画: engine の送信待機と ${mode} の応答まで一時ファイルを保持する`, async () => {
+		const { engine, rest, home } = setupEngine();
+		await engine.start();
+		const { mkdirSync } = await import("node:fs");
+		mkdirSync(path.join(home, ".claude"));
+		mkdirSync(path.join(home, "tmp"));
+		writeFileSync(
+			path.join(home, ".claude/harness.json"),
+			JSON.stringify({ project: "quality", repo: "example/project" }),
+		);
+		const input = path.join(home, "demo.webm");
+		writeFileSync(input, "source");
+		const mediaLog = path.join(home, "media.log");
+		let prepared = "";
+		let release: () => void = () => {};
+		const pending = new Promise<void>((r) => {
+			release = r;
+		});
+		const sendMessage = rest.sendMessage;
+		rest.sendMessage = async (channel, m) => {
+			if (m.files?.length) {
+				prepared = m.files[0] ?? "";
+				await pending;
+				if (mode === "send-failure") throw new Error("送信失敗");
+				if (mode === "read-failure") (await import("node:fs")).unlinkSync(prepared);
+			}
+			return sendMessage(channel, m);
+		};
+		const result = new Promise<{ code: number; stderr: string }>((resolve) => {
+			execFile(
+				path.join(ROOT, "bin/harness-phase"),
+				["3", "awaiting-merge", "--pr", "5", "--comment", "説明", "--file", input],
+				{
+					timeout: 10000,
+					env: {
+						...process.env,
+						HARNESS_CONFIG: "",
+						PATH: `${ROOT}/tests/harness/fixtures/media:${ROOT}/tests/harness/fixtures:${process.env.PATH}`,
+						CLAUDE_PROJECT_DIR: home,
+						DLE_HOME: home,
+						DLE_SOCKET: path.join(home, "engine.sock"),
+						PHASE_STUB: "1",
+						MEDIA_MODE: "webm",
+						MEDIA_LOG: mediaLog,
+						POST_BODY: path.join(home, "body"),
+						TMPDIR: path.join(home, "tmp"),
+						DISCORD_WEBHOOK_URL: "https://example.test/webhook",
+					},
+				},
+				(err, _stdout, stderr) => resolve({ code: err ? Number(err.code) : 0, stderr }),
+			);
+		});
+		try {
+			await until(() => prepared !== "");
+			assert.ok(existsSync(prepared));
+			assert.doesNotMatch(readFileSync(mediaLog, "utf8"), /notify|label/);
+			release();
+			const r = await result;
+			assert.equal(r.code, mode === "success" ? 0 : 4, r.stderr);
+			assert.ok(!existsSync(prepared));
+			assert.deepEqual(readdirSync(path.join(home, "tmp")), []);
+			if (mode !== "success") assert.doesNotMatch(readFileSync(mediaLog, "utf8"), /notify|label/);
+			else assert.match(readFileSync(mediaLog, "utf8"), /label/);
+		} finally {
+			release();
+			await result;
+			await engine.stop();
+		}
+	});
+}

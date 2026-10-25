@@ -92,6 +92,23 @@ ISSUE_URL="" PR_URL=""
 
 HEADLINE="$ICON $LABEL｜${ISSUE:+#$ISSUE }$TITLE"
 
+# 明示された承認動画は、どの通知経路でも黙って省略しない。
+required_attach=0
+if [ "$EVENT" = merge-request ] && [ -n "$FILE" ]; then
+	required_attach=1
+	MAX_MB="$(cfg '.notify.maxAttachMB')"
+	MAX_MB="${MAX_MB:-10}"
+	if [[ ! "$MAX_MB" =~ ^[1-9][0-9]*$ ]] || [ ! -f "$FILE" ] || [ ! -r "$FILE" ] || [ ! -s "$FILE" ]; then
+		echo "harness-notify: 承認添付または notify.maxAttachMB が不正です（exit 4）" >&2
+		exit 4
+	fi
+	size="$(wc -c < "$FILE")"
+	if ! jq -en --arg size "$size" --arg max "$MAX_MB" '($size | tonumber) <= (($max | tonumber) * 1048576)' >/dev/null; then
+		echo "harness-notify: 承認添付が上限を超えています（exit 4）" >&2
+		exit 4
+	fi
+fi
+
 # --- engine が動いていれば engine 経由で投稿する --------------------------------
 # discord-loop-engine の engine が動いているマシンでは、AI からの声を Bot に一本化する。
 # engine は台帳に A-番号で記録してから投稿するので、返事を番号で受けられ、ボードとも揃う。
@@ -196,7 +213,7 @@ fi
 
 if [ -z "$WEBHOOK_URL" ]; then
 	required="$(cfg '.notify.required')"
-	if [ "$required" = "false" ]; then
+	if [ "$required" = "false" ] && [ "$required_attach" = 0 ]; then
 		echo "harness-notify: DISCORD_WEBHOOK_URL 未設定のため skip（notify.required=false）" >&2
 		exit 0
 	fi
@@ -209,7 +226,9 @@ fi
 MAX_MB="$(cfg '.notify.maxAttachMB')"
 MAX_MB="${MAX_MB:-10}"
 attach=""
-if [ -n "$FILE" ]; then
+if [ "$required_attach" = 1 ]; then
+	attach="$FILE"
+elif [ -n "$FILE" ]; then
 	if [ ! -s "$FILE" ]; then
 		echo "harness-notify: 添付ファイルが無いか空です（$FILE）。本文のみ投稿します。" >&2
 	else
