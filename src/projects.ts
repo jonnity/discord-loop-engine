@@ -196,6 +196,19 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 			...cfg.concierge.extraArgs,
 		]),
 		initialPrompt: "/discord-loop-engine:concierge",
+		...(cfg.concierge.refresh.enabled
+			? {
+					refresh: {
+						...cfg.concierge.refresh,
+						prompt: "/discord-loop-engine:concierge refresh",
+						idleSeconds: 180,
+						cooldownMinutes: 30,
+						waitForCodex: false,
+						codexIgnoreAfterMinutes: 120,
+						cwd: path.join(cfg.home, "concierge"),
+					},
+				}
+			: {}),
 	};
 	const workers = projects
 		.filter((p) => p.active)
@@ -239,6 +252,17 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 					],
 				),
 				initialPrompt,
+				...(!native && ready && cfg.worker.refresh.enabled
+					? {
+							refresh: {
+								...cfg.worker.refresh,
+								prompt: initialPrompt,
+								maxEvents: 0,
+								waitForCodex: true,
+								cwd: p.path,
+							},
+						}
+					: {}),
 			};
 		});
 	return [concierge, ...workers];

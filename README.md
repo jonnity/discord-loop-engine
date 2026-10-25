@@ -230,13 +230,31 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 | `channelIds` | — | 中継するチャンネル（先頭が投稿先） |
 | `allowedUserIds` | — | 発言を受け取る人（あなただけにする） |
 | `concierge.model` | `sonnet` | 窓口のモデル |
-| `concierge.refresh` | 40 件 / 15% | 窓口とのやり取りがこの件数に達するか、コンテキストの残りがこの割合を切ったら、手が空いたとき（3分やり取りが無く、応答中でない）に engine が `/clear` して始め直す。直前のやり取りは渡し直し、挨拶は出さない。`maxEvents: 0` で無効 |
+| `concierge.refresh` | 有効 / 100k / 40 件 / 残り15% | `enabled`・`maxTokens`・`maxEvents`・`contextPercent`。文脈量または件数が閾値に達したら engine が待機中に `/clear` し、`concierge refresh` で挨拶を出さず再開。`enabled: false` で無効。旧形式の `maxEvents: 0` だけでも全無効を維持。件数だけ無効にするには `enabled: true, maxEvents: 0` |
+| `worker.refresh` | 有効 / 100k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
+| `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
 | `retro` | 5 件 / 7 日 / 3 回 | 振り返りの頻度と、仮ルールにする再現回数（仮置き。振り返りで見直す） |
 | `permissionRelay` | `false` | 許可の確認に Discord から `yes <id>` で答えられるようにする |
 | `board.enabled` | `true` | ボードのピン留め |
+
+文脈量は Claude Code の `~/.claude/sessions/<pid>.json` と会話ログの最後の usage
+（入力＋キャッシュ作成＋キャッシュ読取）から取得する。取得できない場合は画面の `~Nk uncached`、
+残り割合の順で補う。`maxTokens: 0` はトークン量と残り割合の判定を無効にする。
+`contextPercent` は残り割合の予備閾値（`N% context used` の表示は残りに換算）。
+
+窓口・worker とも、セッションが idle、応答・許可確認中ではなく入力欄が空、直近の入力・会話ログ・
+サブエージェントの更新から180秒（worker は設定可）以上、という条件をすべて確認してから整理する。
+engine 起動直後も同じ秒数待ち、整理の成功・失敗後は30分（worker は設定可）冷却する。
+内部ファイルの形式変更などで待機を確認できない場合は見送る。
+`/clear` は sessionId の変化を最大15秒確認してから再開し、確認できない場合は再開プロンプトを送らない。
+
+アップデート後は worker の自動整理が既定で有効になる。整理の理由・文脈量、失敗、文脈量不明による
+見送りは journal に残る。A-番号とタスクは台帳に保持し、整理中のメッセージは outbox に保留する。
+復帰時は仮ルール、窓口だけの直近のやり取り、保留メッセージの順で渡す。
+issue-loop は復帰時に状態を読み直し、心拍が消えていれば張り直す。
 
 ## 台帳（`~/.discord-loop-engine/`）
 

@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import type { Config } from "../src/config.ts";
+import { type Config, loadConfig } from "../src/config.ts";
 import { Ledger, type Project } from "../src/ledger.ts";
 import {
 	excludeLocalState,
@@ -123,8 +123,25 @@ test("--harness で登録すると、独自のループがあっても調査は 
 		home,
 		socketPath: "/s",
 		claudeBin: "claude",
-		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
-		worker: { model: null, extraArgs: [], initialPrompt: "/discord-loop-engine:issue-loop" },
+		concierge: {
+			model: "sonnet",
+			extraArgs: [],
+			allowedTools: [],
+			refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 },
+		},
+		worker: {
+			model: null,
+			extraArgs: [],
+			initialPrompt: "/discord-loop-engine:issue-loop",
+			refresh: {
+				enabled: true,
+				maxTokens: 100000,
+				contextPercent: 15,
+				idleSeconds: 180,
+				cooldownMinutes: 30,
+				codexIgnoreAfterMinutes: 120,
+			},
+		},
 	} as unknown as Config;
 	const t = sessionTargets(cfg, ledger.projects(), ledger).find((x) => x.name === "oogiri-doc");
 	assert.equal(t?.initialPrompt, "/discord-loop-engine:onboard harness");
@@ -153,10 +170,23 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 		home,
 		socketPath: `${home}/engine.sock`,
 		claudeBin: "claude",
-		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
+		concierge: {
+			model: "sonnet",
+			extraArgs: [],
+			allowedTools: [],
+			refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 },
+		},
 		worker: {
 			model: null,
 			extraArgs: ["--permission-mode", "acceptEdits"],
+			refresh: {
+				enabled: true,
+				maxTokens: 100000,
+				contextPercent: 15,
+				idleSeconds: 180,
+				cooldownMinutes: 30,
+				codexIgnoreAfterMinutes: 120,
+			},
 			initialPrompt: "/discord-loop-engine:issue-loop",
 		},
 	} as unknown as Config;
@@ -182,6 +212,9 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	assert.match(c?.command ?? "", /'Bash\(gh issue create:\*\)'/);
 	assert.equal(c?.initialPrompt, "/discord-loop-engine:concierge");
 
+	assert.equal(k?.refresh, undefined);
+	assert.equal(o?.refresh, undefined);
+	assert.equal(c?.refresh?.prompt, "/discord-loop-engine:concierge refresh");
 	assert.equal(k?.initialPrompt, "/discord-loop-engine:onboard", "設定が無ければ調査から");
 	assert.match(k?.command ?? "", /DLE_ROLE=worker DLE_PROJECT=kishimen-tool DLE_LOOP=harness claude /);
 	assert.match(k?.command ?? "", /'Bash\(harness-merge:\*\)'.* --permission-mode acceptEdits$/);
@@ -202,6 +235,8 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 		JSON.stringify({ gate: [], permissions: ["Bash(cargo:*)"] }),
 	);
 	const k2 = sessionTargets(cfg, projects, ledger)[1];
+	assert.equal(k2?.refresh?.prompt, cfg.worker.initialPrompt);
+	assert.equal(k2?.refresh?.maxTokens, 100000);
 	assert.equal(k2?.initialPrompt, "/discord-loop-engine:issue-loop");
 	assert.match(k2?.command ?? "", /'Bash\(cargo:\*\)'/);
 });
@@ -213,8 +248,25 @@ test("git の作者を設定していれば worker にだけ GIT_* で渡し、�
 		home,
 		socketPath: `${home}/engine.sock`,
 		claudeBin: "claude",
-		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
-		worker: { model: null, extraArgs: [], initialPrompt: "/discord-loop-engine:issue-loop" },
+		concierge: {
+			model: "sonnet",
+			extraArgs: [],
+			allowedTools: [],
+			refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 },
+		},
+		worker: {
+			model: null,
+			extraArgs: [],
+			initialPrompt: "/discord-loop-engine:issue-loop",
+			refresh: {
+				enabled: true,
+				maxTokens: 100000,
+				contextPercent: 15,
+				idleSeconds: 180,
+				cooldownMinutes: 30,
+				codexIgnoreAfterMinutes: 120,
+			},
+		},
 	};
 	const p = { repo: "x/y", active: true, addedAt: "" };
 	const projects: Project[] = [
@@ -236,4 +288,22 @@ test("git の作者を設定していれば worker にだけ GIT_* で渡し、�
 		assert.match(t?.command ?? "", /GIT_AUTHOR_NAME='Taro '\\''T'\\'' Yamada' /, "空白・引用符を含む名前も引用される");
 		assert.match(t?.command ?? "", /GIT_COMMITTER_NAME='Taro '\\''T'\\'' Yamada' /);
 	}
+});
+
+test("enabled: false と旧 maxEvents: 0 の窓口には refresh を配線しない", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-disabled-"));
+	writeFileSync(
+		path.join(home, "config.json"),
+		JSON.stringify({
+			channelIds: ["1"],
+			allowedUserIds: ["2"],
+			concierge: { refresh: { maxEvents: 0 } },
+			worker: { refresh: { enabled: false } },
+		}),
+	);
+	const c = loadConfig(home);
+	const targets = sessionTargets(c, [
+		{ name: "worker", path: "/w", repo: "x/y", mode: "harness", active: true, addedAt: "" },
+	]);
+	assert.ok(targets.every((t) => t.refresh === undefined));
 });

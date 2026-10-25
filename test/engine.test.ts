@@ -10,7 +10,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -60,9 +60,9 @@ function fakeRest() {
 	};
 }
 
-function setupEngine(retroEvery = 5, exec?: Run) {
+function setupEngine(retroEvery = 5, exec?: Run, existingHome?: string) {
 	// Unix ソケットのパス長制限（約 104 文字）に収まるよう短い場所に作る
-	const home = mkdtempSync(path.join(os.tmpdir(), "dle-"));
+	const home = existingHome ?? mkdtempSync(path.join(os.tmpdir(), "dle-"));
 	const raw = { channelIds: [CH], allowedUserIds: [ME], retro: { everyDoneTasks: retroEvery } };
 	writeFileSync(path.join(home, "config.json"), JSON.stringify(raw));
 	const config: Config = {
@@ -75,8 +75,25 @@ function setupEngine(retroEvery = 5, exec?: Run) {
 		tmuxSession: "dle-test",
 		workspaceDir: path.join(home, "ws"),
 		claudeBin: "claude",
-		concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { maxEvents: 40, contextPercent: 15 } },
-		worker: { model: null, extraArgs: [], initialPrompt: "/discord-loop-engine:issue-loop" },
+		concierge: {
+			model: "sonnet",
+			extraArgs: [],
+			allowedTools: [],
+			refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 },
+		},
+		worker: {
+			model: null,
+			extraArgs: [],
+			initialPrompt: "/discord-loop-engine:issue-loop",
+			refresh: {
+				enabled: true,
+				maxTokens: 100000,
+				contextPercent: 15,
+				idleSeconds: 180,
+				cooldownMinutes: 30,
+				codexIgnoreAfterMinutes: 120,
+			},
+		},
 		retro: { everyDoneTasks: retroEvery, everyDays: 7, promoteAfter: 3 },
 		board: { enabled: true },
 	};
@@ -671,6 +688,7 @@ test("窓口を /clear している間に届いた発言は溜めて、終わっ
 		await c.tool("reply", { text: "待機中です", chat_id: CH, reply_to: "m1" });
 		assert.equal(engine.activity("concierge").events, 1);
 
+		engine.ledger.setRules("復帰時の仮ルール");
 		engine.onRefresh("concierge", "start");
 		discord(msg("kishimen の件どうなった？", { id: "m2" }));
 		await until(() => rest.calls.some((x) => x.kind === "react" && x.emoji === "👀"));
@@ -679,7 +697,9 @@ test("窓口を /clear している間に届いた発言は溜めて、終わっ
 			"/clear の最中は起動していない扱いにしない",
 		);
 		engine.onRefresh("concierge", "done");
-		const handoff = await c.event((p) => (p.meta as Record<string, string>).kind === "handoff");
+		assert.equal((await c.event()).meta.kind, "rules");
+		const handoff = await c.event();
+		assert.equal(handoff.meta.kind, "handoff");
 		assert.match(handoff.content, /ユーザー: 今どう？\n窓口: 待機中です/);
 		const held = await c.event((p) => String(p.content).includes("kishimen の件どうなった？"));
 		assert.equal(held.meta.message_id, "m2");
@@ -741,4 +761,147 @@ test("ラベルを作れなくても harness の確定は成功し、warning で
 	);
 	assert.equal(act.isError, false, act.text);
 	assert.match(act.text, /harness:\* ラベルを作れませんでした.*403/);
+});
+
+function journal(home: string) {
+	const dir = path.join(home, "journal");
+	return readdirSync(dir)
+		.map((f) => readFileSync(path.join(dir, f), "utf8"))
+		.join("\n");
+}
+
+test("worker の clear 中の A-番号付き返信は保留され、rules → outbox の順で戻り台帳を変えない", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "worker" });
+	try {
+		await until(() => engine.sessions.has("worker"));
+		engine.ledger.setRules("人の承認を待つ");
+		engine.ledger.createTask({ project: "worker", title: "実装中", status: "ai-working" });
+		engine.ledger.addAttention({
+			project: "worker",
+			kind: "merge",
+			title: "承認",
+			url: "u",
+			issue: "2",
+			pr: "3",
+			taskId: "",
+			summary: "確認",
+		});
+		const tasks = engine.ledger.tasks();
+		const attention = engine.ledger.attention();
+		engine.deliver("worker", "先の入力", {});
+		await w.event();
+		engine.onRefresh("worker", "start");
+		assert.equal(engine.deliver("worker", "A-1 OK", { attention: "A-1" }), "held");
+		assert.equal(engine.deliver("worker", "次の入力", {}), "held");
+		const outbox = path.join(home, "outbox", "worker.jsonl");
+		assert.equal(readFileSync(outbox, "utf8").trim().split("\n").length, 2);
+		engine.onRefresh("worker", "done", { success: true, reason: "文脈 100k（閾値 100k）" });
+		assert.equal((await w.event()).meta.kind, "rules");
+		const first = await w.event();
+		assert.equal(first.content, "A-1 OK");
+		assert.equal(first.meta.attention, "A-1");
+		assert.equal((await w.event()).content, "次の入力");
+		assert.equal(readFileSync(outbox, "utf8"), "");
+		assert.deepEqual(engine.ledger.tasks(), tasks);
+		assert.deepEqual(engine.ledger.attention(), attention);
+		assert.equal(engine.activity("worker").events, 0);
+		assert.match(journal(home), /\[worker\] コンテキストを整理.*100k/);
+	} finally {
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("clear 失敗時は活動をリセットせず、rules と handoff を送らず保留分を返し失敗だけ記録する", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	try {
+		await until(() => engine.sessions.has("concierge"));
+		engine.ledger.setRules("仮ルール");
+		engine.deliver("concierge", "既存の会話", {});
+		await c.event();
+		const before = engine.activity("concierge");
+		engine.onRefresh("concierge", "start");
+		engine.deliver("concierge", "保留分", {});
+		engine.onRefresh("concierge", "done", { success: false, reason: "sessionId が変わらない" });
+		assert.equal((await c.event()).content, "保留分");
+		assert.deepEqual(engine.activity("concierge"), before);
+		assert.match(journal(home), /コンテキストの整理に失敗.*sessionId/);
+		assert.doesNotMatch(journal(home), /コンテキストを整理（/);
+	} finally {
+		c.stop();
+		await engine.stop();
+	}
+});
+
+test("clear 中に切断しても outbox は保持され、再接続で rules と保留分が届く", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	let w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "worker" });
+	try {
+		await until(() => engine.sessions.has("worker"));
+		engine.ledger.setRules("復帰時のルール");
+		engine.onRefresh("worker", "start");
+		engine.deliver("worker", "保留中", { attention: "A-2" });
+		w.stop();
+		await until(() => !engine.sessions.has("worker"));
+		engine.onRefresh("worker", "done", { success: true, reason: "100k" });
+		w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "worker" });
+		assert.equal((await w.event()).meta.kind, "rules");
+		assert.equal((await w.event()).meta.attention, "A-2");
+	} finally {
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("clear の途中で再接続しても保留分を先に消費せず、done で rules → outbox の順を保つ", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	let w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "worker" });
+	try {
+		await until(() => engine.sessions.has("worker"));
+		engine.onRefresh("worker", "start");
+		engine.ledger.setRules("再接続時も順番を守る");
+		engine.deliver("worker", "clear の間の返信", { attention: "A-3" });
+		w.stop();
+		await until(() => !engine.sessions.has("worker"));
+		w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "worker" });
+		await until(() => engine.sessions.has("worker"));
+		assert.match(readFileSync(path.join(home, "outbox", "worker.jsonl"), "utf8"), /A-3/);
+		engine.onRefresh("worker", "done", { success: true, reason: "100k" });
+		assert.equal((await w.event()).meta.kind, "rules");
+		assert.equal((await w.event()).meta.attention, "A-3");
+	} finally {
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("clear の start 後に engine を作り直しても、ディスクの outbox を再接続時に受け取れる", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	engine.ledger.setRules("再起動後も渡す");
+	engine.ledger.createTask({ project: "worker", title: "作業の続き", status: "ai-working" });
+	const tasks = engine.ledger.tasks();
+	engine.onRefresh("worker", "start");
+	assert.equal(engine.deliver("worker", "A-4 の返事", { attention: "A-4" }), "held");
+	await engine.stop();
+	const recovered = setupEngine(5, undefined, home).engine;
+	await recovered.start();
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "worker" });
+	try {
+		assert.equal((await w.event()).meta.kind, "rules");
+		const held = await w.event();
+		assert.equal(held.content, "A-4 の返事");
+		assert.equal(held.meta.attention, "A-4");
+		assert.deepEqual(recovered.ledger.tasks(), tasks);
+		assert.equal(readFileSync(path.join(home, "outbox", "worker.jsonl"), "utf8"), "");
+	} finally {
+		w.stop();
+		await recovered.stop();
+	}
 });
