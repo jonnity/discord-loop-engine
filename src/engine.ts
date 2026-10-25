@@ -4,7 +4,18 @@
 //   （LLM の判断を挟まないので、通知の漏れが起きない）
 // - 窓口からの指示・回答は、worker がいなければ outbox に積み、起動したら渡す（忘れない）
 
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import {
+	accessSync,
+	chmodSync,
+	constants,
+	existsSync,
+	mkdirSync,
+	readdirSync,
+	readFileSync,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
 import net, { type Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -692,6 +703,11 @@ export class Engine {
 		o: { task: Task | null; issue: string; pr: string; title: string; url: string; body: string; file?: string },
 	) {
 		const { task, issue, pr, title, url, body } = o;
+		if (gate.kind === "merge" && o.file) {
+			const stat = statSync(o.file);
+			if (!stat.isFile() || stat.size === 0) throw new Error("承認添付は通常の非空ファイルが必要です");
+			accessSync(o.file, constants.R_OK);
+		}
 		const att = this.ledger.addAttention({
 			taskId: task?.id ?? "",
 			project,
@@ -711,7 +727,9 @@ export class Engine {
 		]
 			.filter(Boolean)
 			.join("\n");
-		const messageId = await this.post(project, text, { files: o.file && existsSync(o.file) ? [o.file] : [] });
+		const messageId = await this.post(project, text, {
+			files: o.file && (gate.kind === "merge" || existsSync(o.file)) ? [o.file] : [],
+		});
 		if (messageId) this.ledger.setAttentionMessage(att.id, messageId);
 		if (task) {
 			this.ledger.updateTask(
@@ -750,6 +768,23 @@ export class Engine {
 					'profile.gate に [{ "name": ..., "run": ... }] を1つ以上入れてください（CI と同じ検査を同じ順で）',
 				);
 			}
+			const preflight: unknown = profile?.preflight;
+			if (
+				preflight != null &&
+				(!Array.isArray(preflight) ||
+					!preflight.every(
+						(p: unknown) =>
+							typeof p === "object" &&
+							p !== null &&
+							"name" in p &&
+							typeof p.name === "string" &&
+							p.name.trim().length > 0 &&
+							"run" in p &&
+							typeof p.run === "string" &&
+							p.run.trim().length > 0,
+					))
+			)
+				throw new Error("profile.preflight は空でない name/run の配列にしてください");
 			validateHooks(profile?.hooks);
 		} else if (p.harnessOnly) {
 			throw new Error(
@@ -773,10 +808,14 @@ export class Engine {
 			proposedAt: new Date().toISOString(),
 		});
 		const hooks = Object.entries((profile?.hooks ?? {}) as Record<string, string[]>).filter(([, v]) => v.length > 0);
+		const preflight = (profile?.preflight ?? []) as { name: string; run: string }[];
 		const draftView =
 			mode === "harness"
 				? [
 						`検査（PR 前に CI と同じ順で）:\n${(profile?.gate as { name: string; run: string }[]).map((g) => `- ${g.name}: \`${g.run}\``).join("\n")}`,
+						...(preflight.length
+							? [`環境確認（CI 検査より前）:\n${preflight.map((p) => `- ${p.name}: \`${p.run}\``).join("\n")}`]
+							: []),
 						...(hooks.length
 							? [`差し込み口:\n${hooks.map(([k, v]) => `- ${k}: ${v.map((c) => `\`${c}\``).join(" → ")}`).join("\n")}`]
 							: []),

@@ -18,6 +18,11 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
   あれば、それを始めるコマンドと、そのスクリプトが前提にしている tmux セッション名
   （`tmux ... -t <名前>:` のような記述）を控える
 - **CI**: `.github/workflows/` のジョブと、検査の順番（lint・型・テスト・E2E・ビルドなど）
+- **self-hosted ランナー**: CI の `runs-on`、必要な OS/ラベル・オンライン最低台数（既定1、複数なら根拠）、
+  リポジトリ/組織の runner API を既存権限で読めるか。online と idle を分け、runner 名・認証値は通知しない
+- **連動するエコシステム**: npm/cargo 等の依存名・版の対応・双方の manifest/lockfile・更新ルールと確認コマンドを調査する。
+  実装を調べずに版の一致を決めつけず、固有知識を notes に提案する
+- **録画の道具**: 既存 demo の録画コマンドと成果物、ffprobe の有無・ffmpeg の libx264/AAC 機能を調べる
 - **パッケージマネージャ**: CI が実際に使っているもの（lockfile が複数あっても CI に合わせる）
 - **既定ブランチ**・マージの方法（merge / squash の慣習）
 - **規約・仕様のファイル**: CLAUDE.md・AGENTS.md・README・仕様書
@@ -47,6 +52,9 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
 
 `profile_template` ツールで雛形と調査済みの例を受け取り、その形で作る。
 
+- `preflight`: 環境の前提確認を `{name, run}[]` で提案する。不要なら `[]`。
+  self-hosted なら下の正本のコマンドを対象 API・ラベル・最低台数に合わせて run に入れる。
+  存在しないスクリプトへの参照や認証値を入れない。API が読めなければ未確定と必要な権限を summary に記す
 - `gate`: **CI と同じ検査を同じ順で**。1つずつ実際に main で一度走らせ、通るか確かめる
   （もともと赤いものがあれば、案の要約にそう書く）
 - `context`: 実在する規約・仕様のファイルだけ
@@ -65,6 +73,35 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
 - `humanChecks`: 自動では確かめられないもの
 - `demo`: 録画の手順が既にあるときだけ。無ければ `null`
 - `specRecordDir`: 設計記録を PR に含める慣習がリポジトリにあるときだけ。無ければ `null`
+
+### self-hosted の preflight コマンド例（正本）
+
+`RUNNER_API` は調査した `repos/<owner>/<repo>/actions/runners` または `orgs/<org>/actions/runners`、
+`REQUIRED_LABELS` は必要ラベルの JSON 配列、`MIN_ONLINE` は正整数で設定する。
+これらの非秘密値の代入と次の本文をまとめて run に入れる。リポジトリにスクリプトを置く必要はない。
+ページごとの応答を全件集計し、全ラベル一致の online を数える。busy でも online に含め、idle は別に示す。
+API/解析エラー（終了2）をオンライン不足/0台（終了1）に置き換えない。
+
+```bash
+# RUNNER_CHECK_BEGIN
+set -uo pipefail
+[[ "$MIN_ONLINE" =~ ^[1-9][0-9]*$ ]] || exit 2
+jq -en --argjson labels "$REQUIRED_LABELS" '$labels | type == "array" and length > 0 and all(.[]; type == "string" and length > 0)' >/dev/null 2>&1 || exit 2
+pages="$(gh api --paginate "$RUNNER_API" 2>/dev/null)" || { echo 'runner API を確認できません（権限・接続を確認）' >&2; exit 2; }
+counts="$(jq -ser --argjson labels "$REQUIRED_LABELS" '
+  if length == 0 or any(.[]; (.runners | type) != "array") then error("invalid runners") else
+    [.[] | .runners[] | select(.status == "online") |
+      select((([.labels[].name] as $actual | $labels - $actual) | length) == 0)] |
+    "online=\(length) idle=\([.[] | select(.busy == false)] | length)"
+  end' <<<"$pages" 2>/dev/null)" || { echo 'runner API の解析に失敗しました' >&2; exit 2; }
+echo "$counts"
+online="${counts#online=}"; online="${online%% *}"
+[ "$online" -ge "$MIN_ONLINE" ] || exit 1
+# RUNNER_CHECK_END
+```
+
+設定案は preflight→gate→hooks.beforePR の順で一度実行する。既存プロジェクトの設定は自動で書き換えず、
+再調査による設定案を profile_propose/activate で確認してから反映する。
 
 ### 独自のループから固有の手順を写す（引数が `harness` のとき）
 

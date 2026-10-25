@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# 添付が送信時に存在することと multipart 本文を検証する。
+echo notify >> "$MEDIA_LOG"
+printf '%s\n' "$@" > "$CURL_ARGS"
+for arg in "$@"; do
+	if [[ "$arg" = 'files[0]=@'* ]]; then
+		file="${arg#*@}"
+		[ -f "$file" ] && [ -s "$file" ] || exit 1
+		printf '%s' "$file" > "$SENT_FILE"
+		cp "$file" "$SENT_COPY"
+	fi
+done
+[ "${CURL_FAIL:-0}" = 1 ] && exit 22
+printf 200

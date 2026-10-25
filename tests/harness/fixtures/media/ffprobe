@@ -1,0 +1,28 @@
+#!/usr/bin/env bash
+# 動画検査の分岐と最終成果物を記録する。
+echo probe >> "$MEDIA_LOG"
+case "${PROBE_MODE:-}" in
+fail) exit 1 ;;
+json) echo broken; exit ;;
+none) echo '{"streams":[],"format":{"duration":"1"}}'; exit ;;
+zero) echo '{"streams":[{}],"format":{"duration":"0"}}'; exit ;;
+esac
+file="${!#}"
+codec=h264; pix=yuv420p; brand=isom; format=mov,mp4,m4a,3gp,3g2,mj2
+if [[ "$file" != *demo-*-h264.mp4 ]]; then
+	case "${MEDIA_MODE:-}" in
+	webm) codec=vp9; format=matroska,webm ;;
+	hevc) codec=hevc ;;
+	brand) brand=unknown ;;
+	format) format=mov ;;
+	mov) brand='qt  ' ;;
+	pix) pix=yuv444p ;;
+	esac
+elif [ "${CONVERT_MODE:-}" = invalid ]; then
+	codec=vp9
+fi
+jq -nc --arg codec "$codec" --arg pix "$pix" --arg brand "$brand" --arg format "$format" \
+	'{streams:[{codec_name:$codec,pix_fmt:$pix}],format:{duration:"0.4",format_name:$format,tags:{major_brand:$brand}}}'
+
+[ "${PROBE_MODE:-}" != vanish ] || rm -f -- "$file"
+exit 0

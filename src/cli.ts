@@ -87,7 +87,14 @@ async function callEngine(cfg: Config, name: string, args: Record<string, unknow
 				}
 			}),
 		);
-		sock.on("error", () => resolve(null));
+		sock.on("error", (error) => {
+			if (welcomed) reject(error);
+			else resolve(null);
+		});
+		sock.on("close", () => {
+			if (welcomed) reject(new Error("engine への依頼送信後、結果を受け取る前に接続が閉じました"));
+			else resolve(null);
+		});
 	});
 }
 

@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # 実行中の engine（worker の中で走らせる場合）の環境を拾わない。拾うと harness-notify / harness-phase が
 # 実 engine のソケットに繋がり、本物の Discord に投稿してしまう
-unset DLE_ROLE DLE_PROJECT DLE_LOOP DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN
+unset DLE_ROLE DLE_PROJECT DLE_LOOP DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN HARNESS_CONFIG
 export DLE_HOME="$TMP/iso-home"
 export DLE_SOCKET="$DLE_HOME/engine.sock"
 mkdir -p "$DLE_HOME"
@@ -257,5 +257,7 @@ jq '.hooks.beforePR = ["false"]' "$HP/.claude/harness.json" >"$TMP/h.json" && mv
 check "gate: hooks.beforePR が失敗したらゲートも失敗" '[ $? -eq 1 ]'
 
 echo ""
+source "$ROOT/tests/harness/quality.sh" || exit 1
+
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]
