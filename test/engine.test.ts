@@ -11,6 +11,7 @@ import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -18,8 +19,9 @@ import { fileURLToPath } from "node:url";
 import type { Config } from "../src/config.ts";
 import { Engine } from "../src/engine.ts";
 import type { Run } from "../src/projects.ts";
-import { lineReader } from "../src/protocol.ts";
+import { type EngineMessage, lineReader, PROTOCOL_VERSION } from "../src/protocol.ts";
 import type { DiscordMessage } from "../src/route.ts";
+import { Supervisor } from "../src/supervisor.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "channel", "server.ts");
@@ -130,11 +132,13 @@ function startChannel(home: string, env: Record<string, string>) {
 		stdio: ["pipe", "pipe", "pipe"],
 	});
 	const inbox: Rpc[] = [];
+	const events: Rpc[] = [];
 	const waiters: { pred: (m: Rpc) => boolean; resolve: (m: Rpc) => void }[] = [];
 	child.stdout?.on(
 		"data",
 		lineReader<Rpc>((m) => {
 			inbox.push(m);
+			if (m.method === "notifications/claude/channel") events.push(m);
 			for (const w of [...waiters]) {
 				if (w.pred(m)) {
 					waiters.splice(waiters.indexOf(w), 1);
@@ -167,7 +171,7 @@ function startChannel(home: string, env: Record<string, string>) {
 		child.stdin?.write(`${JSON.stringify({ jsonrpc: "2.0", id: myId, method, params })}\n`);
 		return next((m) => m.id === myId);
 	};
-	const tool = async (name: string, args: Record<string, unknown>) => {
+	const tool = async (name: string, args: unknown) => {
 		const r = await rpc("tools/call", { name, arguments: args });
 		const content = (r.result?.content as { text: string }[])[0]?.text ?? "";
 		return { text: content, isError: r.result?.isError === true };
@@ -176,7 +180,7 @@ function startChannel(home: string, env: Record<string, string>) {
 		next((m) => m.method === "notifications/claude/channel" && pred(m.params ?? {})).then(
 			(m) => m.params as { content: string; meta: Record<string, string> },
 		);
-	return { child, rpc, tool, event, stop: () => child.kill() };
+	return { child, rpc, tool, event, events, stop: () => child.kill() };
 }
 
 const until = async (cond: () => boolean, ms = 8000) => {
@@ -924,13 +928,22 @@ test("preflight は不正形を保存前に拒否し、確認本文と保存に�
 		await until(() => engine.sessions.has("quality"));
 		const gate = [{ name: "test", run: "true" }];
 		for (const preflight of [{}, [null], [{ name: " ", run: "true" }], [{ name: "x", run: "" }]]) {
-			const r = await w.tool("profile_propose", { mode: "harness", profile: { gate, preflight } });
+			const r = await w.tool("profile_propose", {
+				mode: "harness",
+				summary: "環境調査済み",
+				profile: { gate, preflight },
+			});
 			assert.equal(r.isError, true, JSON.stringify(preflight));
+			assert.match(r.text, /profile\.preflight/);
 			assert.equal(engine.ledger.openAttention().length, 0);
 			assert.ok(!existsSync(path.join(home, "projects", "quality", "draft.json")));
 		}
 		const preflight = [{ name: "runners", run: "echo online" }];
-		const r = await w.tool("profile_propose", { mode: "harness", profile: { gate, preflight } });
+		const r = await w.tool("profile_propose", {
+			mode: "harness",
+			summary: "環境調査済み",
+			profile: { gate, preflight },
+		});
 		assert.equal(r.isError, false, r.text);
 		assert.ok(rest.calls.some((c) => c.content?.includes("環境確認（CI 検査より前）:\n- runners: `echo online`")));
 		assert.deepEqual(engine.ledger.draft("quality")?.profile?.preflight, preflight);
@@ -1049,3 +1062,465 @@ for (const mode of ["success", "send-failure", "read-failure"] as const) {
 		}
 	});
 }
+
+// status.json など接続監視だけの変化を除き、業務データをバイト列で比較する。
+function businessSnapshot(home: string) {
+	const files: Record<string, string> = {};
+	function visit(dir: string) {
+		for (const item of readdirSync(dir, { withFileTypes: true })) {
+			const file = path.join(dir, item.name);
+			if (item.isDirectory()) visit(file);
+			else if (item.isFile() && item.name !== "status.json")
+				files[path.relative(home, file)] = readFileSync(file).toString("base64");
+		}
+	}
+	visit(home);
+	return files;
+}
+
+function startCliSocket(home: string) {
+	const socket = net.createConnection(path.join(home, "engine.sock"));
+	const messages: EngineMessage[] = [];
+	let error: Error | undefined;
+	socket.on("error", (e) => {
+		error = e;
+	});
+	socket.on(
+		"data",
+		lineReader<EngineMessage>((m) => messages.push(m)),
+	);
+	socket.on("connect", () =>
+		socket.write(
+			`${JSON.stringify({ type: "hello", protocol: PROTOCOL_VERSION, role: "cli", pid: process.pid, cwd: home })}\n`,
+		),
+	);
+	let seq = 0;
+	const welcome = async () => {
+		await until(() => {
+			if (error) throw error;
+			return messages.some((m) => m.type === "welcome");
+		});
+		assert.deepEqual(
+			messages.find((m) => m.type === "welcome"),
+			{ type: "welcome", role: "cli", permissionRelay: false },
+		);
+	};
+	const call = async (name: string, args?: unknown) => {
+		const id = `validation-${++seq}`;
+		socket.write(`${JSON.stringify({ type: "call", id, name, args })}\n`);
+		await until(() => {
+			if (error) throw error;
+			return messages.some((m) => m.type === "result" && m.id === id);
+		});
+		const result = messages.find(
+			(m): m is Extract<EngineMessage, { type: "result" }> => m.type === "result" && m.id === id,
+		);
+		assert.ok(result);
+		assert.equal(result.id, id);
+		return result;
+	};
+	return { socket, welcome, call };
+}
+
+function assertMcpError(result: { text: string; isError: boolean }, ...parts: string[]) {
+	assert.equal(result.isError, true, result.text);
+	assert.match(result.text, /^失敗: /);
+	for (const part of parts) assert.ok(result.text.includes(part), result.text);
+}
+
+test("引数検査: MCP 実経路の拒否は保存・配信・投稿・台帳を変えず、後続呼出しも応答する", async () => {
+	const { engine, rest, home } = setupEngine(5, async () => {
+		throw new Error("外部コマンドは禁止");
+	});
+	engine.config.board.enabled = false;
+	await engine.start();
+	for (const name of ["live", "stopped"])
+		engine.ledger.upsertProject({ name, repo: "example/project", path: home, active: true, mode: "harness" });
+	const task = engine.ledger.createTask({ project: "live", title: "既存タスク", issue: "10" });
+	const attention = engine.ledger.addAttention({
+		taskId: task.id,
+		project: "live",
+		issue: "10",
+		pr: "",
+		kind: "interview",
+		title: "確認",
+		url: "",
+		summary: "既存の確認",
+	});
+	engine.ledger.addLearning({ project: "live", issue: "10", tag: "ci-red", summary: "既存の学び", detail: "詳細" });
+	engine.ledger.saveState({ doneSinceRetro: 2, lastRetroAt: new Date().toISOString() });
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "live" });
+	try {
+		await until(() => engine.sessions.has("concierge") && engine.sessions.has("live"));
+		const content = "# 仮ルール\n日本語の規則";
+		const saved = await c.tool("rules_set", { content });
+		assert.equal(saved.isError, false, saved.text);
+		assert.deepEqual(JSON.parse(saved.text), { ok: true });
+		const event = await w.event((p) => (p.meta as Record<string, string>).kind === "rules");
+		assert.equal(event.meta.kind, "rules");
+		assert.equal(event.content, `仮ルールが更新されました:\n${content}`);
+		const before = businessSnapshot(home);
+		const posts = [...rest.calls];
+		const notifications = w.events.length;
+		for (const project of ["live", "stopped"]) {
+			for (const args of [{ message: "指示" }, {}, { text: "" }, { text: 123 }, { text: "正規", message: "誤名" }]) {
+				const result = await c.tool("dispatch", { project, task_id: task.id, ...args });
+				assertMcpError(result, "dispatch", "text");
+				if ("message" in args) assertMcpError(result, "message", "text を指定してください", "許可");
+				assert.deepEqual(businessSnapshot(home), before);
+			}
+		}
+		assertMcpError(await c.tool("dispatch", { text: "指示" }), "project", "必要");
+		for (const args of [
+			{ text: "新ルール" },
+			{},
+			{ content: "" },
+			{ content: 123 },
+			{ content: "新ルール", typo: true },
+		]) {
+			const result = await c.tool("rules_set", args);
+			assertMcpError(result, "rules_set", "content");
+			if ("text" in args) assertMcpError(result, "text", "content を指定してください", "許可");
+			assert.equal((await c.tool("rules_get", {})).text, `${content}\n`);
+			assert.equal(readFileSync(path.join(home, "learnings", "rules.md"), "utf8"), `${content}\n`);
+			assert.deepEqual(businessSnapshot(home), before);
+		}
+		for (const [name, args, key] of [
+			["reply", {}, "text"],
+			["reply", { text: "投稿", files: [1] }, "files[0]"],
+			["task_create", { project: "live" }, "title"],
+			["attention_answer", { id: attention.id }, "answer"],
+			["learning_add", { tag: "ci-red" }, "summary"],
+			["retro_done", {}, "summary"],
+			["learnings_promote", {}, "indexes"],
+			["learnings_promote", { indexes: ["0"] }, "indexes[0]"],
+		] as const) {
+			assertMcpError(await c.tool(name, args), name, key);
+			assert.deepEqual(businessSnapshot(home), before);
+		}
+		assertMcpError(
+			await w.tool("profile_propose", { mode: "harness", profile: { gate: [{ name: "test", run: "true" }] } }),
+			"profile_propose",
+			"summary",
+		);
+		for (const raw of [null, [], "x", 1, false]) {
+			assertMcpError(await c.tool("rules_get", raw), "rules_get", "object");
+			assertMcpError(await c.tool("reply", raw), "reply", "object");
+		}
+		// 同じ接続へのマーカー応答で、先行するイベントの収集完了を待つ。
+		engine.deliver("live", "検査完了", { kind: "test-sync" });
+		await w.event((p) => (p.meta as Record<string, string>).kind === "test-sync");
+		assert.equal(w.events.length, notifications + 1);
+		assert.deepEqual(rest.calls, posts);
+		assert.deepEqual(businessSnapshot(home), before);
+		assert.equal(c.child.exitCode, null);
+		assert.equal((await c.tool("rules_get", {})).text, `${content}\n`);
+		const nextContent = "# 更新後\n次の規則\n";
+		const next = await c.tool("rules_set", { content: nextContent });
+		assert.equal(next.isError, false, next.text);
+		assert.deepEqual(JSON.parse(next.text), { ok: true });
+		assert.equal((await c.tool("rules_get", {})).text, nextContent);
+		assert.equal(readFileSync(path.join(home, "learnings", "rules.md"), "utf8"), nextContent);
+		assert.equal(
+			(await w.event((p) => (p.meta as Record<string, string>).kind === "rules")).content,
+			`仮ルールが更新されました:\n${nextContent}`,
+		);
+		const later = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "stopped" });
+		try {
+			const restored = await later.event((p) => (p.meta as Record<string, string>).kind === "rules");
+			assert.equal(restored.content, `現在の仮ルール（learnings/rules.md）:\n${nextContent}`);
+		} finally {
+			later.stop();
+		}
+	} finally {
+		c.stop();
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("引数検査: CLI ソケットと実 dle notify はエラーを返し、同じ接続で続行できる", async (t) => {
+	const { engine, rest, home } = setupEngine(5, async () => {
+		throw new Error("外部コマンドは禁止");
+	});
+	engine.config.board.enabled = false;
+	await engine.start();
+	for (const name of ["live", "stopped"])
+		engine.ledger.upsertProject({ name, repo: "example/project", path: home, active: true, mode: "harness" });
+	const task = engine.ledger.createTask({ project: "live", title: "既存タスク" });
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "live" });
+	const cli = startCliSocket(home);
+	try {
+		await cli.welcome();
+		await until(() => engine.sessions.has("concierge") && engine.sessions.has("live"));
+		assert.deepEqual((await cli.call("rules_set", { content: "# 旧ルール\n保存済み" })).data, { ok: true });
+		await w.event((p) => (p.meta as Record<string, string>).kind === "rules");
+		engine.supervisor = new Supervisor({
+			tmuxSession: "test",
+			targets: () => [],
+			tmux: async () => {
+				throw new Error("実 tmux は禁止");
+			},
+			isLive: () => true,
+			notify: () => {},
+		});
+		const restart = t.mock.method(engine.supervisor, "restart", async () => {});
+		const before = businessSnapshot(home);
+		const posts = [...rest.calls];
+		const notifications = w.events.length;
+		for (const project of ["live", "stopped"]) {
+			for (const args of [{ message: "指示" }, {}, { text: "" }, { text: 1 }, { text: "指示", typo: "x" }]) {
+				const r = await cli.call("dispatch", { project, task_id: task.id, ...args });
+				assert.equal(r.ok, false);
+				assert.equal(Object.hasOwn(r, "data"), false);
+				assert.match(r.error ?? "", /dispatch.*text/);
+				if ("message" in args) assert.match(r.error ?? "", /message.*text.*許可/);
+				assert.deepEqual(businessSnapshot(home), before);
+			}
+		}
+		for (const [name, args, parts] of [
+			["dispatch", { text: "指示" }, ["project", "必要"]],
+			["rules_set", {}, ["content", "必要"]],
+			["rules_set", { text: "規則" }, ["rules_set", "text", "content を指定してください", "許可"]],
+			["rules_set", { content: "" }, ["content", "空"]],
+			["rules_set", { content: false }, ["content", "string"]],
+			["rules_set", { content: "規則", typo: 1 }, ["typo", "content", "許可"]],
+			[
+				"notify",
+				{ project: "live", event: "merge-request", issue: "22", title: "不正通知", body: 123 },
+				["body", "string"],
+			],
+			["notify", { project: "live", event: "merge-request", issue: "22", typo: true }, ["typo", "許可", "body"]],
+			["restart", { name: 123 }, ["name", "string"]],
+			["restart", { name: "live", typo: true }, ["typo", "許可", "name"]],
+			["rules_get", null, ["object"]],
+			["rules_get", [], ["object"]],
+		] as const) {
+			const r = await cli.call(name, args);
+			assert.equal(r.ok, false, JSON.stringify(r));
+			assert.equal(Object.hasOwn(r, "data"), false);
+			for (const part of parts) assert.ok(r.error?.includes(part), r.error);
+			assert.deepEqual(businessSnapshot(home), before);
+		}
+		const invalid = await dle(home, ["notify", "--project", "--event", "merge-request", "--issue", "22"]);
+		assert.equal(invalid.code, 1, invalid.stderr);
+		assert.match(invalid.stderr, /dle notify: project が必要です/);
+		assert.doesNotMatch(invalid.stderr, /記録しました|起動していません/);
+		assert.deepEqual(businessSnapshot(home), before);
+		engine.deliver("live", "検査完了", { kind: "test-sync" });
+		await w.event((p) => (p.meta as Record<string, string>).kind === "test-sync");
+		assert.equal(w.events.length, notifications + 1);
+		assert.deepEqual(rest.calls, posts);
+		assert.equal(restart.mock.callCount(), 0);
+		const read = await cli.call("rules_get");
+		assert.equal(read.ok, true);
+		assert.equal(read.data, "# 旧ルール\n保存済み\n");
+		assert.equal((await dle(home, ["restart", "live"])).code, 0);
+		assert.deepEqual(
+			restart.mock.calls.map((c) => c.arguments),
+			[["live"]],
+		);
+		const normal = await dle(home, [
+			"notify",
+			"--project",
+			"live",
+			"--event",
+			"info",
+			"--title",
+			"正常通知",
+			"--body",
+			"本文",
+		]);
+		assert.equal(normal.code, 0, normal.stderr);
+		assert.match(normal.stderr, /記録しました/);
+		assert.ok(rest.calls.some((c) => c.content === "**[live]** ℹ️ 正常通知\n本文"));
+	} finally {
+		cli.socket.destroy();
+		c.stop();
+		w.stop();
+		await engine.stop();
+	}
+});
+
+test("公開 schema: 全ツールの引数・役割を共有し、CLI 専用ツールと内部情報を公開しない", async () => {
+	const { TOOLS } = await import("../src/tools.ts");
+	const { engine, home } = setupEngine();
+	await engine.start();
+	const sessions: { env: Record<string, string>; names: string }[] = [
+		{
+			env: { DLE_ROLE: "concierge" },
+			names:
+				"reply tasks_list task_get task_create task_update attention_list attention_answer dispatch board_show projects_list project_add profile_get project_mode project_set_active learning_add rules_get learnings_list learnings_promote rules_set retro_done",
+		},
+		{
+			env: { DLE_ROLE: "worker", DLE_PROJECT: "worker" },
+			names:
+				"tasks_list task_get attention_list board_show profile_propose profile_template profile_get profile_activate report learning_add rules_get",
+		},
+		{ env: {}, names: "" },
+	];
+	try {
+		for (const { env, names } of sessions) {
+			const c = startChannel(home, env);
+			try {
+				const tools = (await c.rpc("tools/list", {})).result?.tools as {
+					name: string;
+					description: string;
+					inputSchema: { properties: Record<string, unknown>; additionalProperties: boolean };
+				}[];
+				assert.deepEqual(tools.map((t) => t.name).sort(), names.split(" ").filter(Boolean).sort());
+				for (const tool of tools) {
+					assert.deepEqual(Object.keys(tool).sort(), ["description", "inputSchema", "name"]);
+					assert.deepEqual(tool.inputSchema, TOOLS.find((t) => t.name === tool.name)?.inputSchema);
+					assert.equal(tool.inputSchema.additionalProperties, false);
+					assert.ok(!["notify", "restart"].includes(tool.name));
+				}
+				for (const [name, key] of [
+					["task_update", "phase"],
+					["report", "title"],
+					["report", "project"],
+					["profile_propose", "project"],
+					["profile_activate", "project"],
+				]) {
+					const tool = tools.find((t) => t.name === name);
+					if (tool) assert.equal((tool.inputSchema.properties[key as string] as { type: string }).type, "string");
+				}
+				for (const [name, key] of [
+					["dispatch", "text"],
+					["rules_set", "content"],
+				]) {
+					const tool = tools.find((t) => t.name === name);
+					if (tool) assert.equal((tool.inputSchema.properties[key as string] as { minLength: number }).minLength, 1);
+				}
+				if (env.DLE_ROLE === "worker") assert.equal((await c.tool("rules_set", { content: "x" })).isError, true);
+			} finally {
+				c.stop();
+			}
+		}
+	} finally {
+		await engine.stop();
+	}
+});
+
+test("互換性: 正常な配信・追加5項目・project優先順位・JSON profile・falseと空値を保持する", async () => {
+	const { engine, home } = setupEngine(5, async (_cmd, args) => ({
+		ok: true,
+		stdout: args.includes("--show-toplevel")
+			? home
+			: args.includes("get-url")
+				? "https://github.com/example/project.git"
+				: "",
+		stderr: "",
+	}));
+	engine.config.board.enabled = false;
+	await engine.start();
+	for (const name of ["live", "other", "stopped"])
+		engine.ledger.upsertProject({ name, repo: "example/project", path: home, active: true, mode: "harness" });
+	const task = engine.ledger.createTask({ project: "live", title: "作業", next: "続き" });
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "live" });
+	const cli = startCliSocket(home);
+	try {
+		await cli.welcome();
+		await until(() => engine.sessions.has("concierge") && engine.sessions.has("live"));
+		const sent = await c.tool("dispatch", { project: "live", text: "#10 を先に\n日本語", task_id: task.id });
+		assert.equal(sent.isError, false, sent.text);
+		assert.deepEqual(JSON.parse(sent.text), { delivery: "sent" });
+		const event = await w.event((p) => (p.meta as Record<string, string>).from === "concierge");
+		assert.equal(event.content, `窓口からの依頼（${task.id}）:\n#10 を先に\n日本語`);
+		assert.deepEqual(event.meta, { from: "concierge", task: task.id });
+		const queued = await c.tool("dispatch", { project: "stopped", text: "停止中の指示", task_id: task.id });
+		assert.equal(queued.isError, false, queued.text);
+		assert.deepEqual(JSON.parse(queued.text), { delivery: "queued" });
+		const { at, ...outbox } = JSON.parse(readFileSync(path.join(home, "outbox", "stopped.jsonl"), "utf8"));
+		assert.equal(typeof at, "string");
+		assert.deepEqual(outbox, {
+			content: `窓口からの依頼（${task.id}）:\n停止中の指示`,
+			meta: { from: "concierge", task: task.id },
+		});
+		engine.ledger.updateTask(task.id, { waiting: "確認" });
+		assert.equal(
+			(await c.tool("task_update", { id: task.id, phase: "implementing", waiting: "", next: "" })).isError,
+			false,
+		);
+		assert.equal(engine.ledger.task(task.id)?.phase, "implementing");
+		assert.equal(engine.ledger.task(task.id)?.waiting, "");
+		assert.equal(engine.ledger.task(task.id)?.next, "");
+		assert.match(readFileSync(path.join(home, "tasks", `${task.id}.md`), "utf8"), /implementing/);
+		const reported = await cli.call("report", { project: "other", issue: "42", title: "CLI の件名" });
+		assert.equal(reported.ok, true, reported.error);
+		assert.ok(engine.ledger.tasks().some((t) => t.project === "other" && t.issue === "42" && t.title === "CLI の件名"));
+		assert.equal((await w.tool("report", { project: "other", issue: "43", title: "worker の件名" })).isError, false);
+		assert.ok(
+			engine.ledger.tasks().some((t) => t.project === "live" && t.issue === "43" && t.title === "worker の件名"),
+		);
+		const profile = {
+			gate: [{ name: "test", run: "true" }],
+			hooks: { beforePR: ["true"] },
+			custom: { preserved: true },
+		};
+		for (const value of [profile, JSON.stringify(profile)]) {
+			const result = await cli.call("profile_propose", {
+				project: "other",
+				mode: "harness",
+				summary: "調査済み",
+				profile: value,
+			});
+			assert.equal(result.ok, true, result.error);
+			assert.deepEqual(engine.ledger.draft("other")?.profile, profile);
+		}
+		assert.equal((await cli.call("profile_activate", { project: "other" })).ok, true);
+		assert.deepEqual(
+			JSON.parse(readFileSync(path.join(home, "projects", "other", "harness.json"), "utf8")).gate,
+			profile.gate,
+		);
+		assert.equal(
+			(await w.tool("profile_propose", { project: "other", mode: "harness", summary: "worker案", profile })).isError,
+			false,
+		);
+		assert.deepEqual(engine.ledger.draft("live")?.profile, profile);
+		assert.equal((await w.tool("profile_activate", { project: "other" })).isError, false);
+		assert.deepEqual(
+			JSON.parse(readFileSync(path.join(home, "projects", "live", "harness.json"), "utf8")).gate,
+			profile.gate,
+		);
+		assertMcpError(await w.tool("profile_propose", { mode: "harness", summary: "x", profile: "{}" }), "profile.gate");
+		const invalidJson = await w.tool("profile_propose", { mode: "harness", summary: "x", profile: "{" });
+		assertMcpError(invalidJson, "JSON");
+		assert.equal((await c.tool("project_set_active", { name: "stopped", active: false })).isError, false);
+		assert.equal(engine.ledger.projects().find((p) => p.name === "stopped")?.active, false);
+		assert.equal((await c.tool("tasks_list", { all: false })).isError, false);
+		assert.equal((await c.tool("learnings_list", { include_promoted: false })).isError, false);
+		assert.deepEqual(JSON.parse((await c.tool("learnings_promote", { indexes: [] })).text), { ok: true });
+		assert.equal((await c.tool("reply", { text: "添付なし", files: [] })).isError, false);
+		assert.equal((await cli.call("notify", { event: "info" })).error, "project が必要です");
+		for (const [name, args] of [
+			["task_create", { project: "live", title: "禁止" }],
+			["task_update", { id: task.id, title: "禁止" }],
+			["dispatch", { project: "other", text: "禁止" }],
+			["rules_set", { content: "禁止" }],
+		] as const) {
+			await assert.rejects(engine.call({ role: "worker", name: "live" }, name, args), /窓口だけ/);
+		}
+		await assert.rejects(engine.call({ role: "concierge", name: "concierge" }, "restart", { name: "live" }), /CLI/);
+		for (const args of [
+			["tasks", "--all"],
+			["projects", "--json"],
+			["attention"],
+			["board"],
+			["add", home, "--name", "added", "--harness"],
+			["mode", "added", "native", "--command", "/loop", "--tmux-session", "dev"],
+		]) {
+			const result = await dle(home, args);
+			assert.equal(result.code, 0, `${args.join(" ")}: ${result.stderr}`);
+		}
+		assert.equal(engine.ledger.projects().find((p) => p.name === "added")?.initialPrompt, "/loop");
+	} finally {
+		cli.socket.destroy();
+		c.stop();
+		w.stop();
+		await engine.stop();
+	}
+});
