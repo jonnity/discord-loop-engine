@@ -8,6 +8,8 @@ import { type Config, DLE_TOOLS_RULE, expandHome, PLUGIN_SPEC } from "./config.t
 import type { Ledger, Project } from "./ledger.ts";
 import { type SessionTarget, shq } from "./supervisor.ts";
 
+import { resolveWorktreeRoot } from "./worktrees.ts";
+
 export type Run = (cmd: string, args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
 
 export const run: Run = (cmd, args) =>
@@ -224,39 +226,58 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 				: ready
 					? cfg.worker.initialPrompt
 					: `/discord-loop-engine:onboard${p.harnessOnly ? " harness" : ""}`;
+			let worktreeRoot: string | undefined;
+			let startupError: string | undefined;
+			if (!native) {
+				try {
+					worktreeRoot = resolveWorktreeRoot({
+						repoRoot: p.path,
+						home: cfg.home,
+						project: p.name,
+						worktreeRoot: profile?.worktreeRoot,
+					});
+				} catch (error) {
+					startupError = `${p.name}: ${error instanceof Error ? error.message : String(error)}`;
+				}
+			}
 			return {
+				...(startupError ? { startupError } : {}),
 				name: p.name,
 				cwd: p.path,
 				...(p.tmuxSession ? { tmuxSession: p.tmuxSession } : {}),
-				command: claudeCommand(
-					cfg,
-					{
-						...baseEnv,
-						...gitIdentityEnv(cfg),
-						DLE_ROLE: "worker",
-						DLE_PROJECT: p.name,
-						DLE_LOOP: native ? "native" : "harness",
-					},
-					[
-						...(cfg.worker.model ? ["--model", cfg.worker.model] : []),
-						...channelArgs,
-						"--allowedTools",
-						DLE_TOOLS_RULE,
-						// ハーネスの入口は確認なしで通す（離席中にここで止まらないように）。どれもガード付きで、
-						// harness-merge は人の承認記録が無ければマージしない。native では使わないので渡さない
-						...(native ? [] : HARNESS_COMMANDS.map((c) => `Bash(${c}:*)`)),
-						...READ_ONLY_COMMANDS.map((c) => `Bash(${c}:*)`),
-						...fromProfile,
-						...(p.allow ?? []),
-						...cfg.worker.extraArgs,
-					],
-				),
+				command: startupError
+					? ""
+					: `${worktreeRoot ? `mkdir -p -- ${shq(worktreeRoot)} && exec ` : ""}${claudeCommand(
+							cfg,
+							{
+								...baseEnv,
+								...gitIdentityEnv(cfg),
+								DLE_ROLE: "worker",
+								DLE_PROJECT: p.name,
+								DLE_LOOP: native ? "native" : "harness",
+							},
+							[
+								...(worktreeRoot ? ["--add-dir", worktreeRoot] : []),
+								...(cfg.worker.model ? ["--model", cfg.worker.model] : []),
+								...channelArgs,
+								"--allowedTools",
+								DLE_TOOLS_RULE,
+								// ハーネスの入口は確認なしで通す（離席中にここで止まらないように）。どれもガード付きで、
+								// harness-merge は人の承認記録が無ければマージしない。native では使わないので渡さない
+								...(native ? [] : HARNESS_COMMANDS.map((c) => `Bash(${c}:*)`)),
+								...READ_ONLY_COMMANDS.map((c) => `Bash(${c}:*)`),
+								...fromProfile,
+								...(p.allow ?? []),
+								...cfg.worker.extraArgs,
+							],
+						)}`,
 				initialPrompt,
-				...(!native && ready && cfg.worker.refresh.enabled
+				...(!native && !startupError && ready && cfg.worker.refresh.enabled
 					? {
 							refresh: {
 								...cfg.worker.refresh,
 								prompt: initialPrompt,
+								worktreeRoot,
 								maxEvents: 0,
 								waitForCodex: true,
 								cwd: p.path,

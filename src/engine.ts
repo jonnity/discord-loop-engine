@@ -34,6 +34,7 @@ import type { DiscordApi } from "./rest.ts";
 import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
 import type { RefreshResult, Supervisor } from "./supervisor.ts";
 import { validateToolArguments } from "./tool-validation.ts";
+import { resolveWorktreeRoot } from "./worktrees.ts";
 
 export interface GatewayLike {
 	start(): void;
@@ -756,6 +757,7 @@ export class Engine {
 		if (!p) throw new Error(`プロジェクト ${project} は登録されていません`);
 		const mode = str(a.mode) === "native" ? "native" : "harness";
 		let profile: Record<string, unknown> | undefined;
+		let resolvedWorktreeRoot: string | undefined;
 		if (mode === "harness") {
 			profile = (typeof a.profile === "string" ? JSON.parse(a.profile) : a.profile) as
 				| Record<string, unknown>
@@ -788,6 +790,12 @@ export class Engine {
 			)
 				throw new Error("profile.preflight は空でない name/run の配列にしてください");
 			validateHooks(profile?.hooks);
+			resolvedWorktreeRoot = resolveWorktreeRoot({
+				repoRoot: p.path,
+				home: this.config.home,
+				project: p.name,
+				worktreeRoot: profile?.worktreeRoot,
+			});
 		} else if (p.harnessOnly) {
 			throw new Error(
 				"このプロジェクトは harness で進めると決まっています。独自のループの固有の手順を hooks に写した案を出してください",
@@ -814,6 +822,7 @@ export class Engine {
 		const draftView =
 			mode === "harness"
 				? [
+						`worktreeRoot（${profile?.worktreeRoot ? "明示値" : "既定"}）: \`${resolvedWorktreeRoot}\``,
 						`検査（PR 前に CI と同じ順で）:\n${(profile?.gate as { name: string; run: string }[]).map((g) => `- ${g.name}: \`${g.run}\``).join("\n")}`,
 						...(preflight.length
 							? [`環境確認（CI 検査より前）:\n${preflight.map((p) => `- ${p.name}: \`${p.run}\``).join("\n")}`]

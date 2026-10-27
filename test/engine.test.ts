@@ -10,7 +10,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -477,7 +477,7 @@ test("調査した設定の案は A-番号で確認され、OK の回答を受�
 		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
 		assert.match(
 			post?.content ?? "",
-			/⚙️ A-1 設定の確認｜kishimen-tool の設定\nnpm のプロジェクトです\n検査（PR 前に CI と同じ順で）:\n- test: `npm test`/,
+			/⚙️ A-1 設定の確認｜kishimen-tool の設定\nnpm のプロジェクトです\nworktreeRoot（既定）: `[^\n]+`\n検査（PR 前に CI と同じ順で）:\n- test: `npm test`/,
 		);
 		assert.equal(engine.ledger.tasks()[0]?.status, "waiting-human");
 
@@ -1522,5 +1522,151 @@ test("互換性: 正常な配信・追加5項目・project優先順位・JSON pr
 		c.stop();
 		w.stop();
 		await engine.stop();
+	}
+});
+
+test("W5: worktreeRootの提案検証は保存・承認依頼前、明示値の維持と承認付き除去", async () => {
+	const { engine, rest, home } = setupEngine(5, async () => ({ ok: true, stdout: "", stderr: "" }));
+	await engine.start();
+	const p = engine.ledger.upsertProject({
+		name: "paths",
+		repo: "example/project",
+		path: home,
+		active: true,
+		mode: "harness",
+	});
+	const w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: p.name, DLE_LOOP: "harness" });
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	const gate = [{ name: "test", run: "true" }];
+	const file = engine.ledger.profilePath(p.name);
+	try {
+		await until(() => engine.sessions.has(p.name) && engine.sessions.has("concierge"));
+		const tpl = JSON.parse((await w.tool("profile_template", {})).text);
+		assert.equal(tpl.template.worktreeRoot, undefined);
+		assert.deepEqual(
+			Object.keys(tpl.examples).sort(),
+			readdirSync(path.join(ROOT, "templates/examples"))
+				.filter((f) => f.endsWith(".json"))
+				.map((f) => f.slice(0, -5))
+				.sort(),
+		);
+		for (const example of Object.values(tpl.examples) as Record<string, unknown>[])
+			assert.equal(example.worktreeRoot, undefined);
+		for (const existingDraft of [false, true]) {
+			if (existingDraft)
+				engine.ledger.saveDraft(p.name, {
+					mode: "harness",
+					profile: { gate, worktreeRoot: ".worktrees" },
+					summary: "previous",
+					proposedAt: "test",
+				});
+			const current = existingDraft ? JSON.stringify({ gate, worktreeRoot: ".worktrees" }) : null;
+			if (current) writeFileSync(file, current);
+			const before = engine.ledger.draft(p.name);
+			const posts = rest.calls.length;
+			for (const worktreeRoot of [1, false, [], {}, "~", "~/wt", "~user/wt", "$", "$HOME/wt", `\${HOME}/wt`]) {
+				const r = await w.tool("profile_propose", {
+					mode: "harness",
+					summary: "root change",
+					profile: { gate, worktreeRoot },
+				});
+				assert.equal(r.isError, true);
+				assert.match(
+					r.text,
+					typeof worktreeRoot === "string"
+						? /worktreeRoot.*先頭の ~ や \$ の展開は行わない.*展開済みの絶対パス/
+						: /worktreeRoot.*文字列/,
+				);
+				assert.deepEqual(engine.ledger.draft(p.name), before);
+				assert.equal(engine.ledger.openAttention().length, 0);
+				assert.equal(rest.calls.length, posts);
+				assert.equal(existsSync(file), !!current);
+				if (current) assert.equal(readFileSync(file, "utf8"), current);
+			}
+		}
+		for (const value of [undefined, null, ""]) {
+			engine.ledger.upsertProject({ ...p, path: path.dirname(home) });
+			const before = engine.ledger.draft(p.name),
+				posts = rest.calls.length;
+			const current = readFileSync(file, "utf8");
+			const r = await w.tool("profile_propose", {
+				mode: "harness",
+				summary: "root change",
+				profile: { gate, worktreeRoot: value },
+			});
+			assert.equal(r.isError, true);
+			assert.match(r.text, /worktreeRoot.*既定候補.*main/);
+			assert.equal(readFileSync(file, "utf8"), current);
+			assert.deepEqual(engine.ledger.draft(p.name), before);
+			assert.equal(engine.ledger.openAttention().length, 0);
+			assert.equal(rest.calls.length, posts);
+		}
+		engine.ledger.upsertProject(p);
+		for (const value of [".worktrees", undefined]) {
+			const r = await w.tool("profile_propose", {
+				mode: "harness",
+				profile: { gate, worktreeRoot: value },
+				summary: "root change",
+			});
+			assert.equal(r.isError, false, r.text);
+			if (value !== ".worktrees")
+				assert.equal(engine.ledger.profile(p)?.worktreeRoot, ".worktrees", "提案だけでは既存値を変更しない");
+			const id = JSON.parse(r.text).attention;
+			const expectedRoot = value ? `${home}/.worktrees` : `${home}-worktrees/paths`;
+			const rootLine = `worktreeRoot（${value ? "明示値" : "既定"}）: \`${expectedRoot}\``;
+			const post = rest.calls.find((call) => call.kind === "send" && call.content?.includes(id));
+			assert.ok(post?.content?.split("\n").includes(rootLine), post?.content);
+			await c.tool("attention_answer", { id, answer: "OK" });
+			const activated = await w.tool("profile_activate", {});
+			assert.equal(activated.isError, false, activated.text);
+			assert.equal(engine.ledger.profile(p)?.worktreeRoot, value);
+			if (value === ".worktrees") {
+				const before = readFileSync(file, "utf8");
+				const calls: string[][] = [];
+				const supervisor = new Supervisor({
+					tmuxSession: "test",
+					targets: () => engine.targets(),
+					tmux: async (args) => {
+						calls.push(args);
+						return { ok: true, stdout: "" };
+					},
+					isLive: () => false,
+					notify: () => {},
+				});
+				await supervisor.restart(p.name);
+				await supervisor.tick();
+				const worker = engine.targets().find((t) => t.name === p.name);
+				assert.ok(worker?.command.includes(`${home}/.worktrees`));
+				assert.equal(worker?.refresh?.worktreeRoot, `${home}/.worktrees`);
+				assert.ok(
+					calls.some((c) => (c[0] === "new-window" || c[0] === "new-session") && c.includes(worker?.command ?? "")),
+				);
+				assert.equal(readFileSync(file, "utf8"), before);
+			}
+			if (value === undefined) {
+				assert.equal(Object.hasOwn(engine.ledger.profile(p) ?? {}, "worktreeRoot"), false);
+				assert.deepEqual(engine.ledger.profile(p)?.gate, gate);
+			}
+		}
+		for (const value of [null, "", "../relative space", `${home}-external/abs`, "/"]) {
+			const r = await w.tool("profile_propose", {
+				mode: "harness",
+				summary: "root change",
+				profile: { gate, worktreeRoot: value },
+			});
+			assert.equal(r.isError, false, r.text);
+			const id = JSON.parse(r.text).attention;
+			const expectedRoot = value ? path.resolve(home, value) : `${home}-worktrees/paths`;
+			const rootLine = `worktreeRoot（${value ? "明示値" : "既定"}）: \`${expectedRoot}\``;
+			const post = rest.calls.find((call) => call.kind === "send" && call.content?.includes(id));
+			assert.ok(post?.content?.split("\n").includes(rootLine), post?.content);
+		}
+		assert.equal(existsSync(`${home}-worktrees/paths`), false);
+		assert.equal(existsSync(`${home}-external`), false);
+	} finally {
+		w.stop();
+		c.stop();
+		await engine.stop();
+		rmSync(home, { recursive: true, force: true });
 	}
 });

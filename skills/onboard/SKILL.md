@@ -146,3 +146,38 @@ profile_propose（mode・profile または initial_prompt / tmux_session・summa
 - リポジトリへのコミット・PR・ファイルの追加（`.gitignore` も触らない。作業用ディレクトリは engine が
   `.git/info/exclude` に入れてある）
 - 確認をもらう前に確定すること
+
+## worktree と隔離環境の確認・既存設定の見直し
+
+新規 profile は `worktreeRoot` を省略する。既定は字句正規化した `${DLE_HOME}-worktrees/<登録名>`
+（通常 `~/.discord-loop-engine-worktrees/<登録名>`）で、DLE_HOME ディレクトリ自体の兄弟に置く。
+相対値は main 基準、絶対値も使える。明示 `.worktrees` は従来配置を維持し、自動移行しない。
+単体実行で登録名が不明なら basename を推測せず `DLE_PROJECT=<登録名>` の指定を求めて止まる。
+型や既定配置の不正は提案前に拒否される。手編集で起動不能なら engine の log・通知の
+プロジェクト名・worktreeRoot・具体的理由を確認する。
+
+preflight/gate は各コマンドの DLE_*/DISCORD_* を外し、空の専用一時 DLE_HOME と不存在の DLE_SOCKET にする。
+設定は隔離前に読み、beforePR は元の環境。通常の認証・git 作者・PATH は維持される。
+標準 linked WT 内でも config/gate/hook/Codex の定義、notify の .env と相対 envFiles は main 基準、実行 cwd は WT。
+ブランチの設定を試すなら絶対 HARNESS_CONFIG を明示する。環境隔離はファイル読取りや一般のネットワークを遮断しない。
+Bot 用 .env を祖先や共有 symlink に置かず、他の親 .env、親 lint 設定、依存・相対パス、書込権限・容量を確認する。
+HUP/INT/TERM は trap 回収と129/130/143での終了だけを保証し、子待ちで遅延しうる。子孫停止や SIGKILL 後の回収は手動確認。
+
+既存設定を切り替える場合は、lint の競合があるプロジェクトから検討する:
+
+1. plugin/engine の更新・再起動と `profile_get` / `harness-config --path` で有効設定を確認する。
+   以前からキー未指定で旧 WT が作業中なら、`.worktrees` を明示して従来配置で継続できる。
+2. 作業中の Issue/WT/Codex・未完了作業を確認し、新旧で同じ Issue を二重作成しない。
+   作業中なら既存 root を維持して延期する。データを自動移動・削除しない。
+3. 再調査/設定見直しで外部候補の親 lint 設定・依存・相対パス・書込権限・容量・祖先 .env・symlink、
+   隔離後の preflight/gate、非隔離の beforePR を検証する。
+4. 他項目を保持し **worktreeRoot キーだけを除いた完全な profile** を profile_propose へ渡す。
+   差分パッチではなく全体。summary に旧 root・新既定の絶対パス・理由・確認結果・残る手動確認・再起動の必要性を書く。
+   提案時に現行ファイルを書き換えない。
+5. 人の OK 後 profile_activate。repo の .claude/harness.json が優先なら engine 側からキーを除いても有効値は変わらない。
+   その旨を伝え、repo 側変更は別途承認を得る。
+6. dle restart 後に解決済み root と起動時 --add-dir の一致を確認してから新規 WT を作成する。
+   初回 onboard で別 root を確定した場合も同じ。実 lint/gate、無害な一時ファイルの Read/Edit/Write、
+   harness-implementer への許可継承、実 Codex/tmux の監視・復帰・片付けを確認する。旧領域の整理は別途判断する。
+
+README「要件と検証の対応」に自動試験と手動確認を記している。

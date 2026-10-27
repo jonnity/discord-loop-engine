@@ -48,7 +48,7 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 主に使うキー（全体は discord-loop-engine の `templates/profile.example.json`）:
 
 - `project` / `repo` / `baseBranch` / `owners`
-- `maxParallel`（既定 3）/ `worktreeRoot`（既定 `.worktrees`）/ `branchPrefix`（既定 `fix/issue-`）
+- `maxParallel`（既定 3）/ `worktreeRoot`（省略時は `${DLE_HOME}-worktrees/<登録名>`。相対値は main 基準、絶対値も可）/ `branchPrefix`（既定 `fix/issue-`）
 - `gate`: PR 前ゲート `[{name, run}]`（CI と同じ検査を同じ順で）
 - `hooks`: リポジトリ固有の手順の差し込み口（`harness-hook <phase>` が実行。どれもコマンドの配列で、最初の失敗で止まる。
   `{n}` `{pr}` `{worktree}` `{main}` を置換）
@@ -64,7 +64,9 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 - `specRecordDir`: 設計記録をコミットする場所（`null` ならコミットしない）
 - `humanChecks`: 自動では確認できず、毎回マージ承認依頼に載せる確認項目
 
-以下 `{n}` は Issue 番号、`$WT` は `$(harness-config --root)/<worktreeRoot>/issue-{n}`。
+再依頼・復帰・Phase 6 の片付けでも、同じ `WT="$(harness-config --worktree {n})" || exit 1` で初期化する。解決失敗では後続操作を止め、旧既定へフォールバックしない。
+
+以下 `{n}` は Issue 番号、`$WT` は `harness-config --worktree {n}` の解決済み絶対パス。
 
 ## フェーズ（ラベル）
 
@@ -147,7 +149,9 @@ esac
 ## Phase 2: 設計書生成（Codex・並列）
 
 ```bash
-ROOT=$(harness-config --root); WT=$ROOT/$(harness-config '.worktreeRoot' .worktrees)/issue-{n}
+ROOT="$(harness-config --root)" || exit 1
+WT="$(harness-config --worktree {n})" || exit 1
+mkdir -p "$(dirname "$WT")" || exit 1
 git -C "$ROOT" fetch origin "$(harness-config '.baseBranch' main)"
 git -C "$ROOT" worktree add "$WT" -b "$(harness-config '.branchPrefix' fix/issue-){n}" \
   "origin/$(harness-config '.baseBranch' main)"
@@ -205,7 +209,7 @@ sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-spec-{n}.id")" -p -S -3
 > コミットは常に Claude がパスを列挙して行う。
 
 `$WT/.harness/spec/{n}.md` の出現を **最大2分だけ** 出力なしでポーリングし（`until ...; do sleep 10; done`
-を12回で打ち切り。各回 `harness-codex-status status codex-spec-{n}` も見て、`exited:*` で成果物が無ければ
+を12回で打ち切り。各回 `harness-codex-status status codex-spec-{n} "$WT"` も見て、`exited:*` で成果物が無ければ
 待たずに「Codex の監視と再起動」の判定に入る）、出たら `harness-phase {n} spec-review` → Phase 3。出なければ次の心拍に任せる。
 
 ### Codex の監視と再起動（全 Phase 共通）

@@ -319,3 +319,77 @@ engine は TypeScript をビルドせず、Node の型ストリップでその�
 ツールは engine の入口で必須項目・型・未知の引数名を検査し、不正な入力はエラーにする。
 未知の引数名には許可された名前の候補を案内する（`dispatch.message` → `text`、`rules_set.text` → `content`）。
 `dispatch.text` と `rules_set.content` は空文字・空白だけの本文を拒否する。入力の自動補正は行わない。
+
+### worktree の場所と worker のアクセス許可
+
+`worktreeRoot` の未指定・null・空文字列は、字句正規化した DLE_HOME の兄弟
+`${DLE_HOME}-worktrees/<登録名>/issue-<番号>` を使います。通常は
+`~/.discord-loop-engine-worktrees/<登録名>/issue-9` です。main の親 lint 設定との入れ子を避け、
+上方探索で Bot トークンの `DLE_HOME/.env` を通らない配置にします。
+相対値は main を基準とし、絶対値も指定できます。明示 `.worktrees` は従来の
+`<main>/.worktrees/issue-9` のままです。既存設定・作業領域は自動で移動・削除しません。
+`~`・`$` 始まりの値は展開を行わないため拒否します。展開済みの絶対パスか通常の相対パスを指定してください。
+symlink の実体解決は行いません。親の lint 設定、依存の準備、相対パス、権限・容量、
+祖先の `.env` と共有 symlink は実配置で確認してください。
+
+`harness-config --worktree-root` と `harness-config --worktree 9` は解決済みの絶対パスを返し、
+参照だけでは mkdir しません。登録名は `DLE_PROJECT`、単体実行では設定の `.project` を使います。
+basename とは異なる場合があるため推測しません。両方なければ `DLE_PROJECT=<登録名>` の指定を求めて停止します。
+文字列以外の root、不正な登録名、既定候補が main/DLE_HOME 配下になる配置はエラーです。
+提案時は draft 保存・承認依頼前に拒否し、手編集による起動時エラーは engine の log と通知に
+プロジェクト名・worktreeRoot・具体的理由を出します。その worker の起動・refresh を止め、他のプロジェクトは継続します。
+
+harness worker は起動前に root を作り、解決値を Claude の `--add-dir` へ1引数で渡します。
+最後の `exec env … claude …` により tmux の pane PID と Claude の PID を揃えます。
+ready worker の自動整理も同じ root の Codex を待ちます（同 id/cwd を120分観測した後は従来どおり無視）。
+設定の activate だけでは実行中の許可は更新されません。起動後、無害な一時ファイルで外部 WT の
+Read/Edit/Write・gate・代行実装への許可継承を確認してください。実 Claude/Codex/tmux の認証・信頼確認は手動です。
+
+標準 linked worktree 内でも設定探索の root は main になります。
+gate/hook/Codex の定義は main の `.claude/harness.json`（なければ engine 側）を読み、実行 cwd は WT のままです。
+notify の `.env` と相対 `notify.envFiles` も main 基準です。WT 側だけで設定や `.env` を変えても自動では選ばれません。
+ブランチの定義を試す場合は `HARNESS_CONFIG=<WT の設定ファイルの絶対パス>` を明示します。
+
+preflight と gate の各コマンドは、継承したすべての `DLE_*`・`DISCORD_*` を外し、
+空の専用一時ディレクトリを `DLE_HOME`、その直下の存在しない `engine.sock` を `DLE_SOCKET` に設定します。
+設定とコマンド定義は隔離前の親環境で読みます。PATH・通常の認証・git 作者・cwd・標準入出力は維持し、
+`hooks.beforePR` は元の worker 環境で実行します。隔離準備失敗は終了3で停止し、元の環境へ戻して再試行しません。
+これはネットワークを遮断する sandbox ではありません。main の `.env`、envFiles、BASH_ENV、明示 URL/socket からの
+再設定や任意の秘密ファイル読取りを防ぐものではありません。
+
+通常終了と HUP/INT/TERM では trap が所有する一時領域を回収し、信号時は129/130/143で終了します。
+foreground の子待ちで trap は遅延しえます。即時中断・子孫の停止は保証しません。
+SIGKILL・マシン停止後は、使用した TMPDIR の一時領域と残るプロセスを確認し、実行中でないことを確かめて整理してください。
+
+### 既存 worktree 設定を切り替える手順
+
+1. plugin と engine の更新・再起動を確認し、`profile_get` / `harness-config --path` で有効設定を確認します。
+   明示 `.worktrees` は更新しても従来パスを使います。以前からキー未指定で旧 WT が作業中なら、
+   旧 `.worktrees` を明示して継続できます。新旧で同じ Issue を二重作成しません。
+2. 作業中の Issue/WT/Codex・未完了作業を確認し、作業中なら旧 root を維持して切替を延期します。
+   データは自動移動・削除しません。
+3. onboard の再調査/設定見直しで外部候補の親 lint 設定、依存・相対パス、書込権限・容量、祖先の `.env` と symlink、
+   隔離後の preflight/gate と非隔離の beforePR を確認します。lint の競合があるプロジェクトから切り替えを検討します。
+4. 他の項目を保持し、**worktreeRoot キーだけを除いた完全な profile** を `profile_propose` へ渡します。
+   差分パッチだけでは activate 時に他の項目が失われます。summary には旧 root、新既定の絶対パス、変更理由、
+   確認結果、残る手動確認、再起動の必要性を記します。提案時に現行ファイルを直接書き換えません。
+5. 人の OK 後に `profile_activate` します。repo の `.claude/harness.json` が優先なら engine 側のキー除去だけでは
+   有効値は変わりません。その旨を示し、repo 側の変更は別途承認を求めます。
+6. `dle restart <名前>` 後、`harness-config --worktree-root` と起動時 `--add-dir` が一致することを確認してから
+   新規 WT を作ります。実 lint/gate、Claude の外部操作、代行実装、監視・片付けを確認します。旧領域の掃除は別途判断します。
+
+新規 onboard も省略が既定で、別 root を確定したら worker を再起動してから WT を作ります。
+
+### 要件と検証の対応
+
+| 要件・決定 | 対応ファイルと自動試験 | 手動確認 |
+|---|---|---|
+| preflight/gate は常時 DLE_*/DISCORD_* を除去、一時 home/socket、親で設定先行読取り、beforePR 非隔離 | `bin/harness-gate`、`test/harness-gate.test.ts` G1〜G6、`tests/harness/quality.sh` | 独自 hook の環境依存・明示接続先 |
+| lint 競合の回避方法は外部既定、絶対/相対、明示 .worktrees 互換 | `src/worktrees.ts`、`bin/harness-config`、status/codex-status、templates、`test/worktrees.test.ts` W1/W2、`tests/harness/worktrees.sh` W3 | 配置先の親設定・権限・依存・実 lint |
+| 作成・再開・シェパード・片付けは同じ WT、登録名不明なら停止 | issue-cycle/issue-loop、`test/skill-prompts.test.ts` W4 | 実 Codex/tmux の復帰と片付け |
+| 既存値維持、完全な提案→人の OK→activate→restart、提案の型/配置検証と解決済み root の表示 | `src/engine.ts`、`test/engine.test.ts` W5、上の切替手順 | 配置先の確認と切替の承認 |
+| --add-dir、exec の PID 維持、初回から起動エラー診断、外部 Codex 中の整理抑止 | `src/projects.ts` / `src/supervisor.ts`、各 test の W6 | 実 Claude と代行実装への許可継承 |
+| DLE_HOME の兄弟配置で Bot 用 .env を祖先から外す | `test/worktrees.test.ts` W1/W2 | symlink・他の祖先の .env |
+| WT 内でも main 設定/.env、実行 cwd は WT | `tests/harness/worktrees.sh` W8、config/gate/notify | 各 notify.envFiles・秘密ファイル |
+| 信号時は trap 回収と128+nに限定 | `test/harness-gate.test.ts` G6（各信号3回） | SIGKILL、子孫、回収の遅延 |
+| engine/channel の通信形式・必須項目を維持 | `test/engine.test.ts`、PROTOCOL_VERSION=2 | plugin 更新と実 engine/worker 再起動後の確認 |

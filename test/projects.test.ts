@@ -5,11 +5,13 @@
 // - 窓口は Sonnet で、worker は DLE_PROJECT 付きで、どちらも開発用 channel と dle ツールの許可付きで起動する
 import "./isolate.ts";
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
 import { type Config, loadConfig } from "../src/config.ts";
 import { Ledger, type Project } from "../src/ledger.ts";
 import {
@@ -21,6 +23,7 @@ import {
 	run,
 	sessionTargets,
 } from "../src/projects.ts";
+import { Supervisor } from "../src/supervisor.ts";
 
 test("origin の URL から owner/repo を読む", () => {
 	assert.equal(repoFromRemote("https://github.com/jonnity/kishimen-tool.git"), "jonnity/kishimen-tool");
@@ -306,4 +309,145 @@ test("enabled: false と旧 maxEvents: 0 の窓口には refresh を配線しな
 		{ name: "worker", path: "/w", repo: "x/y", mode: "harness", active: true, addedAt: "" },
 	]);
 	assert.ok(targets.every((t) => t.refresh === undefined));
+});
+
+test("W6: --add-dir・exec env の実argv/cwd/PID、sh/dash、mkdir失敗とrepo優先", async () => {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-launch-"));
+	const home = path.join(dir, "home"),
+		main = path.join(dir, "main");
+	mkdirSync(home);
+	mkdirSync(main);
+	writeFileSync(path.join(home, "config.json"), JSON.stringify({ channelIds: ["1"], allowedUserIds: ["2"] }));
+	const cfg = loadConfig(home);
+	const ledger = new Ledger(home);
+	const p: Project = { name: "registered", path: main, repo: "x/y", active: true, mode: "harness", addedAt: "" };
+	const profile = ledger.profilePath(p.name);
+	mkdirSync(path.dirname(profile), { recursive: true });
+	const stub = path.join(dir, "claude");
+	const ready = path.join(dir, "ready"),
+		release = path.join(dir, "release");
+	writeFileSync(
+		stub,
+		`#!/usr/bin/env node\nconst fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),exists:fs.existsSync(process.argv[process.argv.indexOf('--add-dir')+1])}));const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(timer)},10);`,
+		{ mode: 0o755 },
+	);
+	cfg.claudeBin = stub;
+	try {
+		for (const root of [undefined, ".worktrees", "../outside space", path.join(dir, "absolute 'quoted'")]) {
+			writeFileSync(profile, JSON.stringify({ worktreeRoot: root }));
+			const expected = root === undefined ? `${home}-worktrees/registered` : path.resolve(main, root);
+			const [c, t] = sessionTargets(cfg, [p], ledger);
+			assert.ok(t);
+			assert.match(t.command, /&& exec env /);
+			assert.ok(t.command.includes("--add-dir"));
+			assert.equal(t.refresh?.worktreeRoot, expected);
+			assert.doesNotMatch(c?.command ?? "", /--add-dir/);
+			for (const shell of ["sh", "dash"]) {
+				rmSync(ready, { force: true });
+				rmSync(release, { force: true });
+				const child: ReturnType<typeof spawn> = spawn(shell, ["-c", t.command], { cwd: main, env: process.env });
+				const done = once(child, "close");
+				try {
+					for (let i = 0; i < 500 && !existsSync(ready); i++) await delay(10);
+					assert.ok(existsSync(ready), t.command);
+					const r = JSON.parse(readFileSync(ready, "utf8"));
+					assert.equal(r.pid, child.pid);
+					assert.equal(r.cwd, main);
+					assert.equal(r.exists, true);
+					assert.equal(r.argv.filter((x: string) => x === "--add-dir").length, 1);
+					assert.equal(r.argv[r.argv.indexOf("--add-dir") + 1], expected);
+					writeFileSync(release, "");
+					assert.equal((await done)[0], 0);
+				} finally {
+					writeFileSync(release, "");
+					child.kill("SIGKILL");
+					await done;
+				}
+			}
+		}
+		rmSync(ready, { force: true });
+		writeFileSync(path.join(dir, "file"), "");
+		writeFileSync(profile, JSON.stringify({ worktreeRoot: path.join(dir, "file/child") }));
+		const t = sessionTargets(cfg, [p], ledger)[1];
+		assert.ok(t);
+		const r = spawnSync("sh", ["-c", t.command], { cwd: main, env: process.env });
+		assert.notEqual(r.status, 0);
+		assert.equal(existsSync(ready), false);
+		for (const value of [1, false, [], {}]) {
+			writeFileSync(profile, JSON.stringify({ worktreeRoot: value }));
+			const bad = sessionTargets(cfg, [p], ledger)[1];
+			assert.match(bad?.startupError ?? "", /registered.*worktreeRoot.*文字列/);
+			assert.equal(bad?.refresh, undefined);
+			assert.equal(bad?.command, "");
+		}
+		writeFileSync(profile, '{"worktreeRoot":".worktrees"}');
+		assert.equal(ledger.profile(p)?.worktreeRoot, ".worktrees");
+		assert.match(sessionTargets(cfg, [p], ledger)[1]?.command ?? "", /\.worktrees/);
+		mkdirSync(path.join(main, ".claude"));
+		writeFileSync(path.join(main, ".claude/harness.json"), '{"worktreeRoot":"../repo-wins"}');
+		assert.equal(sessionTargets(cfg, [p], ledger)[1]?.refresh?.worktreeRoot, path.join(dir, "repo-wins"));
+		cfg.worker.refresh.enabled = false;
+		assert.match(sessionTargets(cfg, [p], ledger)[1]?.command ?? "", /--add-dir/);
+		rmSync(path.join(main, ".claude/harness.json"));
+		rmSync(profile);
+		assert.match(sessionTargets(cfg, [p], ledger)[1]?.command ?? "", /--add-dir/);
+		assert.equal(sessionTargets(cfg, [p], ledger)[1]?.refresh, undefined);
+		assert.doesNotMatch(sessionTargets(cfg, [{ ...p, mode: "native" }], ledger)[1]?.command ?? "", /--add-dir/);
+		cfg.home = path.join(main, "inside");
+		const bad = sessionTargets(cfg, [p], ledger)[1];
+		assert.match(bad?.startupError ?? "", /worktreeRoot.*既定候補.*main/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("W6: 実targetの型/既定配置エラーはsupervisorで初回診断し起動とrefreshを抑止", async () => {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-startup-"));
+	const home = path.join(dir, "home"),
+		main = path.join(dir, "main");
+	mkdirSync(home);
+	mkdirSync(main);
+	writeFileSync(path.join(home, "config.json"), JSON.stringify({ channelIds: ["1"], allowedUserIds: ["2"] }));
+	const cfg = loadConfig(home),
+		ledger = new Ledger(home);
+	const p: Project = { name: "bad", repo: "x/y", path: main, active: true, mode: "harness", addedAt: "" };
+	const good = { ...p, name: "good", path: path.join(dir, "good") };
+	const f = ledger.profilePath("bad");
+	mkdirSync(path.dirname(f), { recursive: true });
+	try {
+		for (const value of [7, undefined]) {
+			cfg.home = value === undefined ? path.join(main, "inside") : home;
+			writeFileSync(f, JSON.stringify({ worktreeRoot: value }));
+			const targets = () => sessionTargets(cfg, [p, good], ledger);
+			const t = targets().find((t) => t.name === "bad");
+			assert.ok(t?.startupError);
+			assert.equal(t.refresh, undefined);
+			const logs: string[] = [],
+				notes: string[] = [],
+				calls: string[][] = [];
+			const sup = new Supervisor({
+				tmuxSession: "test",
+				targets,
+				tmux: async (args) => {
+					calls.push(args);
+					return { ok: true, stdout: "" };
+				},
+				isLive: () => false,
+				log: (s) => logs.push(s),
+				notify: (_n, s) => notes.push(s),
+			});
+			await sup.tick();
+			const first = notes.length;
+			await sup.tick();
+			assert.equal(notes.length, first);
+			assert.equal(notes.length, 1);
+			const reason = value === undefined ? /bad.*worktreeRoot.*既定候補.*main\/DLE_HOME/ : /bad.*worktreeRoot.*文字列/;
+			assert.ok(logs.some((s) => reason.test(s)));
+			assert.match(notes[0] ?? "", reason);
+			assert.ok(!calls.some((c) => c.includes("dle-bad")));
+			assert.ok(calls.some((c) => c.includes("dle-good")));
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
 });
