@@ -148,7 +148,7 @@ esac
 
 ## Phase 2: 設計書生成（Codex・並列）
 
-```bash
+````bash
 ROOT="$(harness-config --root)" || exit 1
 WT="$(harness-config --worktree {n})" || exit 1
 mkdir -p "$(dirname "$WT")" || exit 1
@@ -159,7 +159,20 @@ harness-hook afterWorktree --issue {n} --dir "$WT" || exit 1   # 失敗したら
 mkdir -p "$WT/.harness/spec" "$WT/.harness/impl"
 harness-issue-md {n} > "$WT/.harness/issue-{n}.md"           # Codex の入力（本文→コメント＝要件メモの順）
 harness-config '.notes' '' > "$WT/.harness/notes.md"          # engine 側の設定にある決まりごと
-harness-phase {n} designing --notify
+# DESIGN_REQUEST_BEGIN
+gate_rc=0
+gate_output="$(harness-config '.gate' '')" || gate_rc=$?
+if [ "$gate_rc" -ne 0 ]; then
+  cat > "$WT/.harness/gate-error-{n}.md" <<'GATE_ERROR'
+設計依頼に添付する gate を取得できませんでした。
+有効な harness 設定の JSON と gate 定義を確認してください。
+設計依頼の作成と designing 遷移・Codex 起動は行っていません。
+GATE_ERROR
+  printf '\n取得の終了コード: %s\n' "$gate_rc" >> "$WT/.harness/gate-error-{n}.md"
+  harness-phase {n} blocked --comment-file "$WT/.harness/gate-error-{n}.md" || exit 1
+  exit "$gate_rc"
+fi
+harness-phase {n} designing --notify || exit 1
 
 cat > "$WT/.harness/prompt-spec-{n}.md" <<EOF
 .harness/issue-{n}.md の Issue と要件メモを読み、詳細設計書を .harness/spec/{n}.md に書いてください。
@@ -171,28 +184,79 @@ EOF
 cat >> "$WT/.harness/prompt-spec-{n}.md" <<'CHECKLIST'
 
 設計品質チェックリスト（正本。レビューと再依頼でもこの依頼ファイルを参照する）:
+
+常に確かめる項目:
 - 先頭に人向けの要約と Issue 本文の受け入れ条件の逐語引用を置く。番号を復元・推定しない。
   要件メモの回答と引用元は別記する。入力に本文がなければ harness-issue-md または GitHub の読取りで
   再取得し、取得できなければ不足を明記して確定設計にしない。
-- 現状の各記述には `path:line` の根拠を付け、新しい提案と区別する。lockfile・vite/vitest 等の挙動は
-  安全な一時ディレクトリで一度実行し、コマンド・終了コード・結果・実ファイルの検証を記す。
-- 外部ツール・API は公式資料または使うラッパーの実装/README の URL・確認日・既知の制限を調べ、
-  「本当に効くか」を最小プローブで確かめる。未実行なら理由・影響・後の確認手順を未確定事項に残す。
-- 連動するエコシステムは notes/context から依存名・版の対応・双方の manifest/lockfile・更新時の検証を
-  列挙する。該当しなければ非該当と理由を書く。
+  解釈を含む具体化（文言・式・数値例など）は「確定要件」とせず「解釈」と明記する。
+- 現状の各記述には `path:line` の根拠を付け、新しい提案と区別する。lockfile・テストランナーの探索/除外等の
+  挙動を前提にする場合は安全な一時ディレクトリで一度実行し、コマンド・終了コード・結果・実ファイルの検証を記す。
+- 添付されたプロジェクトの gate が非空の配列なら、そのコマンド列・順序を実装後の確認手順に明示する。
+  format / lint / test / build など、gate にある検査を省略しない。新しいテストファイルがその対象に入るか、
+  glob・除外設定・呼び出し元も確かめる。gate 未定義・空・配列以外は未確認として記し、CI との対応を確認する手順を残す。
 - 実装環境で道具の存在と機能を確認して検証手順を選ぶ。ログだけで成功にせず、成果物ファイルの
   存在・サイズ・内容/形式を調べる。シェル例の `$VAR` や `$(...)` も実際の環境で使える形にする。
+- 環境の前提（認証の疎通・self-hosted ランナー）を先に確認し、受け入れ条件ごとのテスト/確認手順と
+  自動では確認できない humanChecks、未確認の前提を明記する。
+
+該当するときだけの項目（非該当なら理由を書く）:
+- リポジトリに憲章・規約のレビューゲートがある場合は、そのファイルと該当節を挙げ、節ごとに満たす確認を
+  自動テストまたは humanChecks に対応付ける。
+- 設定ファイルを変える Issue では、スキーマ検証に加え、要件で指定された値を期待値との assert で確かめる。
+  型や形式が正しいだけで、異なる値が通る確認にしない。
+- 外部ツール・API は公式資料または使うラッパーの実装/README の URL・確認日・既知の制限を調べ、
+  最小プローブで実効性を確かめる。ツールのメジャー版を上げる場合は、連携するツール/セットアップ手段の対応版を
+  一次情報で確かめる。未実行なら理由・影響・後の確認手順を未確定事項に残す。
+  確かめられない環境依存は「PR CI の実ログを根拠に 1 回だけ直し、だめなら blocked で人に返す」停止ルールを
+  検証計画に含める。対象の環境依存・未確認理由・CI で確かめる手順を特定し、停止計画は実装完了サマリにも引き継ぐ。
+- 連動するエコシステムは notes/context から依存名・版の対応・双方の manifest/lockfile・更新時の検証を
+  列挙する。該当しなければ非該当と理由を書く。
 - 録画・プロセス起動・タイミング依存には数値の N と独立した試行の初期化・成果物条件を決め、
   N 回連続成功を完了条件にする。中途失敗で連続回数を数え直す。SIGHUP・親の終了・プロセスグループの
   中断・孤児と一時ファイルの回収を扱う。
-- 環境の前提（認証の疎通・self-hosted ランナー）を先に確認し、受け入れ条件ごとのテスト/確認手順と
-  自動では確認できない humanChecks、未確認の前提を明記する。
+  長時間動く子プロセスを持つ CLI では、利用者が実際に叩く経路（パッケージマネージャー/スクリプトランナー経由
+  〔例: pnpm〕・パイプ）での異常系を設計する。子を直接終了する試験だけで代用しない。
+- はみ出し・表示崩れの修正では、対象のボタン名・要素を列挙し、各状態での viewport（幅・高さ）と
+  確認方法・期待結果を対応付ける。
 CHECKLIST
-# 完成した prompt-spec を読み、導入部とチェックリストが揃ったことを確認してから起動する。
+cat >> "$WT/.harness/prompt-spec-{n}.md" <<'GATE_NOTE'
+
+プロジェクトの gate（依頼生成時の harness-config '.gate' の出力。配列以外は null と表示）:
+```json
+GATE_NOTE
+if printf '%s\n' "$gate_output" | jq -e 'type=="array" and length>0' >/dev/null 2>&1; then
+  printf '%s\n' "$gate_output" '```' >> "$WT/.harness/prompt-spec-{n}.md"
+  cat >> "$WT/.harness/prompt-spec-{n}.md" <<'GATE_NOTE'
+実装後の確認はこの gate と同じコマンド列・順序にする（format / lint / test / build などを省略しない）。
+新しいテストファイルがこの列の対象に入るか、glob・除外設定・呼び出し元を確かめる。
+GATE_NOTE
+else
+  if printf '%s\n' "$gate_output" | jq -e 'type=="array" and length==0' >/dev/null 2>&1; then
+    printf '%s\n' "$gate_output" >> "$WT/.harness/prompt-spec-{n}.md"
+  else
+    printf '%s\n' 'null' >> "$WT/.harness/prompt-spec-{n}.md"
+  fi
+  printf '%s\n' '```' >> "$WT/.harness/prompt-spec-{n}.md"
+  cat >> "$WT/.harness/prompt-spec-{n}.md" <<'GATE_NOTE'
+gate は未定義・空または配列以外。CI と品質コマンドの対応は未確認として明記し、この状態を gate の確認完了の根拠にしない。
+CI から必要な品質コマンドと新しいテストファイルの対象を確認し、不足する前提・後の確認手順を残す。
+GATE_NOTE
+fi
+# 完成した prompt-spec を読み、導入部・チェックリスト・gate と欠落時の説明が揃ったことを確認してから起動する。
 cat "$WT/.harness/prompt-spec-{n}.md"
+# DESIGN_REQUEST_END
 harness-codex start "codex-spec-{n}" "$WT" "$WT/.harness/prompt-spec-{n}.md"   # 10 なら「フォールバック」節へ
 sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-spec-{n}.id")" -p -S -30 | grep "workdir:"   # $WT であること（必須）
-```
+````
+
+gate は依頼生成時のスナップショットとして、非空の配列をコマンドの再評価・実行・並べ替えなしで添付する。
+定義を後で変えた場合は、更新後の列と CI の対応をレビューで照合する。欠落・空・配列以外の表示は
+gate 成功を意味せず、設定の型の許容や既定コマンドの追加でもない。
+取得失敗から blocked へ進む処理は防御的な分岐である。不正 JSON は本番では手前の
+`harness-config --worktree {n}` が終了1となって停止するため、この分岐には到達しない。
+T5 は gate 取得の非0を stub で注入する単体検証であり、不正 JSON が本番で blocked になることを示さない。
+この分岐では古い依頼を上書き・起動せず、blocked 通知の失敗も成功扱いしない。
 
 > `harness-codex start` が `codex login status` で認証を確かめ、終了時に `EXIT=<code>` を
 > ペインと `$WT/.harness/<window>.exit` に残し、ウィンドウを終了後も残す（`remain-on-exit`）。
@@ -239,20 +303,31 @@ Phase 3・5 のレビューは、成果物を作った文脈から切り離し�
    実証できないものを棄却する。返却は先頭 `OK` / `NG`、確定指摘ごとに
    `[深刻度][確度] 箇所 — 指摘 — 根拠`、最後に `反証を試みたが壊せなかった点:` を1〜2行。
 
+検証役の判定基準: ツールのメジャー版更新で、ローカルでは確かめられない環境依存については、一次情報で
+対応版を確認し、未確認の理由・影響・CI での確認手順を明記した上で、「PR CI の実ログを根拠に 1 回だけ直し、
+だめなら blocked で人に返す」停止ルールを用意していれば、設計段階の検証計画として足りる。
+設計時に実行できないという理由だけで同じ確認の再依頼を繰り返さない。一般のコード不備や未対応の受け入れ条件を
+通す根拠にはしない。実装段階の修正回数の判定は PR 作成後の 5-3 で行う。
+
 主セッションは検証役の結果（数行）だけを受け取り、採否を決める。過剰設計になる指摘は棄却してよい。
-渡すのはパスだけ（`$WT`、spec、Issue ファイル、`context`。Phase 3 は生成済みの `prompt-spec-{n}.md` も渡す）。Codex の説明や主セッションの会話は渡さない。
+渡すのはパスだけ（`$WT`、spec、Issue ファイル、`context`。Phase 3・5 両方の懐疑役・検証役に生成済みの
+`prompt-spec-{n}.md` も渡す）。Codex の説明や主セッションの会話は渡さない。
 
 ## Phase 3: 設計書レビュー
 
 懐疑役の観点: 受け入れ条件の取りこぼし・要件メモとの矛盾・実装不能な前提・変更ファイル一覧の誤り・
 既存の仕様書（`context`）との齟齬・テスト方針の欠落。
 加えて `.harness/prompt-spec-{n}.md` の「設計品質チェックリスト」を正本として全項目を照合する。
+gate と同じ列・順序の検査、新規テストの探索/除外/呼び出し元、憲章・規約の該当節と自動確認/humanChecks、
+スキーマに加えた要件値の assert、長時間 CLI の実経路（パッケージマネージャー/スクリプトランナー・パイプ）の
+異常系と N・初期化/回収、一次情報による対応版と環境依存の停止計画、確定要件と解釈の区別、
+表示崩れの要素 × 状態 × viewport を、設計のテスト・期待値・humanChecks と照合する。
 参照行を実コードと、外部制限を一次資料と、挙動を実行結果・成果物と突き合わせる。
 未確認の前提を推測で通さず、未実行の理由と確認方法を明示させる。
 
 - **OK** → 設計書を Issue にコメント（`## 実装プラン` 見出し＋本文、末尾 `<!-- harness:note -->`）し、
   `harness-phase {n} implementing` → Phase 4
-- **NG** → `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストを残した同じファイルを渡して
+- **NG** → `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストと gate を残した同じファイルを渡して
   `codex-spec-{n}` を `harness-codex stop` → `harness-codex start` で再起動し、spec を書き直させる（Claude は直さない）。
   フォールバックにもこの同じ依頼ファイルのパスを渡す
 
@@ -281,9 +356,15 @@ sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-impl-{n}.id")" -p -S -3
 
 ### 5-1. 敵対的検証
 
-懐疑役には `$WT`・spec・impl サマリ・Issue ファイルのパスを渡し、
+懐疑役・検証役には `$WT`・spec・impl サマリ・Issue ファイル・生成済みの `prompt-spec-{n}.md` のパスを渡し、
 `git -C $WT diff origin/<base>...` と未コミット差分を対象に、spec との乖離・境界値・失敗経路・回帰・
 規約違反・スコープ外変更を壊しに行かせる（可能ならテスト・最小再現を実行させる）。
+設計品質チェックリストの全項目を、実コード・テスト・ローカルの実行ログ・成果物と照合する。
+gate の列・順序と終了値、新規テストの探索/除外/呼び出し元、憲章・規約の該当節と自動確認/humanChecks、
+スキーマに加えた要件値の assert、長時間 CLI の実経路（パッケージマネージャー/スクリプトランナー・パイプ）の
+異常系と N・初期化/回収、一次情報による対応版、確定要件と解釈の区別、表示崩れの要素 × 状態 × viewport を確認する。
+停止計画が impl サマリへ引き継がれたかも確認する。未実施は未確認として残す。
+この時点では実 CI ログ・修正回数を要求せず、その判定は PR 作成後の 5-3 に置く。
 
 - **NG** → 指摘を添えて `codex-impl-{n}` を `harness-codex start` で再起動（軽微でも Claude は直さない）
 
@@ -292,6 +373,8 @@ sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-impl-{n}.id")" -p -S -3
 `demo.output` の動画・スクショが存在し 0 バイトでないことを確認し、**サブエージェントに**受け入れ条件と
 突き合わせさせて ✅/❌ を判定する。送る動画は**実アプリを実際に操作した録画**に限る（DOM 差し込み・
 モック・加工で「それらしい」証跡を作らない）。❌ なら Codex に差し戻す。
+はみ出し・表示崩れの修正では、設計で列挙した対象のボタン名・要素 × 状態 × viewport（幅・高さ）ごとに、
+実アプリの動画・スクショを期待結果と照合する。
 
 ### 5-3. コミット・ゲート・PR
 
@@ -318,7 +401,15 @@ push/PR 作成を止める。ランナー停止・権限不足をコード修正
 解消後に gate 全体を再実行する。
 
 PR を作ったら CI の結果を待つ（issue-loop 経由なら `subscribe_pr_activity` のイベントで、単体なら次の心拍で）。
-CI が赤なら issue-loop の「CI red 対応」に従う。**CI が green になってから**承認依頼を出す。
+CI が赤なら issue-loop の「CI red 対応」に従う。ただし、設計で停止ルール対象とした環境依存の失敗は、
+PR CI の実ログに基づく修正1回で解消しなければ `harness-phase {n} blocked --comment-file ...` で人に返す。
+「1回」は、同じ PR で対象の失敗後に push した修正コミットと、そのコミットに対する CI 結果から数える。
+`gh pr view {PR} --json commits` でコミットを確認し、`gh pr checks {PR}` と、過去の結果が必要なら
+`gh run list --commit <SHA>` / `gh run view <run-id> --log-failed` で対象の失敗と修正後の結果を照合する。
+clear/resume 後も worker が読めるこの履歴から復元する。既存の `learning_add`（tag: `ci-red`。engine が無ければ
+`.harness/failure-log.jsonl`）は記録先としてだけ使う。新しい計数の仕組みは作らない。この1回上限は issue-loop の
+REAL 3回より優先する。失敗しているチェック・実ログの根拠・試した修正・残る判断を記す。
+対象以外の CI red は従来どおりとし、**CI が green になってから**承認依頼を出す。
 
 ### 5-4. 承認依頼（必ず harness-phase で）
 
