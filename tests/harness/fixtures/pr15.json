@@ -1,6 +1,47 @@
-{"headRefOid":"aaaaaaa111","url":"https://github.com/o/r/pull/15","reviews":[],"comments":[
- {"author":{"login":"jonnity"},"body":"承認お願い\n<!-- harness:gate phase=awaiting-merge issue=5 sha=aaaaaaa111 -->","createdAt":"2026-10-03T00:00:00Z","url":"c1"},
- {"author":{"login":"stranger"},"body":"OK","createdAt":"2026-10-03T00:30:00Z","url":"c2"},
- {"author":{"login":"jonnity"},"body":"NG: 色が違う","createdAt":"2026-10-03T01:00:00Z","url":"c3"},
- {"author":{"login":"jonnity"},"body":"OK です","createdAt":"2026-10-03T02:00:00Z","url":"c4"}
-]}
+{
+  "headRefOid": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "url": "https://github.com/o/r/pull/15",
+  "reviews": [],
+  "comments": [
+    {
+      "body": "承認お願い\n<!-- harness:gate phase=awaiting-merge issue=5 sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa attention=none -->",
+      "id": 10,
+      "user": {
+        "login": "bot"
+      },
+      "created_at": "2026-10-03T00:00:00Z",
+      "updated_at": "2026-10-03T00:00:00Z",
+      "html_url": "c1"
+    },
+    {
+      "body": "OK",
+      "id": 11,
+      "user": {
+        "login": "stranger"
+      },
+      "created_at": "2026-10-03T00:30:00Z",
+      "updated_at": "2026-10-03T00:30:00Z",
+      "html_url": "c2"
+    },
+    {
+      "body": "NG: 色が違う",
+      "id": 12,
+      "user": {
+        "login": "jonnity"
+      },
+      "created_at": "2026-10-03T01:00:00Z",
+      "updated_at": "2026-10-03T01:00:00Z",
+      "html_url": "c3"
+    },
+    {
+      "body": "OK です",
+      "id": 13,
+      "user": {
+        "login": "jonnity"
+      },
+      "created_at": "2026-10-03T02:00:00Z",
+      "updated_at": "2026-10-03T02:00:00Z",
+      "html_url": "c4"
+    }
+  ]
+}

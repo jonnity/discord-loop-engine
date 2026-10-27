@@ -2,17 +2,7 @@
 # テスト用の gh スタブ。harness-inbox が呼ぶ問い合わせにだけ fixture を返す。
 D="$(cd "$(dirname "$0")" && pwd)"
 if [ "${PHASE_STUB:-0}" = 1 ]; then
-	case "$*" in
-	"issue view 3 --json title -q .title") echo テスト ;;
-	"issue view 3 --json url -q .url") echo https://example.test/issue/3 ;;
-	"issue view 3 --json labels -q .labels[].name") echo harness:impl-review ;;
-	"pr view 5 --json headRefOid -q .headRefOid") echo abc123456789 ;;
-	"pr comment 5 --body-file "*|"issue comment 3 --body-file "*)
-		echo comment >> "$MEDIA_LOG"; cp "${!#}" "$POST_BODY"; echo https://example.test/comment ;;
-	"issue edit 3 "*) echo label >> "$MEDIA_LOG" ;;
-	*) echo "gh stub: unexpected: $*" >&2; exit 1 ;;
-	esac
-	exit
+ exec node "${PHASE_GH_FIXTURE:-$D/phase-gh.ts}" "$@"
 fi
 if [ "${RUNNER_STUB:-0}" = 1 ]; then
 	[ "$*" = "api --paginate repos/example/project/actions/runners" ] || exit 1
@@ -20,6 +10,20 @@ if [ "${RUNNER_STUB:-0}" = 1 ]; then
 	cat "$RUNNER_PAGES"
 	exit
 fi
+# REST の全ページ形式は pr fixture から返す。
+case "$*" in
+"repo view --json nameWithOwner -q .nameWithOwner") echo jonnity/r; exit ;;
+"api user --jq .login") echo bot; exit ;;
+"issue view 5 --json labels"|"issue view 6 --json labels") echo '{"labels":[{"name":"harness:awaiting-merge"}]}'; exit ;;
+"issue view 7 --json labels") echo '{"labels":[{"name":"harness:awaiting-merge"},{"name":"harness:merge-ok"}]}'; exit ;;
+esac
+for pr in 15 16 17; do
+ case "$*" in
+ "pr view $pr --json headRefOid,url") jq '{headRefOid,url}' "$D/pr$pr.json"; exit ;;
+ "api --paginate --slurp repos/jonnity/r/issues/$pr/comments") jq '[.comments]' "$D/pr$pr.json"; exit ;;
+ "api --paginate --slurp repos/jonnity/r/pulls/$pr/reviews") jq '[.reviews // []]' "$D/pr$pr.json"; exit ;;
+ esac
+done
 case "$*" in
 "repo view --json owner -q .owner.login") echo jonnity ;;
 *"issue list --state open --label harness:interview"*) echo 3 ;;

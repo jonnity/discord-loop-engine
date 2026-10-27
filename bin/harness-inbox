@@ -38,43 +38,14 @@ for n in $(gh issue list --state open --label harness:interview --json number -q
 		end'
 done
 
-# awaiting-merge: 承認/差し戻し/通知鮮度
+# awaiting-merge: merge と同じ読取り規則で全ページを検査する。
 for n in $(gh issue list --state open --label harness:awaiting-merge --json number -q '.[].number'); do
-	labels="$(gh issue view "$n" --json labels -q '.labels[].name')"
 	pr="$(gh pr list --state open --head "${prefix}${n}" --json number -q '.[0].number // empty')"
-	if [ -z "$pr" ]; then
-		continue
-	fi
-	gh pr view "$pr" --json comments,reviews,headRefOid,url | jq -c \
-		--argjson owners "$owners_json" --argjson n "$n" --argjson pr "$pr" \
-		--arg mergeok "$(printf '%s\n' "$labels" | grep -qx 'harness:merge-ok' && echo 1 || echo 0)" '
-		. as $p
-		| ([$p.comments[] | select(.body | contains("harness:gate phase=awaiting-merge"))] | last) as $req
-		| if $req == null then {issue: $n, kind: "missing-notify", pr: $pr}
-		else
-			($req.body | capture("sha=(?<s>[^ ]+)").s) as $sha
-			| if $sha != $p.headRefOid then {issue: $n, kind: "stale-notify", pr: $pr, head: $p.headRefOid[0:7]}
-			else
-				(
-					[ $p.comments[]
-						| select(.createdAt > $req.createdAt)
-						| select(.author.login as $a | $owners | index($a))
-						| select(.body | contains("<!-- harness:") | not)
-						| {at: .createdAt, url: .url, body: .body,
-							kind: (if (.body | test("^\\s*(OK|ok|ＯＫ|LGTM|マージして)")) then "merge-ok"
-								elif (.body | test("^\\s*(NG|ng|ＮＧ)")) then "merge-ng" else "comment" end)} ]
-					+ [ $p.reviews[]
-						| select(.submittedAt > $req.createdAt)
-						| select(.author.login as $a | $owners | index($a))
-						| select(.state == "APPROVED" or .state == "CHANGES_REQUESTED")
-						| {at: .submittedAt, url: $p.url, body: .body,
-							kind: (if .state == "APPROVED" then "merge-ok" else "merge-ng" end)} ]
-					+ (if $mergeok == "1" then [{at: "9999", url: $p.url, body: "", kind: "merge-ok"}] else [] end)
-				)
-				| sort_by(.at)
-				| (map(select(.kind != "comment")) | last) as $verdict
-				| (if $verdict == null then empty else {issue: $n, kind: $verdict.kind, pr: $pr, url: $verdict.url, body: $verdict.body} end),
-					(.[] | select(.kind == "comment") | {issue: $n, kind: "answer", pr: $pr, url: .url, body: .body})
-			end
-		end'
+	[ -n "$pr" ] || continue
+	snapshot="$(node "$SCRIPT_DIR/../src/harness-approval.ts" "$n" "$pr")"
+	jq -c --argjson n "$n" --argjson pr "$pr" '
+		if .verdict.kind == "merge-ng" then {issue:$n,pr:$pr,kind:"merge-ng",url:.verdict.url,body:.verdict.body}
+		elif .status != "ready" then {issue:$n,pr:$pr,kind:.status,url:.url}
+		elif .verdict then {issue:$n,pr:$pr,kind:.verdict.kind,url:.verdict.url,body:.verdict.body}
+		else empty end' <<<"$snapshot"
 done

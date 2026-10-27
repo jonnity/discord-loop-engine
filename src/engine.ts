@@ -21,6 +21,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
 import { type AttentionKind, KIND_LABEL, Ledger, TASK_STATUSES, type Task, type TaskStatus } from "./ledger.ts";
+import { normalizeReceipt, object } from "./notification-receipt.ts";
 import {
 	run as defaultRun,
 	ensureLabels,
@@ -435,7 +436,16 @@ export class Engine {
 
 	/** プロジェクト名を付けて送る。長文は分割し、返信先は先頭、添付は最後の1通に付ける。 */
 	async post(name: string, text: string, opts: { channelId?: string; replyTo?: string; files?: string[] } = {}) {
+		return (await this.postMessages(name, text, opts)).firstId;
+	}
+
+	private async postMessages(
+		name: string,
+		text: string,
+		opts: { channelId?: string; replyTo?: string; files?: string[] } = {},
+	) {
 		const chunks = chunkText(withProject(name, text), 2000);
+		let lastMessage: unknown;
 		let firstId: string | null = null;
 		for (const [i, content] of chunks.entries()) {
 			const res = await this.rest.sendMessage(opts.channelId ?? this.config.defaultChannelId, {
@@ -444,8 +454,9 @@ export class Engine {
 				files: i === chunks.length - 1 ? (opts.files ?? []) : [],
 			});
 			firstId ??= res?.id ?? null;
+			lastMessage = res;
 		}
-		return firstId;
+		return { firstId, lastMessage };
 	}
 
 	notifyOps(name: string, text: string) {
@@ -730,7 +741,7 @@ export class Engine {
 		]
 			.filter(Boolean)
 			.join("\n");
-		const messageId = await this.post(project, text, {
+		const { firstId: messageId, lastMessage } = await this.postMessages(project, text, {
 			files: o.file && (gate.kind === "merge" || existsSync(o.file)) ? [o.file] : [],
 		});
 		if (messageId) this.ledger.setAttentionMessage(att.id, messageId);
@@ -747,7 +758,16 @@ export class Engine {
 			{ kind: "notice", attention: att.id, project },
 		);
 		this.scheduleBoard();
-		return { attention: att.id, message_id: messageId };
+		let discord: ReturnType<typeof normalizeReceipt>;
+		if (gate.kind === "merge" && o.file) {
+			let guild: unknown;
+			try {
+				const channel = await this.rest.channel(this.config.defaultChannelId);
+				if (channel.id === this.config.defaultChannelId) guild = object(channel).guild_id;
+			} catch {}
+			discord = normalizeReceipt(lastMessage, guild, this.config.defaultChannelId);
+		}
+		return { attention: att.id, message_id: messageId, ...(discord ? { discord } : {}) };
 	}
 
 	/** worker の調査結果（設定の案）を受け取り、A-番号で確認を求める */

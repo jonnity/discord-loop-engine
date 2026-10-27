@@ -23,18 +23,23 @@ function setup() {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-m-"));
 	mkdirSync(path.join(dir, ".claude"));
 	mkdirSync(path.join(dir, "tmp"));
-	writeFileSync(path.join(dir, ".claude/harness.json"), JSON.stringify({ project: "test", repo: "example/project" }));
+	writeFileSync(
+		path.join(dir, ".claude/harness.json"),
+		JSON.stringify({ project: "test", repo: "example/project", hooks: {}, notify: { envFiles: [] } }),
+	);
 	const input = path.join(dir, "動画 'demo'.mp4");
 	writeFileSync(input, "source");
 	const env = {
 		...process.env,
-		HARNESS_CONFIG: "",
+		HARNESS_CONFIG: path.join(dir, ".claude/harness.json"),
 		PATH: `${media}:${fixtures}:${process.env.PATH}`,
 		CLAUDE_PROJECT_DIR: dir,
 		DLE_HOME: dir,
 		DLE_SOCKET: path.join(dir, "no.sock"),
-		DISCORD_WEBHOOK_URL: "https://example.test/webhook",
+		DISCORD_WEBHOOK_URL: "https://discord.com/api/webhooks/123/token?thread_id=456&wait=false",
+		NODE_OPTIONS: `${process.env.NODE_OPTIONS} --import=${path.join(media, "receipt-fetch.ts")}`,
 		PHASE_STUB: "1",
+		PHASE_GH_FIXTURE: path.join(fixtures, "phase-gh.ts"),
 		MEDIA_MODE: "webm",
 		MEDIA_LOG: path.join(dir, "log"),
 		MEDIA_PID: path.join(dir, "pid"),
@@ -55,7 +60,7 @@ async function until(predicate: () => boolean) {
 }
 function run(command: string, args: string[], env: NodeJS.ProcessEnv) {
 	return new Promise<{ code: number; stdout: string; stderr: string }>((resolve) => {
-		execFile(command, args, { env, timeout: 10000 }, (err, stdout, stderr) => {
+		execFile(command, args, { env, cwd: env.CLAUDE_PROJECT_DIR, timeout: 15000 }, (err, stdout, stderr) => {
 			resolve({ code: err ? Number(err.code) : 0, stdout, stderr });
 		});
 	});
@@ -65,6 +70,7 @@ for (const signal of ["SIGHUP", "SIGINT", "SIGTERM", "child", "ignore"] as const
 		for (let attempt = 0; attempt < 3; attempt++) {
 			const { dir, env, args, input } = setup();
 			const child = spawn(path.join(root, "bin/harness-phase"), args, {
+				cwd: dir,
 				env: { ...env, CONVERT_MODE: signal === "ignore" ? "ignore" : "wait" },
 				stdio: "ignore",
 			});
@@ -123,6 +129,8 @@ for (const { available, compatible } of [
 				"grep",
 				"tail",
 				"date",
+				"node",
+				"mv",
 				...available,
 			]) {
 				const source = available.includes(cmd)
@@ -138,7 +146,7 @@ for (const { available, compatible } of [
 				MEDIA_MODE: compatible ? "" : "webm",
 			});
 			assert.equal(r.code, compatible ? 0 : 6, r.stderr);
-			if (compatible) assert.match(readFileSync(env.MEDIA_LOG, "utf8"), /notify\nlabel/);
+			if (compatible) assert.match(readFileSync(env.MEDIA_LOG, "utf8"), /notify\npatch/);
 			else {
 				assert.match(r.stderr, new RegExp(available.includes("ffprobe") ? "ffmpeg" : "ffprobe"));
 				assert.ok(!existsSync(env.MEDIA_LOG) || !/comment|notify|label/.test(readFileSync(env.MEDIA_LOG, "utf8")));
@@ -154,57 +162,107 @@ test("実 FFmpeg: 音声なし・奇数寸法の WebM を変換→再検査→�
 		t.skip("FFmpeg がありません");
 		return;
 	}
-	const { dir, env, args, input } = setup();
-	const min = path.join(dir, "bin");
-	mkdirSync(min);
-	try {
-		symlinkSync(path.join(fixtures, "gh"), path.join(min, "gh"));
-		symlinkSync(path.join(media, "curl"), path.join(min, "curl"));
-		const realEnv = { ...env, PATH: `${min}:${process.env.PATH}` };
-		const source = await run(
-			"ffmpeg",
-			[
-				"-nostdin",
-				"-v",
-				"error",
-				"-y",
-				"-f",
-				"lavfi",
-				"-i",
-				"color=s=66x64:r=5",
-				"-vf",
-				"format=yuv444p,crop=65:63",
-				"-t",
-				"0.4",
-				"-c:v",
-				"libvpx-vp9",
-				"-f",
-				"webm",
-				input,
-			],
-			realEnv,
-		);
-		assert.equal(source.code, 0, source.stderr);
-		for (let attempt = 0; attempt < 3; attempt++) {
-			writeFileSync(env.MEDIA_LOG, "");
-			const result = await run(path.join(root, "bin/harness-phase"), args, realEnv);
-			assert.equal(result.code, 0, result.stderr);
-			const probe = await run(
-				"ffprobe",
-				["-v", "error", "-show_streams", "-show_format", "-of", "json", env.SENT_COPY],
+	for (let attempt = 0; attempt < 3; attempt++) {
+		const { dir, env, args, input } = setup();
+		const min = path.join(dir, "bin");
+		mkdirSync(min);
+		try {
+			symlinkSync(path.join(fixtures, "gh"), path.join(min, "gh"));
+			symlinkSync(path.join(media, "curl"), path.join(min, "curl"));
+			const realEnv = { ...env, PATH: `${min}:${process.env.PATH}` };
+			const source = await run(
+				"ffmpeg",
+				[
+					"-nostdin",
+					"-v",
+					"error",
+					"-y",
+					"-f",
+					"lavfi",
+					"-i",
+					"color=s=66x64:r=5",
+					"-vf",
+					"format=yuv444p,crop=65:63",
+					"-t",
+					"0.4",
+					"-c:v",
+					"libvpx-vp9",
+					"-f",
+					"webm",
+					input,
+				],
 				realEnv,
 			);
-			assert.equal(probe.code, 0, probe.stderr);
-			const info = JSON.parse(probe.stdout);
-			assert.equal(info.streams[0].codec_name, "h264");
-			assert.equal(info.streams[0].pix_fmt, "yuv420p");
-			assert.equal(info.streams[0].width, 66);
-			assert.equal(info.streams[0].height, 64);
-			assert.ok(Number(info.format.duration) > 0);
-			assert.equal(info.format.tags.major_brand, "isom");
-			assert.deepEqual(readdirSync(env.TMPDIR), []);
+			assert.equal(source.code, 0, source.stderr);
+			{
+				writeFileSync(env.MEDIA_LOG, "");
+				const result = await run(path.join(root, "bin/harness-phase"), args, realEnv);
+				assert.equal(result.code, 0, result.stderr);
+				const probe = await run(
+					"ffprobe",
+					["-v", "error", "-show_streams", "-show_format", "-of", "json", env.SENT_COPY],
+					realEnv,
+				);
+				assert.equal(probe.code, 0, probe.stderr);
+				const info = JSON.parse(probe.stdout);
+				assert.equal(info.streams[0].codec_name, "h264");
+				assert.equal(info.streams[0].pix_fmt, "yuv420p");
+				assert.equal(info.streams[0].width, 66);
+				assert.equal(info.streams[0].height, 64);
+				assert.ok(Number(info.format.duration) > 0);
+				assert.equal(info.format.tags.major_brand, "isom");
+				assert.deepEqual(readdirSync(env.TMPDIR), []);
+			}
+		} finally {
+			rmSync(dir, { recursive: true, force: true });
 		}
-	} finally {
-		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+for (const mode of ["parent-killed", "process-group"] as const) {
+	test(`M5: ${mode} の所有物を3回連続で検出・回収する`, async () => {
+		for (let trial = 0; trial < 3; trial++) {
+			const { dir, env, args, input } = setup();
+			const child = spawn(path.join(root, "bin/harness-phase"), args, {
+				cwd: dir,
+				env: { ...env, CONVERT_MODE: "wait" },
+				detached: true,
+				stdio: "ignore",
+			});
+			const done = new Promise<{ code: number | null; signal: NodeJS.Signals | null }>((resolve) =>
+				child.once("exit", (code, signal) => resolve({ code, signal })),
+			);
+			let converter = 0;
+			try {
+				await until(() => existsSync(env.MEDIA_PID));
+				converter = Number(readFileSync(env.MEDIA_PID, "utf8"));
+				assert.ok(child.pid);
+				if (mode === "parent-killed") {
+					child.kill("SIGKILL");
+					assert.equal((await done).signal, "SIGKILL");
+					assert.doesNotThrow(() => process.kill(converter, 0));
+					assert.ok(readdirSync(env.TMPDIR).length > 0);
+				} else {
+					process.kill(-child.pid, "SIGTERM");
+					assert.equal((await done).code, 143);
+					assert.deepEqual(readdirSync(env.TMPDIR), []);
+				}
+				assert.equal(readFileSync(input, "utf8"), "source");
+				assert.doesNotMatch(readFileSync(env.MEDIA_LOG, "utf8"), /comment|notify|label/);
+			} finally {
+				if (child.pid) {
+					try {
+						process.kill(-child.pid, "SIGKILL");
+					} catch {}
+				}
+				if (converter) {
+					try {
+						process.kill(converter, "SIGKILL");
+					} catch {}
+				}
+				await done;
+				rmSync(dir, { recursive: true, force: true });
+			}
+		}
+	});
+}

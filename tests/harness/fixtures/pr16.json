@@ -1,4 +1,27 @@
-{"headRefOid":"bbbbbbb222","url":"https://github.com/o/r/pull/16","reviews":[],"comments":[
- {"author":{"login":"jonnity"},"body":"承認お願い\n<!-- harness:gate phase=awaiting-merge issue=6 sha=oldoldold -->","createdAt":"2026-10-03T00:00:00Z","url":"c1"},
- {"author":{"login":"jonnity"},"body":"OK","createdAt":"2026-10-03T02:00:00Z","url":"c2"}
-]}
+{
+  "headRefOid": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "url": "https://github.com/o/r/pull/16",
+  "reviews": [],
+  "comments": [
+    {
+      "body": "承認お願い\n<!-- harness:gate phase=awaiting-merge issue=6 sha=dddddddddddddddddddddddddddddddddddddddd attention=none -->",
+      "id": 10,
+      "user": {
+        "login": "bot"
+      },
+      "created_at": "2026-10-03T00:00:00Z",
+      "updated_at": "2026-10-03T00:00:00Z",
+      "html_url": "c1"
+    },
+    {
+      "body": "OK",
+      "id": 11,
+      "user": {
+        "login": "jonnity"
+      },
+      "created_at": "2026-10-03T02:00:00Z",
+      "updated_at": "2026-10-03T02:00:00Z",
+      "html_url": "c2"
+    }
+  ]
+}

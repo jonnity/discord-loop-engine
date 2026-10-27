@@ -9,43 +9,52 @@
 # mergeable であること、profile の hooks.beforeMerge（例: SonarCloud の New issues が 0）が通ることを確認する。
 # どれかが崩れていたらマージしない。
 #
-# 使い方: harness-merge <issue> [--chat-approval "<引用>"]
+# 使い方: harness-merge <issue> [--chat-approval "<引用>" --attention <回答元A-id>]
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
 
-ISSUE="${1:?issue 番号を指定してください}"
+ISSUE="${1:-}"
+[ $# -ge 1 ] || exit 2
 shift
-CHAT=""
-if [ "${1:-}" = "--chat-approval" ]; then
-	CHAT="${2:?引用を指定してください}"
-fi
-
+CHAT="" ATTENTION="" seen_chat=0 seen_attention=0
+while [ $# -gt 0 ]; do
+	case "$1" in
+	--chat-approval) [ "$seen_chat" = 0 ] && [ $# -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || exit 2; CHAT="$2"; seen_chat=1; shift 2 ;;
+	--attention) [ "$seen_attention" = 0 ] && [ $# -ge 2 ] || exit 2; ATTENTION="$2"; seen_attention=1; shift 2 ;;
+	*) exit 2 ;;
+	esac
+done
+if [ "$seen_chat" != "$seen_attention" ]; then exit 2; fi
+if [ "$seen_attention" = 1 ] && [[ ! "$ATTENTION" =~ ^A-[1-9][0-9]*$ ]]; then exit 2; fi
+[[ "$ISSUE" =~ ^[1-9][0-9]*$ ]] || exit 2
 prefix="$(cfg '.branchPrefix' 'fix/issue-')"
 method="$(cfg '.mergeMethod' 'merge')"
+case "$method" in merge|squash|rebase) ;; *) exit 1 ;; esac
 PR="$(gh pr list --state open --head "${prefix}${ISSUE}" --json number -q '.[0].number // empty')"
-[ -z "$PR" ] && { echo "harness-merge: #$ISSUE の open PR（head ${prefix}${ISSUE}）が見つかりません" >&2; exit 1; }
-
-verdict="$("$SCRIPT_DIR/harness-inbox" | jq -r --argjson n "$ISSUE" 'select(.issue == $n) | .kind' | grep -E '^(merge-ok|merge-ng|stale-notify|missing-notify)$' | tail -n 1 || true)"
-case "$verdict" in
-stale-notify | missing-notify)
-	echo "harness-merge: 承認依頼後に head が変わっている（または依頼が無い）ため、再度 harness-phase $ISSUE awaiting-merge で依頼し直してください" >&2
-	exit 1
-	;;
-merge-ng)
-	echo "harness-merge: 最新の判断が NG（差し戻し）です。マージしません" >&2
-	exit 1
-	;;
-merge-ok) ;;
-*)
-	if [ -z "$CHAT" ]; then
-		echo "harness-merge: マージ承認が見つかりません（PR への OK / Approve / harness:merge-ok ラベル、または --chat-approval）" >&2
-		exit 1
+[ -n "$PR" ] || exit 1
+validate() {
+	local worktree recovery
+	worktree="$(cfg --worktree "$ISSUE")"
+	for recovery in ".harness/merge-recovery-$ISSUE.json" ${worktree:+"$worktree/.harness/merge-recovery-$ISSUE.json"}; do
+		if [ -e "$recovery" ] || [ -L "$recovery" ]; then
+			echo "harness-merge: 復旧未確認のためマージしません" >&2
+			return 1
+		fi
+	done
+	snapshot="$(node "$SCRIPT_DIR/../src/harness-approval.ts" "$ISSUE" "$PR")" || return 1
+	if ! jq -e --arg attention "$ATTENTION" --arg chat "$CHAT" '
+		.status == "ready" and .gate != null and .verdict.kind != "merge-ng"
+		and (if $chat != "" then .gate.attention == $attention else .verdict.kind == "merge-ok" end)' <<<"$snapshot" >/dev/null; then
+		current_url="$(jq -r .url <<<"$snapshot")"
+		echo "harness-merge: この回答は現在の完成した承認依頼に対応しないか、承認なし・NG・未完了です。マージしません。現在の依頼: $current_url。未完了なら復旧後の完成を待ち、内容を確認して回答してください。" >&2
+		return 1
 	fi
-	;;
-esac
+}
+validate || exit 1
+initial="$(jq -c .gate <<<"$snapshot")"
 
 state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,statusCheckRollup)"
 mergeable="$(printf '%s' "$state" | jq -r .mergeable)"
@@ -64,12 +73,15 @@ if ! "$SCRIPT_DIR/harness-hook" beforeMerge --issue "$ISSUE" --pr "$PR"; then
 	exit 1
 fi
 
+validate || exit 1
+[ "$(jq -c .gate <<<"$snapshot")" = "$initial" ] || { echo "harness-merge: 依頼/head/完成時刻が変化したため停止します" >&2; exit 1; }
+head="$(jq -r .gate.head <<<"$snapshot")"
 if [ -n "$CHAT" ]; then
 	gh pr comment "$PR" --body "チャットでマージ承認を受けました:
 > $CHAT
 
-<!-- harness:approval source=chat -->" >/dev/null
+<!-- harness:approval source=chat attention=$ATTENTION sha=$head -->" >/dev/null
 fi
 
-gh pr merge "$PR" "--$method"
+gh pr merge "$PR" "--$method" --match-head-commit "$head"
 "$SCRIPT_DIR/harness-phase" "$ISSUE" "done" --pr "$PR"

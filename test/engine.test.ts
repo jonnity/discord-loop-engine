@@ -45,6 +45,7 @@ function fakeRest() {
 	let n = 0;
 	return {
 		calls,
+		channel: async (id: string) => ({ id, guild_id: "800", type: 0 }),
 		sendMessage: async (channelId: string, m: { content: string; replyTo?: string; files?: string[] }) => {
 			calls.push({
 				kind: "send",
@@ -54,7 +55,16 @@ function fakeRest() {
 				files: m.files,
 				fileContents: m.files?.map((f) => readFileSync(f, "utf8")),
 			});
-			return { id: `sent${++n}` };
+			return {
+				id: String(++n),
+				channel_id: channelId,
+				attachments: (m.files ?? []).map((file) => ({
+					id: "111",
+					filename: path.basename(file),
+					size: readFileSync(file).length,
+					url: "https://cdn.discordapp.com/attachments/456/111/demo.mp4?signature=secret",
+				})),
+			};
 		},
 		editMessage: async (channelId: string, messageId: string, content: string) => {
 			calls.push({ kind: "edit", channelId, messageId, content });
@@ -397,13 +407,12 @@ test("harness-notify は engine が動いていれば webhook ではなく engin
 	const { engine, rest, home } = setupEngine();
 	await engine.start();
 	const proj = mkdtempSync(path.join(os.tmpdir(), "dle-proj-"));
-	await new Promise((r) => execFile("git", ["-C", proj, "init", "-q"], r));
 	writeFileSync(path.join(proj, "x"), "");
 	const { mkdirSync } = await import("node:fs");
 	mkdirSync(path.join(proj, ".claude"));
 	writeFileSync(
 		path.join(proj, ".claude", "harness.json"),
-		JSON.stringify({ project: "kishimen-tool", repo: "jonnity/kishimen-tool" }),
+		JSON.stringify({ project: "kishimen-tool", repo: "jonnity/kishimen-tool", hooks: {}, notify: { envFiles: [] } }),
 	);
 	try {
 		const r = await new Promise<{ code: number; stderr: string }>((resolve) =>
@@ -426,6 +435,7 @@ test("harness-notify は engine が動いていれば webhook ではなく engin
 					env: {
 						...process.env,
 						CLAUDE_PROJECT_DIR: proj,
+						HARNESS_CONFIG: path.join(proj, ".claude/harness.json"),
 						DLE_HOME: home,
 						DLE_SOCKET: path.join(home, "engine.sock"),
 						DISCORD_WEBHOOK_URL: "",
@@ -1000,7 +1010,7 @@ for (const mode of ["success", "send-failure", "read-failure"] as const) {
 		mkdirSync(path.join(home, "tmp"));
 		writeFileSync(
 			path.join(home, ".claude/harness.json"),
-			JSON.stringify({ project: "quality", repo: "example/project" }),
+			JSON.stringify({ project: "quality", repo: "example/project", hooks: {}, notify: { envFiles: [] } }),
 		);
 		const input = path.join(home, "demo.webm");
 		writeFileSync(input, "source");
@@ -1014,6 +1024,7 @@ for (const mode of ["success", "send-failure", "read-failure"] as const) {
 		rest.sendMessage = async (channel, m) => {
 			if (m.files?.length) {
 				prepared = m.files[0] ?? "";
+				writeFileSync(path.join(home, "copy"), readFileSync(prepared));
 				await pending;
 				if (mode === "send-failure") throw new Error("送信失敗");
 				if (mode === "read-failure") (await import("node:fs")).unlinkSync(prepared);
@@ -1025,10 +1036,11 @@ for (const mode of ["success", "send-failure", "read-failure"] as const) {
 				path.join(ROOT, "bin/harness-phase"),
 				["3", "awaiting-merge", "--pr", "5", "--comment", "説明", "--file", input],
 				{
-					timeout: 10000,
+					timeout: 15000,
+					cwd: home,
 					env: {
 						...process.env,
-						HARNESS_CONFIG: "",
+						HARNESS_CONFIG: path.join(home, ".claude/harness.json"),
 						PATH: `${ROOT}/tests/harness/fixtures/media:${ROOT}/tests/harness/fixtures:${process.env.PATH}`,
 						CLAUDE_PROJECT_DIR: home,
 						DLE_HOME: home,
@@ -1036,6 +1048,8 @@ for (const mode of ["success", "send-failure", "read-failure"] as const) {
 						PHASE_STUB: "1",
 						MEDIA_MODE: "webm",
 						MEDIA_LOG: mediaLog,
+						SENT_COPY: path.join(home, "copy"),
+						NODE_OPTIONS: `${process.env.NODE_OPTIONS} --import=${ROOT}/tests/harness/fixtures/media/receipt-fetch.ts`,
 						POST_BODY: path.join(home, "body"),
 						TMPDIR: path.join(home, "tmp"),
 						DISCORD_WEBHOOK_URL: "https://example.test/webhook",
@@ -1047,14 +1061,18 @@ for (const mode of ["success", "send-failure", "read-failure"] as const) {
 		try {
 			await until(() => prepared !== "");
 			assert.ok(existsSync(prepared));
-			assert.doesNotMatch(readFileSync(mediaLog, "utf8"), /notify|label/);
+			assert.match(readFileSync(mediaLog, "utf8"), /label\ncomment/);
 			release();
 			const r = await result;
 			assert.equal(r.code, mode === "success" ? 0 : 4, r.stderr);
 			assert.ok(!existsSync(prepared));
 			assert.deepEqual(readdirSync(path.join(home, "tmp")), []);
-			if (mode !== "success") assert.doesNotMatch(readFileSync(mediaLog, "utf8"), /notify|label/);
-			else assert.match(readFileSync(mediaLog, "utf8"), /label/);
+			if (mode !== "success") {
+				assert.match(
+					JSON.parse(readFileSync(path.join(home, "gh-state.json"), "utf8")).comments.at(-1).body,
+					/harness:pending/,
+				);
+			} else assert.match(readFileSync(mediaLog, "utf8"), /label/);
 		} finally {
 			release();
 			await result;
@@ -1668,5 +1686,50 @@ test("W5: worktreeRootの提案検証は保存・承認依頼前、明示値の�
 		c.stop();
 		await engine.stop();
 		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("M1/M2: engineは最後の添付receiptと先頭IDを区別し、guild欠落でも投稿済みを保つ", async () => {
+	for (const mode of ["normal", "guild-missing", "guild-failure", "old-message"] as const) {
+		const { engine, rest, home } = setupEngine();
+		const file = path.join(home, "demo.mp4");
+		writeFileSync(file, "movie");
+		if (mode === "guild-missing") rest.channel = async (id) => ({ id, guild_id: "", type: 1 });
+		if (mode === "guild-failure")
+			rest.channel = async () => {
+				throw Error("no guild");
+			};
+		if (mode === "old-message") rest.sendMessage = async () => ({ id: "123", channel_id: "", attachments: [] });
+		try {
+			const result = (await engine.call({ role: "cli", name: "" }, "notify", {
+				project: "quality",
+				event: "merge-request",
+				title: "動画",
+				url: "https://example.test",
+				body: "あ".repeat(5000),
+				file,
+			})) as {
+				attention: string;
+				message_id: string;
+				discord?: { message_id: string; url: string | null; link_error?: string; attachments: unknown[] };
+			};
+			assert.match(result.attention, /^A-/);
+			if (mode === "old-message") assert.equal(result.discord, undefined);
+			else {
+				assert.ok(result.discord);
+				assert.notEqual(result.discord.message_id, result.message_id);
+				assert.equal(result.discord.attachments.length, 1);
+				assert.equal(engine.ledger.openAttention()[0]?.messageId, result.message_id);
+				if (mode === "normal")
+					assert.equal(result.discord.url, `https://discord.com/channels/800/900/${result.discord.message_id}`);
+				else {
+					assert.equal(result.discord.url, null);
+					assert.equal(result.discord.link_error, "guild-unavailable");
+				}
+			}
+		} finally {
+			await engine.stop();
+			rmSync(home, { recursive: true, force: true });
+		}
 	}
 });

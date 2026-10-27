@@ -190,17 +190,106 @@ self-hosted の対象ラベル・オンライン台数・API 権限は onboard �
 
 ### 承認依頼の動画
 
-UI 変更の承認依頼は `harness-phase ... awaiting-merge --file <現 head の録画>` で出します。
-`ffprobe` は常に必要です。H.264・yuv420p の MP4 を検査し、それ以外は `ffmpeg`（libx264/AAC）で
-変換して再検査します。元動画を残し、添付の完了まで一時成果物を保持します。
-`notify.maxAttachMB` は正整数の MiB 上限（既定10）です。上限超過で本文だけの承認依頼にはしません。
-動画の位置と最終ファイル名は PR コメントと通知に自動で入り、長文時は最後の投稿に添付されます。
+demo 設定があり UI・操作を変える場合、要件確認で「どこからどこまで」を決めます。
+開始状態・操作順・終了状態・含めないものを要件メモから設計・録画・映像レビューへ引き継ぎます。
+明示的に動画を使う案件も同様です。UI 非変更/demo=null の全案件に録画は要求しません。
 
-準備失敗は終了6で、コメント・通知・承認ラベルは進みません。ツール導入/再録画等を blocked で依頼し、
-対応後に再実行します。長い録画では呼出し側の timeout を延ばします。通知/ラベル失敗も原因を解消して
-同じ head で再実行します。途中のネットワーク失敗でコメントだけ残ることや、未送信の attention が残る
-場合があります。SIGKILL 後の一時ファイルは手動で確認します。
-スマートフォン/デスクトップでの見つけやすさ・再生と、実アプリ/現 head に対応する映像かは人が確認します。
+`harness-phase <issue> awaiting-merge --pr <pr> --comment-file <本文> --file <現 head の録画>` で依頼します。
+`ffprobe` で H.264/yuv420p/MP4 を検査し、必要なら `ffmpeg`（libx264/AAC）で変換・再検査します。
+適合動画も私有一時領域に `demo-<issue>-h264.mp4` として固定し、元動画を保持します。
+静的通知先検査→旧 merge-ok 取消し/他 phase 除去/追跡 awaiting 確認→仮コメント pending→必須通知→
+Discord 添付の再取得・bytes/SHA-256 照合→同 ID の完成 PATCH→merge-ok 再取消し/最終ラベル確認の順です。
+PR 完成コメントの「デモ動画を開く（Discord）」から、動画のあるメッセージを開けます。
+長文なら添付は最後の投稿です。PR には最終名・bytes・SHA-256・再取得照合済みを記録し、署名付き CDN URL は残しません。
+
+未実装/見せる操作がなく動かない動画なら、本文の見出しより前の最初の行と --summary の先頭へ具体的な理由を書きます。
+動く場合は雛形の条件行を削除します。固定文字列「【動きのない動画の場合だけ」が残る依頼は終了2です。
+humanChecks は普通の箇条書きで結果/未確認を書きます。
+**完成コメントを編集すると、それより前の OK/Approve は数えない**ため、編集後に再回答してください。
+
+容量は `notify.maxAttachMB` の正整数 MiB（既定10）。Discord の制限・権限で上限内でも失敗し得ます。
+超過は短縮/再録画し、本文だけへ降格しません。保存先は Discord、専用置き場ブランチは作らず、main 履歴へ動画を追加しません。
+再実行・過去 head・マージ後も自動削除しません。手動削除は人が Discord 上で判断し、削除すると PR リンクは切れます。
+メッセージを閲覧するサーバー/チャンネルの権限が必要です。
+
+承認依頼は動画なしも `notify.required=false` で skip できず通知必須になりました。
+GitHub コメント・Discord 通知・ラベルの人間ゲートを揃える安全柵強化です。通常 info 等の skip は維持します。
+`harness-notify --check-target --event merge-request` は設定/envFiles を通常送信と同様に解決し、
+engine ソケット候補/webhook 候補の有無だけを秘密なし JSON で返します。疎通や投稿はしません。
+ソケットがあっても接続成功は保証しません。
+
+awaiting-merge は追跡用です。再依頼の開始時と完了時に merge-ok を外すため、処理中に付けても消えます。
+新しい完成依頼を確認して承認し直してください。最新の認証投稿者の完成marker・現 head・ラベルを全経路で検査します。
+attention 属性なしの旧 gate は GitHub/チャットとも再依頼が必要です。
+GitHub の OK は完成 PATCH の updated_at より厳密に後、Approve はその時刻に加え commit_id が現 head のものだけ。
+同秒の OK/Approve は再回答してください。NG/CHANGES_REQUESTED は仮 POST の created_at 以後から保持します。
+pending/旧 gate でもこの NG は inbox が先に返します。同時刻の正負は NG が優先です。
+最終確認後に付く merge-ok ラベルを head/依頼へ結び付けるイベント照合はありません。最新完成依頼を確認して付けてください。
+
+engine の回答は worker が `harness-merge <issue> --chat-approval "<引用>" --attention "<回答のmeta.attention>"` に渡します。
+旧 A/A なし/none/pending は拒否し、現在の PR コメントへ案内します。現在 A は出さず、拒否した OK を付け替えません。
+CI/mergeable/hook だけが理由で依頼/head が同じなら、同じ A と引用で再試行できます。新 head/新依頼には新回答が必要です。
+webhook や engine なしの単独 issue-cycle ではチャット承認を利用できず、GitHub 承認を使います。
+
+失敗時は終了値と段階を保存します。0 だけが依頼完了です。
+
+| 終了 | 対応 |
+|---|---|
+| 2/6 | 引数・雛形/設定、動画の道具・入力・容量を直す。準備失敗は副作用前停止 |
+| 4 | 通知失敗/結果不明。静的未設定なら副作用なし、投稿後なら最新 pending と追跡 awaiting が残る |
+| 7 | A/リンク/再取得照合/head/完成 PATCH 失敗。依頼未完了、旧 receipt/A を流用しない |
+| 5 | ラベル編集/確認失敗。merge-ok 除去・awaiting 復元・同コメントの pending 化と再読取りを試す |
+| 中断 | 所有 PID/PGID・送信結果・一時物を調べ、子を止めてから所有領域だけ回収。共有 engine は停止しない |
+
+依頼とマージは対象の同じ worktree を cwd にして実行します。
+復旧未確認は worktree 内の `.harness/merge-recovery-<issue>.json`（git 管理外）にも残り、harness-merge が拒否します。
+次の全手順の再依頼が成功したとき消えます。通信断では遠隔に完成 gate/ラベルが残った可能性もあり、成功扱いしません。
+A の取下げは保証しません。架空回答・台帳直接編集で取り下げず、通信復旧後に最新状態を読み直します。
+最新が自分の失敗した依頼の pending なら、原因を直せたときだけ再実行し、直せなければ blocked にします。
+tick ごとに無条件でコメント・通知・A を増やしません。長い変換は呼出し側 timeout を延長します。
+SIGKILL/親の無信号終了では trap の回収保証はありません。
+
+更新時は engine・plugin・CLI・worker を揃えて再起動します。protocol は2を維持し既存の先頭 message_id/A 出力は互換です。
+旧 engine の不完全 receipt を成功扱いしません。認証 login を変えた場合は新 login で再依頼します。
+
+| 受け入れ条件 | 自動確認 | 人の確認 |
+|---|---|---|
+| 1 PR→動画リンク・取出し一致 | M1〜M4: notification-receipt/rest/engine/cli-notify/harness-media/harness-merge のテスト | H1/H2 |
+| 2 合意範囲の引継ぎ | S2: test/skill-prompts.test.ts の各節・生成依頼 | H3 |
+| 3 動かない理由を先頭へ | S3/M1: 雛形・固定文字列拒否・完成本文と要約 | H3 |
+| 4 保管/容量/掃除 | S1/M2/M5: README/スキル・通知/メディアテスト | H4 |
+| 5 既存 gate と安全柵 | T0/M6a〜e: isolate/harness-approval/harness-merge、既存全件と Q1〜Q5 | H1〜H5 |
+
+実サービスへ触れない fixture 試験で代用できない確認:
+
+- H1: PC/スマートフォンで PR→動画付き最後のメッセージ、Copy Message Link の3ID一致、閲覧権限。
+- H2: engine/webhook を別々に毎回新しい入力で3回連続、hash/bytes/実 MP4 と両端末の再生を確認。失敗で連続数を0へ。
+- H3: 合意した開始状態/操作順/終了状態/含めないものと映像、冒頭理由の正確さ。
+  サマリの動画パス・録画時 full SHA を PR 現 head/完成markerと照合し「動画を撮ったhead＝現head」を確認。
+  違う/不明なら撮り直す。5-2・5-3後・依頼直前・完成後に確認。bytes/hash は撮影headの証明ではありません。
+- H4: 4/7/5/中断時の残存 A/結果不明/コメント/ラベル/所有子と一時回収、保管・手動削除判断。tmux は記録済 window-id のみ。
+- H5: GitHub 認証/読取り/コメント権限、Bot 閲覧/送信/添付、webhook token GET/POST、CDN HTTPS、配布版/再起動。
+  秘密や応答全文は表示せず、疎通不良なら依存作業を止めます。
+
+CI と同じ品質確認（Q1〜Q5）:
+
+```bash
+npm run check:ci
+npm run typecheck
+shellcheck -S warning bin/harness-* bin/dle
+shellcheck -S warning -e SC2034 tests/harness/run.sh
+for f in .claude-plugin/*.json hooks/hooks.json .mcp.json templates/profile.example.json templates/examples/*.json; do
+  jq empty "$f" || exit 1
+done
+(
+  quality_home="$(mktemp -d)" || exit 1
+  trap 'rm -rf -- "$quality_home"' EXIT
+  env -u DLE_ROLE -u DLE_PROJECT -u DLE_LOOP DLE_HOME="$quality_home" DLE_SOCKET="$quality_home/engine.sock" npm test
+)
+```
+
+check:ci は format と lint の両方。shellcheck 不在は skip と記録し CI で確認します。
+socket/spawn が EPERM なら失敗テスト名・メッセージを残し、制限のない環境で全体を再実行します。
 
 ### 更新する
 

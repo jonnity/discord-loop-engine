@@ -306,7 +306,8 @@ async function cmdNotify(flags: Record<string, string | boolean>) {
 	}
 	const att = (r as { attention?: string }).attention;
 	console.error(`dle notify: 記録しました${att ? `（${att} を Discord に投稿）` : ""}`);
-	if (att) console.log(att);
+	if (flags.json) console.log(JSON.stringify(r));
+	else if (att) console.log(att);
 }
 
 async function cmdDoctor() {

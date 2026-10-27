@@ -115,7 +115,7 @@ test("W1/W2: 兄弟配置の祖先探索は偽Bot .envに届かず、登録名�
 	const env = {
 		...process.env,
 		CLAUDE_PROJECT_DIR: main,
-		HARNESS_CONFIG: "",
+		HARNESS_CONFIG: file,
 		DLE_HOME: `${home}/`,
 		DLE_PROJECT: "registered-p",
 	};
@@ -138,7 +138,11 @@ test("W1/W2: 兄弟配置の祖先探索は偽Bot .envに届かず、登録名�
 			assert.equal(ancestors.includes(main), false);
 		}
 		const scan = `const fs=require('node:fs'),p=require('node:path');const found=[];for(let d=process.cwd();;d=p.dirname(d)){if(d===process.argv[1]||d.startsWith(process.argv[1]+'/')){const f=p.join(d,'.env');if(fs.existsSync(f))found.push(fs.readFileSync(f,'utf8'));}if(d===p.dirname(d))break;}console.log(JSON.stringify(found));`;
-		const probe = (cwd: string) => spawnSync(process.execPath, ["-e", scan, dir], { cwd, env, encoding: "utf8" });
+		const probe = (cwd: string) => {
+			const result = spawnSync(process.execPath, ["-e", scan, dir], { cwd, env, encoding: "utf8" });
+			if (result.error) throw result.error;
+			return result;
+		};
 		assert.deepEqual(JSON.parse(probe(wt).stdout), []);
 		const control = path.join(home, "child");
 		mkdirSync(control);

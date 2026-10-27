@@ -13,8 +13,21 @@ export interface SendInput {
 	files?: string[];
 }
 
+export interface DiscordSentMessage {
+	id: string;
+	channel_id?: string;
+	attachments?: import("./notification-receipt.ts").DiscordAttachment[];
+}
+export interface DiscordChannel {
+	id: string;
+	type?: number;
+	name?: string | null;
+	guild_id?: string;
+}
+
 export interface DiscordApi {
-	sendMessage(channelId: string, input: SendInput): Promise<{ id: string }>;
+	channel(channelId: string): Promise<DiscordChannel>;
+	sendMessage(channelId: string, input: SendInput): Promise<DiscordSentMessage>;
 	editMessage(channelId: string, messageId: string, content: string): Promise<unknown>;
 	pin(channelId: string, messageId: string): Promise<unknown>;
 	react(channelId: string, messageId: string, emoji: string): Promise<unknown>;
@@ -68,19 +81,19 @@ export class Rest implements DiscordApi {
 		return res.status === 204 ? null : res.json();
 	}
 
-	sendMessage(channelId: string, { content, replyTo, files = [] }: SendInput): Promise<{ id: string }> {
+	sendMessage(channelId: string, { content, replyTo, files = [] }: SendInput): Promise<DiscordSentMessage> {
 		return this.enqueue(async () => {
 			const payload: Record<string, unknown> = { content, allowed_mentions: { parse: [] } };
 			if (replyTo) payload.message_reference = { message_id: replyTo, fail_if_not_exists: false };
 			if (files.length === 0) {
-				return (await this.request("POST", `/channels/${channelId}/messages`, { json: payload })) as { id: string };
+				return (await this.request("POST", `/channels/${channelId}/messages`, { json: payload })) as DiscordSentMessage;
 			}
 			const form = new FormData();
 			form.append("payload_json", JSON.stringify(payload));
 			for (const [i, file] of files.entries()) {
 				form.append(`files[${i}]`, new Blob([new Uint8Array(await readFile(file))]), path.basename(file));
 			}
-			return (await this.request("POST", `/channels/${channelId}/messages`, { form })) as { id: string };
+			return (await this.request("POST", `/channels/${channelId}/messages`, { form })) as DiscordSentMessage;
 		});
 	}
 
@@ -105,6 +118,6 @@ export class Rest implements DiscordApi {
 	}
 
 	channel(channelId: string) {
-		return this.request("GET", `/channels/${channelId}`) as Promise<{ id: string; name?: string }>;
+		return this.request("GET", `/channels/${channelId}`) as Promise<DiscordChannel>;
 	}
 }

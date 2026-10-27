@@ -23,7 +23,7 @@ function setup() {
 	const env = {
 		...process.env,
 		CLAUDE_PROJECT_DIR: main,
-		HARNESS_CONFIG: "",
+		HARNESS_CONFIG: file,
 		DLE_HOME: home,
 		DLE_SOCKET: path.join(home, "engine.sock"),
 		DLE_PROJECT: "test",
@@ -132,7 +132,8 @@ test("G1/G2/G3/G4: 各2コマンド・並行呼出しの環境、一時home、�
 		assert.match(r.stderr, /err:sentinel/);
 		for (const source of ["engine", "repo", "explicit"]) {
 			const p = { gate: [{ name: source, run: `echo ${source}` }] };
-			let extra = {};
+			// 設定探索そのものの試験だけ明示設定を外す。root/home/cwd は全て所有領域。
+			let extra = { HARNESS_CONFIG: "" };
 			if (source === "engine") h.put(p);
 			if (source === "repo") {
 				mkdirSync(path.join(h.main, ".claude"));
