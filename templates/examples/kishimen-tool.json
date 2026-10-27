@@ -3,7 +3,6 @@
 	"baseBranch": "main",
 	"owners": ["jonnity"],
 	"maxParallel": 3,
-	"worktreeRoot": ".worktrees",
 	"branchPrefix": "fix/issue-",
 	"mergeMethod": "merge",
 	"hooks": { "afterWorktree": ["npm ci"] },

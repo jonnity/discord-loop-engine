@@ -6,6 +6,8 @@ import { execFile } from "node:child_process";
 import path from "node:path";
 import { type ClaudeSession, contextReader, type TranscriptContext } from "./context.ts";
 
+import { withinDirectory } from "./worktrees.ts";
+
 const RESTART_WINDOW_MS = 10 * 60_000;
 const MAX_RESTARTS = 3;
 const REGISTER_TIMEOUT_MS = 3 * 60_000;
@@ -26,6 +28,7 @@ export interface RefreshResult {
 }
 
 export interface RefreshTarget {
+	worktreeRoot?: string;
 	prompt: string;
 	maxTokens: number;
 	maxEvents: number;
@@ -71,6 +74,7 @@ export function tmuxRunner(): Tmux {
 }
 
 export interface SessionTarget {
+	startupError?: string;
 	name: string; // "concierge" または プロジェクト名
 	cwd: string;
 	command: string; // シェルで実行する1行
@@ -130,6 +134,7 @@ export class Supervisor {
 	private o: Required<SupervisorOptions>;
 	private state = new Map<string, SlotState>();
 	private startedAt: number;
+	private startupErrors = new Map<string, string>();
 	private ticking = false;
 
 	constructor(opts: SupervisorOptions) {
@@ -202,6 +207,15 @@ export class Supervisor {
 		for (const session of new Set(targets.map((t) => this.sessionOf(t))))
 			bySession.set(session, await this.windows(session));
 		for (const t of targets) {
+			if (t.startupError) {
+				if (this.startupErrors.get(t.name) !== t.startupError) {
+					this.o.log(`supervisor: ${t.startupError}`);
+					this.o.notify(t.name, `🔴 ${t.startupError}`);
+					this.startupErrors.set(t.name, t.startupError);
+				}
+				continue;
+			}
+			this.startupErrors.delete(t.name);
 			const s = this.st(t.name);
 			const wins = bySession.get(this.sessionOf(t)) ?? null;
 			const exists = wins?.includes(windowName(t.name)) ?? false;
@@ -317,12 +331,9 @@ export class Supervisor {
 		for (const line of result.stdout.split("\n").filter(Boolean)) {
 			const [name, cwd, id] = line.split("\t");
 			if (!name || !cwd || !id) return true;
-			const relative = path.relative(r.cwd, cwd);
 			if (
 				!/^codex-(spec|impl)-/.test(name) ||
-				relative === ".." ||
-				relative.startsWith(`..${path.sep}`) ||
-				path.isAbsolute(relative)
+				!(withinDirectory(r.cwd, cwd) || (r.worktreeRoot && withinDirectory(r.worktreeRoot, cwd)))
 			)
 				continue;
 			const key = `${id}:${cwd}`;

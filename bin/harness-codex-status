@@ -10,7 +10,7 @@
 #       0=使える / 10=使えない。理由は stderr の先頭行に `reason=<not-installed|not-logged-in>`
 #   harness-codex-status status <window> [worktree]
 #       running | exited:<code> | exited:unknown | none を1行で出す
-#       worktree 省略時は window 名（codex-<spec|impl>-<n>）の n から <root>/<worktreeRoot>/issue-<n> を使う
+#       worktree 省略時は window 名（codex-<spec|impl>-<n>）の n から 解決済み worktreeRoot/issue-<n> を使う
 
 set -uo pipefail
 
@@ -33,10 +33,8 @@ do_check() {
 do_status() {
 	local window="$1" wt="${2:-}"
 	if [ -z "$wt" ]; then
-		local n="${window##*-}" root wroot
-		root="$("$SCRIPT_DIR/harness-config" --root 2>/dev/null || pwd)"
-		wroot="$("$SCRIPT_DIR/harness-config" '.worktreeRoot' .worktrees 2>/dev/null || echo .worktrees)"
-		wt="$root/$wroot/issue-$n"
+		local n="${window##*-}"
+		wt="$("$SCRIPT_DIR/harness-config" --worktree "$n")" || return 1
 	fi
 	local exitfile="$wt/.harness/$window.exit" idfile="$wt/.harness/$window.id" dead="" rows=""
 	# window 名では引かない: 別のセッション・別のプロジェクトに同名のウィンドウがあると取り違える。

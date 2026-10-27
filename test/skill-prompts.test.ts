@@ -2,7 +2,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -88,4 +88,112 @@ test("PR 前の gate 例は終了値を保持し、環境不備で後続を止�
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
 	}
+});
+
+test("W4: 実cycleのWT初期化と後続引数、loopのid走査とstatus/stop", async () => {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-skill-"));
+	const main = path.join(dir, "main");
+	mkdirSync(path.join(main, ".claude"), { recursive: true });
+	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+	const extract = (text: string, begin: string, end: string) => {
+		const a = text.indexOf(begin),
+			b = text.indexOf(end, a);
+		assert.ok(a >= 0 && b > a);
+		return text.slice(a, b).replaceAll("{n}", "9");
+	};
+	try {
+		const init = extract(skill, 'ROOT="$(harness-config --root)"', '\nmkdir -p "$WT/.harness/spec"');
+		const scan = extract(loop, "# CODEX_SCAN_BEGIN", "# CODEX_SCAN_END");
+		const after = skill
+			.split("\n")
+			.filter(
+				(l) =>
+					l.startsWith("harness-hook afterWorktree") ||
+					l.startsWith("harness-codex start ") ||
+					l.startsWith("harness-codex stop ") ||
+					l.startsWith('git -C "$(harness-config --root)" worktree remove'),
+			)
+			.join("\n")
+			.replaceAll("{n}", "9");
+		assert.ok(after.includes("afterWorktree") && after.includes("worktree remove"));
+		for (const root of [undefined, ".worktrees", "../relative space", path.join(dir, "absolute space")]) {
+			const expected = root === undefined ? `${dir}/home-worktrees/registered` : path.resolve(main, root);
+			writeFileSync(path.join(main, ".claude/harness.json"), JSON.stringify({ worktreeRoot: root }));
+			const env = {
+				...process.env,
+				PATH: `${path.resolve("bin")}:${process.env.PATH}`,
+				CLAUDE_PROJECT_DIR: main,
+				DLE_HOME: path.join(dir, "home"),
+				DLE_PROJECT: "registered",
+			};
+			const record = "node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- \"$@\"";
+			const r = await bash(
+				`harness-hook() { ${record}; }; harness-codex() { ${record}; }; git() { ${record}; };\n${init}\n${after}`,
+				env,
+			);
+			assert.equal(r.code, 0, r.stderr);
+			for (const row of r.stdout
+				.trim()
+				.split("\n")
+				.map((s) => JSON.parse(s))
+				.filter((r) => !r.includes("fetch")))
+				assert.equal(row.filter((x: string) => x === `${expected}/issue-9`).length, 1, JSON.stringify(row));
+			for (const n of [9, 10]) {
+				mkdirSync(`${expected}/issue-${n}/.harness`, { recursive: true });
+				writeFileSync(`${expected}/issue-${n}/.harness/codex-impl-${n}.id`, "@9");
+				mkdirSync(`${expected}/issue-${n}/.harness/impl`, { recursive: true });
+				writeFileSync(`${expected}/issue-${n}/.harness/impl/${n}.md`, "done");
+			}
+			const unrelated = path.join(dir, "unrelated/issue-11/.harness");
+			mkdirSync(unrelated, { recursive: true });
+			writeFileSync(path.join(unrelated, "codex-impl-11.id"), "@11");
+			const r2 = await bash(
+				`harness-codex-status() { echo exited:0; ${record} >&2; }; harness-codex() { ${record}; };\n${scan}`,
+				env,
+			);
+			assert.equal(r2.code, 0, r2.stderr);
+			for (const stream of [r2.stdout, r2.stderr]) {
+				const rows = stream
+					.trim()
+					.split("\n")
+					.filter(Boolean)
+					.map((s) => JSON.parse(s));
+				assert.equal(rows.length, 2);
+				assert.deepEqual(rows.map((r) => r.at(-1)).sort(), [`${expected}/issue-10`, `${expected}/issue-9`]);
+			}
+		}
+		const r = await bash(
+			`harness-config() { return 1; }; harness-codex-status() { echo forbidden; }; harness-codex() { echo forbidden; };\n${scan}\necho forbidden`,
+			process.env,
+		);
+		assert.notEqual(r.code, 0);
+		assert.equal(r.stdout, "");
+		const bad = await bash(`harness-config() { return 1; };\n${init}\necho forbidden`, process.env);
+		assert.notEqual(bad.code, 0);
+		assert.equal(bad.stdout, "");
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("D1/E2: 恒久文書に移行・許可・隔離の境界と確認先が残る", () => {
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	const onboard = readFileSync(new URL("../skills/onboard/SKILL.md", import.meta.url), "utf8");
+	for (const doc of [readme, onboard]) {
+		for (const term of [
+			"DLE_PROJECT",
+			"--add-dir",
+			"profile_propose",
+			"profile_activate",
+			"beforePR",
+			"HARNESS_CONFIG",
+			"SIGKILL",
+			"symlink",
+			"完全な profile",
+		])
+			assert.ok(doc.includes(term), term);
+		assert.doesNotMatch(doc, /\.harness\/(?:spec\/9|spec-review|issue-9)/);
+	}
+	for (const id of ["G1〜G6", "W1/W2", "W3", "W4", "W5", "W6", "W8"]) assert.ok(readme.includes(id), id);
+	assert.match(onboard, /GIT_AUTHOR_|git.*作者|作者.*git/);
 });

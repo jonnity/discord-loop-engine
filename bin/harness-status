@@ -11,6 +11,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
 ROOT="$("$SCRIPT_DIR/harness-config" --root)"
+WROOT="$("$SCRIPT_DIR/harness-config" --worktree-root)" || exit 1
 PROJECT="$(cfg '.project')"
 
 echo "=== discord-loop-engine: ${PROJECT:-$(basename "$ROOT")} ==="
@@ -27,7 +28,7 @@ echo "[tmux codex windows]"
 # このプロジェクトの worktree にある id ファイル（harness-codex start が保存）から数える。
 # tmux 全体の名前一覧は、別プロジェクトの同名ウィンドウを拾い、終了済み（remain-on-exit）も区別できない
 found=0
-for idf in "$ROOT/$(cfg '.worktreeRoot' | grep . || echo .worktrees)"/issue-*/.harness/codex-*.id; do
+for idf in "$WROOT"/issue-*/.harness/codex-*.id; do
 	[ -f "$idf" ] || continue
 	window="$(basename "$idf" .id)"
 	echo "  $window: $("$SCRIPT_DIR/harness-codex-status" status "$window" "$(dirname "$(dirname "$idf")")")"

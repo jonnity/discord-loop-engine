@@ -39,15 +39,60 @@ if [ -z "$count" ] || [ "$count" = 0 ]; then
 	exit 2
 fi
 
-results=()
+# 子が環境や設定を変えても、定義と hook の有無は親が先に確定する。
 preflight_count="$(jq '(.preflight // []) | length' "$CONFIG")"
+hook_count="$(jq '(.hooks.beforePR // []) | length' "$CONFIG" 2>/dev/null || echo 0)"
+pre_names=()
+pre_runs=()
+gate_names=()
+gate_runs=()
 for ((i = 0; i < preflight_count; i++)); do
-	name="$(jq -r ".preflight[$i].name" "$CONFIG")"
-	run="$(jq -r ".preflight[$i].run" "$CONFIG")"
+	pre_names+=("$(jq -r ".preflight[$i].name" "$CONFIG")")
+	pre_runs+=("$(jq -r ".preflight[$i].run" "$CONFIG")")
+done
+for ((i = 0; i < count; i++)); do
+	gate_names+=("$(jq -r ".gate[$i].name" "$CONFIG")")
+	gate_runs+=("$(jq -r ".gate[$i].run" "$CONFIG")")
+done
+
+gate_tmp=""
+cleanup() { [ -z "$gate_tmp" ] || rm -rf -- "$gate_tmp"; }
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! gate_tmp="$(mktemp -d)" || [ -z "$gate_tmp" ] || [ ! -d "$gate_tmp" ]; then
+	echo "harness-gate: 隔離用の一時領域を準備できません（exit 3）" >&2
+	exit 3
+fi
+isolation_failed=0
+run_isolated() {
+	local command_home rc=0
+	if ! command_home="$(mktemp -d "$gate_tmp/command.XXXXXX")" || [ -z "$command_home" ] || [ ! -d "$command_home" ]; then
+		echo "harness-gate: 隔離用の一時領域を準備できません（exit 3）" >&2
+		isolation_failed=1
+		return 1
+	fi
+	(
+		while IFS= read -r key; do
+			case "$key" in DLE_*|DISCORD_*) unset -v "$key" ;; esac
+		done < <(compgen -e)
+		export DLE_HOME="$command_home" DLE_SOCKET="$command_home/engine.sock"
+		bash -c "$1"
+	) || rc=$?
+	rm -rf -- "$command_home"
+	return "$rc"
+}
+
+results=()
+for ((i = 0; i < preflight_count; i++)); do
+	name="${pre_names[$i]}"
+	run="${pre_runs[$i]}"
 	echo "=== [preflight: $name] $run" >&2
-	if bash -c "$run"; then
+	if run_isolated "$run"; then
 		results+=("✅ preflight: $name")
 	else
+		[ "$isolation_failed" = 0 ] || exit 3
 		results+=("❌ preflight: $name")
 		printf '%s\n' "${results[@]}" >&2
 		echo "harness-gate: 環境確認に失敗しました。環境を整えて再実行してください（exit 3）" >&2
@@ -56,19 +101,20 @@ for ((i = 0; i < preflight_count; i++)); do
 done
 failed=0
 for i in $(seq 0 $((count - 1))); do
-	name="$(jq -r ".gate[$i].name" "$CONFIG")"
-	run="$(jq -r ".gate[$i].run" "$CONFIG")"
+	name="${gate_names[$i]}"
+	run="${gate_runs[$i]}"
 	echo "=== [$name] $run" >&2
 	start=$(date +%s)
-	if bash -c "$run"; then
+	if run_isolated "$run"; then
 		results+=("✅ $name ($(($(date +%s) - start))s)")
 	else
+		[ "$isolation_failed" = 0 ] || exit 3
 		results+=("❌ $name ($(($(date +%s) - start))s)  ← $run")
 		failed=1
 	fi
 done
 
-if [ "$(jq '(.hooks.beforePR // []) | length' "$CONFIG" 2>/dev/null || echo 0)" != 0 ]; then
+if [ "$hook_count" != 0 ]; then
 	start=$(date +%s)
 	if "$SCRIPT_DIR/harness-hook" beforePR --dir "$DIR"; then
 		results+=("✅ hooks.beforePR ($(($(date +%s) - start))s)")
