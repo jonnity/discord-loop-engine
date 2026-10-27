@@ -39,7 +39,7 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 | `harness-issue-md <n>` | Issue 本文＋コメントを設計の入力用 Markdown にして出力する |
 | `harness-codex-status check` / `status <window>` | Codex が使えるか・ウィンドウの状態（読み取り専用。確認なしで通る） |
 | `harness-codex start <window> <worktree> <prompt-file>` | Codex を tmux で起動する（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**） |
-| `harness-merge <n> [--chat-approval "<引用>"]` | 承認・CI・mergeable を確認してマージ → done |
+| `harness-merge <n> [--chat-approval "<引用>" --attention <回答先A-id>]` | 承認・CI・mergeable を確認してマージ → done |
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
 | `harness-status` | 読み取り専用の状況一覧 |
 
@@ -102,12 +102,18 @@ closed なのに `harness:*` ラベルが残っている Issue（GitHub 画面�
 - `answer`（interview への回答）→ Phase 1 の続き
 - `merge-ok` → Phase 6 OK
 - `merge-ng` / awaiting-merge 中の `answer` → Phase 6 NG
-- `stale-notify` / `missing-notify` → 承認依頼をやり直す（Phase 5 の「承認依頼」を現 head で再実行）
+- `stale-notify` / `missing-notify` → 現 head で承認依頼をやり直す。ただし最新が自分の失敗した依頼の pending なら、5-4 の失敗の仕分けに従う。原因を直せたときだけ再実行し、直せなければ blocked にする。tick ごとの無条件再送をしない。
 
 ## Phase 1: 要件確認（非ブロッキング）
 
 **省略しない**。Issue と `context` のファイルを読み、実装前に決めるべき仕様・UX の選択肢・影響範囲を
 1〜3点の質問にする。受け入れ条件が書かれていなければ、それも質問に含める。
+
+demo が設定されていて UI・操作に関わる変更、または動画利用が明示された案件では、
+「動画で見せる範囲（どこからどこまで）」を質問に含める。実アプリに合わせて具体案を出し、
+開始状態・操作順・終了状態・含めないものの4項目を要件メモへ記録する。決定済みなら回答を引用する。
+未実装/見せる操作がない場合は、映せる状態と動かない理由も決める。範囲が未決なら Phase 1 で解決し、
+設計で「最小」「実装者判断」に委ねない。demo=null/UI 非変更の全案件には録画を強制しない。
 
 ```bash
 harness-phase {n} interview --comment-file /tmp/harness-q-{n}.md \
@@ -201,6 +207,8 @@ cat >> "$WT/.harness/prompt-spec-{n}.md" <<'CHECKLIST'
   自動では確認できない humanChecks、未確認の前提を明記する。
 
 該当するときだけの項目（非該当なら理由を書く）:
+- 動画利用時は要件メモの開始状態・操作順・終了状態・含めないものを、設計シナリオ・試験・humanChecks に
+  全て対応させる。未決範囲は Phase 1 へ戻し、「最小」「実装者判断」で確定しない。
 - リポジトリに憲章・規約のレビューゲートがある場合は、そのファイルと該当節を挙げ、節ごとに満たす確認を
   自動テストまたは humanChecks に対応付ける。
 - 設定ファイルを変える Issue では、スキーマ検証に加え、要件で指定された値を期待値との assert で確かめる。
@@ -341,9 +349,11 @@ cat > "$WT/.harness/prompt-impl-{n}.md" <<EOF
 自動では確認できない点）を書いてください。
 （demo がある場合）UI や操作に関わる変更なら $(harness-config '.demo.spec') を作成し
 $(harness-config '.demo.run') で pass させ、動画が $(harness-config '.demo.output') に 0 バイトでなく
-出ていることを確認して、そのパスをサマリに書いてください。
-Issue と無関係なファイルの差分（フォーマッタの巻き込み等）は git checkout HEAD -- <file> で戻すこと。
-git add / commit / push はしないこと。
+出ていることを確認してください。動画利用時は要件メモの開始状態・操作順・終了状態・含めないものを
+録画シナリオへ全て対応させ、独断で短縮しない。設計不足なら差し戻してください。
+合意項目・録画時headのfull SHA・動画パス・未実装制限の対応をサマリに書いてください。
+Issue と無関係な差分は元の内容に戻し、戻せなければサマリで worker へ報告してください。
+Codex は git add/commit/push/checkout/stash 等の git 操作をしないこと。
 EOF
 harness-codex start "codex-impl-{n}" "$WT" "$WT/.harness/prompt-impl-{n}.md"   # 10 なら「フォールバック」節へ
 sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-impl-{n}.id")" -p -S -30 | grep "workdir:"
@@ -370,9 +380,12 @@ gate の列・順序と終了値、新規テストの探索/除外/呼び出し�
 
 ### 5-2. 実動作の確認（UI 変更のとき）
 
-`demo.output` の動画・スクショが存在し 0 バイトでないことを確認し、**サブエージェントに**受け入れ条件と
+`demo.output` の動画・スクショが存在し 0 バイトでないことを確認し、**サブエージェントに**受け入れ条件および要件メモの開始状態・操作順・終了状態・含めないものと
 突き合わせさせて ✅/❌ を判定する。送る動画は**実アプリを実際に操作した録画**に限る（DOM 差し込み・
-モック・加工で「それらしい」証跡を作らない）。❌ なら Codex に差し戻す。
+モック・加工で「それらしい」証跡を作らない）。途中操作欠落・範囲外の無断追加も ❌ とし、Codex に差し戻して修正/再録画を依頼する。
+サマリの録画時 full SHA と PR の現 head を照合し、**動画を撮ったhead＝現head** を確かめる。
+違う/撮影head不明なら撮り直す。5-3 のコミット後、5-4 直前と完成後にも完成markerの full SHA と照合する。
+ファイルの SHA-256 一致だけでは撮影headを証明できない（README の H3）。
 はみ出し・表示崩れの修正では、設計で列挙した対象のボタン名・要素 × 状態 × viewport（幅・高さ）ごとに、
 実アプリの動画・スクショを期待結果と照合する。
 
@@ -413,42 +426,70 @@ REAL 3回より優先する。失敗しているチェック・実ログの根�
 
 ### 5-4. 承認依頼（必ず harness-phase で）
 
-UI 変更では現 head の実アプリの動画を `--file` に指定する。動画の検査・必要時 H.264 MP4 への変換と
-添付位置の追記は harness-phase が行う。UI 非変更や demo=null の案件に一律に録画を強制しない。
-変換に時間がかかるため、Bash ツールの timeout は既定120秒から延ばす（例: 600000 ms。長さに応じて調整）。
-終了値を保存し、0 のときだけ承認依頼済みと扱う。
+動画を使う場合、合意した範囲を映した現 head の実アプリの録画を `--file` に指定する。
+UI 非変更や demo=null の全案件には録画を強制しない。長い変換には Bash timeout を延ばす（例600000 ms）。
+サマリの録画時 full SHA・PR 現 head・完成markerを直前/完成後に照合し、違う/不明なら撮り直す。
 
 ```bash
-harness-phase {n} awaiting-merge --pr <PR番号> --comment-file /tmp/harness-merge-{n}.md \
+(cd "$WT" && harness-phase {n} awaiting-merge --pr <PR番号> --comment-file /tmp/harness-merge-{n}.md \
   --summary "判定 ✅ / 受け入れ条件 1✅ 2✅ / 要実機確認 1件" \
-  --file "<demo の mp4（UI 変更時・現 head で撮ったもの）>"
+  --file "<合意範囲を現 head で録画した mp4>")
 ```
 
-終了6なら stderr の不足ツール名・失敗段階と必要な対応（FFmpeg 導入・再録画・短縮等）を、
-秘密を含めず別の本文ファイルにまとめ、`harness-phase {n} blocked --comment-file ...` で通知する。
-動画準備に失敗した awaiting-merge 自体は投稿しない。blocked の通知失敗も成功扱いせず原因を解消して再実行する。
-6以外の非0も仕分ける: 2は引数/設定、4は通知、5はラベルの問題を解消して同じ head で再実行する。
-143/137等の中断・timeout は残存プロセスと一時ファイルを確認し、timeout を延ばして再実行できるか判断する。
-自動解消できなければ blocked で対応を依頼する。対応後に動画準備から承認依頼をやり直す。
+依頼とマージは対象の同じ worktree を cwd にして実行する。復旧未確認の状態ファイルもそこに置かれる。
+動画なしは `--file` を省く。終了値を保存し、**0 だけ**承認依頼済みと扱う。
+処理は静的通知先検査→merge-ok 取消し/他 phase ラベル除去/追跡 awaiting 確認→仮コメント pending→
+必須通知→添付の再取得・bytes/SHA-256 照合→同 ID のリンク/A 入り完成 PATCH→merge-ok 再取消し/最終ラベル確認。
+PR 本文には「添付」だけで済ませず、harness-phase が生成する Discord メッセージリンクを使う。
+動画は Discord 保管、長文なら最後の投稿。署名付き CDN URL は PR に残さない。
+容量は notify.maxAttachMB の正整数 MiB（既定10）。上限内でも Discord の制限/権限で失敗し得る。
+短縮/再録画で対処し、本文だけへ降格しない。専用置き場ブランチは作らず main 履歴へ動画を追加しない。
+過去 head・再実行・マージ後も自動削除しない。手動削除は人が Discord 上で判断し、削除すれば PR リンクは切れる。
+詳細な保管/復旧/実機確認は [README](../../README.md#承認依頼の動画) の H1〜H5 に従う。
 
-コメント本文（PR に載る。Discord のリンク先はこのコメント）には次を書く:
+harness:merge-ok は動画なしも再依頼の開始時/完了時に外れる。処理中に付けたものも外れるので、
+新しい依頼の完了を確認してから承認し直す。awaiting-merge だけを追跡用に残し、ラベルだけで完了を判断しない。
+承認依頼は required=false でも動画なしを含め通知必須にする。GitHub コメント・Discord 通知・ラベルの
+人間ゲートを揃える安全柵強化のため。通常 info 等の skip は維持する。
 
-```
+失敗の仕分け:
+- 2: 引数/設定/雛形の未置換、6: ffprobe/ffmpeg/入力/容量。外部副作用前に止まる。道具導入・再録画等を行う。
+- 4: 通知、7: 投稿後の A/リンク/再取得照合/head/完成 PATCH、5: ラベル確認。最新 pending は inbox が missing-notify として返す。
+  最新が自分の失敗した依頼の pending なら、原因を直せたときだけ再実行し、直せなければ blocked にする。
+  失敗 A は取下げ保証なし。OK を返しても未完了依頼はマージできない。A の偽回答や台帳編集で取り下げない。
+- 完成後の失敗では merge-ok 除去・awaiting 維持/復元・同コメントの pending 化を試す。
+  通信断等で復旧未確認なら worktree 内の git 管理外状態ファイルに残り harness-merge が拒否する。
+  通信回復後も再読取り・全手順の成功までマージしない。再依頼が成功したとき状態ファイルが消える。
+- 中断/timeout: 所有 PID/PGID・送信結果・一時ファイルを確認。TERM 無視の子も回収し、共有 engine を停止しない。
+  SIGKILL/親の無信号終了は trap 保証なし。残存子を止めてから所有一時領域だけ回収する。
+
+自動解消できなければ失敗段階・必要な対応を秘密なしで別本文にまとめ、`harness-phase {n} blocked --comment-file ...`。
+blocked 通知失敗も成功にしない。原因解消後は動画準備から新コメント・新通知・新 A で再依頼し、旧 receipt/A を流用しない。
+
+コメント雛形（動画欄は自動生成。入力に架空 URL を書かない）:
+
+```text
+【動きのない動画の場合だけ、この最初の行に理由を記入: 未実装/見せる操作がない具体的理由】
 ## マージ承認のお願い（#{n} {タイトル}）
+- 動画で見せる範囲: {開始状態→操作順→終了状態、含めないもの}
 - 判定: ✅ 完了 / 受け入れ条件: 1. ✅ … 2. ✅ …
 - レビュー: 敵対的検証 OK（壊せなかった点: …）
 - ゲート: harness-gate 全 ✅ / CI green
-- 人間に確認してほしいこと（humanChecks）: - [ ] …
+- 人間に確認してほしいこと（humanChecks）: …（普通の箇条書きで結果/未確認を記す）
 - 変更概要: …
 
 マージしてよければこの PR に「OK」とコメント（または Approve / Issue に harness:merge-ok ラベル）、
 直してほしい点があれば「NG: 〜」とコメントしてください。
+完成コメントを編集すると、それより前の OK/Approve は数えないため、編集後に再回答してください。
 ```
 
-- `--file` に付ける動画は**現在の head で撮ったもの**だけ。差し戻し・rebase 後に再依頼するときは撮り直す。
-- 依頼後に head が進むと `harness-inbox` が `stale-notify` を返す。そのときは現 head で同じ手順を
-  やり直す（承認依頼コメントに sha が埋め込まれているので、送ったかどうかを記憶に頼らない）。
-- チャットで依頼内容を伝えるのは自由だが、**依頼の正本はこのコメントと Discord 通知**。
+動く動画なら条件行を削除、動かない場合は「理由: …」へ置換して見出し前の最初の行に置く。
+--summary も理由を先頭に置く。省略時は本文冒頭から自動要約。動画なしは範囲欄も省く。
+固定文字列 `【動きのない動画の場合だけ` が残れば終了2。内容の真偽は人が照合する。
+GitHub OK は完成 PATCH の updated_at より厳密に後だけ（同秒なら再回答）、Approve は現 head の commit_id も必須。
+NG/CHANGES_REQUESTED は仮 POST の created_at 以後から保持し、途中の NG を完成前 OK で消さない。
+attention 属性のない旧 gate は全承認経路で再依頼が必要。依頼後の head 変更も現 head で再依頼する。
+チャットで伝える場合も依頼の正本はこのコメントと Discord 通知。
 
 ## Phase 6: 結果処理
 
@@ -457,14 +498,20 @@ harness-phase {n} awaiting-merge --pr <PR番号> --comment-file /tmp/harness-mer
 ```bash
 git -C "$WT" fetch origin && git -C "$WT" merge "origin/$(harness-config '.baseBranch' main)"   # base が進んでいれば
 # 衝突したコードの解消は Codex に依頼（`harness-codex start`）。push 後は CI green を待ち、head が変わったので承認依頼をやり直す
-harness-merge {n}                                   # PR 上の承認
-harness-merge {n} --chat-approval "<ユーザーの発言>"  # チャットでの承認
+(cd "$WT" && harness-merge {n}) || exit 1             # PR 上の承認
+(cd "$WT" && harness-merge {n} --chat-approval "<回答本文>" --attention "<回答のmeta.attention>") || exit 1  # engine の回答だけ
 harness-codex stop codex-impl-{n} "$WT"   # worktree を消す前に（消した後は id を読めない）
 git -C "$(harness-config --root)" worktree remove "$WT"
 ```
 
 `harness-merge` が承認・head の一致・CI・mergeable を確認し、マージ後に `done`（ラベル除去）まで行う。
-拒否されたら理由に従って直す（迂回しない）。「🔵 マージ完了」の Discord 通知は、`done` の報告を受けた
+最新完成marker・ラベル・現 head・回答先 A の一致が全承認経路で必須。meta.attention 欠落は推測しない。
+webhook は GitHub 承認だけ。engine なしで単独利用する issue-cycle ではチャット承認を利用できない。
+旧 A/A なし/pending 等で拒否されたら harness-notify の info で理由・現在の依頼先PRコメントURL・
+完成内容を確認して回答する必要を伝える（未完了なら復旧待ち）。現在のA は表示せず、同じ OK の付け替えをしない。
+URL が診断に無ければ認証 login の最新依頼を同じ規則で読み、取得不能ならその旨と既知 PR URL を案内する。
+info の通知失敗も記録する。CI/mergeable/hook だけが理由で同じ依頼/head なら、同じ --attention と引用での再試行は可能。
+新 head/新依頼には新回答が必要。拒否理由に従って直す（迂回しない）。「🔵 マージ完了」の Discord 通知は、`done` の報告を受けた
 engine が出すので、ここでは送らない。
 
 **人間が GitHub の画面から直接マージした場合**: Issue は `closes #{n}` で閉じるが、ラベルと worktree が残る。

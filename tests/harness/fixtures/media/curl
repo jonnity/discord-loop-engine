@@ -1,14 +1,41 @@
 #!/usr/bin/env bash
-# 添付が送信時に存在することと multipart 本文を検証する。
-echo notify >> "$MEDIA_LOG"
-printf '%s\n' "$@" > "$CURL_ARGS"
+# POST/GETの実応答bodyを -o 先へ保存し、通信自体は行わない。
+set -eu
+output="" previous="" file=""
 for arg in "$@"; do
-	if [[ "$arg" = 'files[0]=@'* ]]; then
-		file="${arg#*@}"
-		[ -f "$file" ] && [ -s "$file" ] || exit 1
-		printf '%s' "$file" > "$SENT_FILE"
-		cp "$file" "$SENT_COPY"
-	fi
+ [ "$previous" != -o ] || output="$arg"
+ previous="$arg"
+ if [[ "$arg" = 'files[0]=@'* ]]; then file="${arg#*@}"; fi
 done
-[ "${CURL_FAIL:-0}" = 1 ] && exit 22
-printf 200
+if [[ "${!#}" = *wait=true* ]]; then
+ echo notify >> "$MEDIA_LOG"
+ printf '%s\n' "$@" > "$CURL_ARGS"
+ if [ -n "$file" ]; then
+  [ -s "$file" ] || exit 1
+  printf '%s' "$file" > "$SENT_FILE"
+  cp "$file" "$SENT_COPY"
+ fi
+ [ "${CURL_FAIL:-0}" != 1 ] || exit 22
+ attachments='[]'
+ if [ -n "$file" ]; then attachments="$(jq -nc --arg name "$(basename "$file")" --argjson size "$(wc -c <"$file")" '[{id:"111",filename:$name,size:$size,url:"https://cdn.discordapp.com/attachments/456/111/demo.mp4?signature=secret"}]')"; fi
+ jq -nc --argjson attachments "$attachments" '{id:"789",channel_id:"456",attachments:$attachments}' > "$output"
+ if [ "${INJECT_MERGE_OK:-0}" = 1 ] && [ -f "$(dirname "$MEDIA_LOG")/gh-state.json" ]; then
+  state="$(dirname "$MEDIA_LOG")/gh-state.json"
+  jq '.labels += ["harness:merge-ok"]' "$state" > "$state.tmp"
+  mv "$state.tmp" "$state"
+ fi
+ case "${CURL_MODE:-}" in
+ empty) : > "$output"; printf 200 ;;
+ invalid-json) echo broken > "$output"; printf 200 ;;
+ 204) : > "$output"; printf 204 ;;
+ wrong-channel) jq '.channel_id="999"' "$output" > "$output.tmp"; mv "$output.tmp" "$output"; printf 200 ;;
+ no-attachments) jq '.attachments=[]' "$output" > "$output.tmp"; mv "$output.tmp" "$output"; printf 200 ;;
+ *) printf 200 ;;
+ esac
+else
+ case "${CURL_MODE:-}" in
+ guild-missing) echo '{"id":"123","channel_id":"456"}' > "$output" ;;
+ parent-missing) echo '{"id":"123","guild_id":"900"}' > "$output" ;;
+ *) echo '{"id":"123","guild_id":"900","channel_id":"456"}' > "$output" ;;
+ esac
+fi

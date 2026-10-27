@@ -28,8 +28,9 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
 
-EVENT="" TITLE="" URL="" ISSUE="" PR="" BODY="" FILE="" PROJECT="" REPO="" DRY_RUN=0
+EVENT="" TITLE="" URL="" ISSUE="" PR="" BODY="" FILE="" PROJECT="" REPO="" DRY_RUN=0 JSON=0 CHECK_TARGET=0 SEEN_FILE=0
 while [ $# -gt 0 ]; do
+	case "$1" in --event|--title|--url|--issue|--pr|--body|--file|--project|--repo) [ $# -ge 2 ] || exit 2 ;; esac
 	case "$1" in
 	--event) EVENT="$2"; shift 2 ;;
 	--title) TITLE="$2"; shift 2 ;;
@@ -37,10 +38,12 @@ while [ $# -gt 0 ]; do
 	--issue) ISSUE="$2"; shift 2 ;;
 	--pr) PR="$2"; shift 2 ;;
 	--body) BODY="$2"; shift 2 ;;
-	--file) FILE="$2"; shift 2 ;;
+	--file) SEEN_FILE=1; FILE="$2"; shift 2 ;;
 	--project) PROJECT="$2"; shift 2 ;;
 	--repo) REPO="$2"; shift 2 ;;
 	--dry-run) DRY_RUN=1; shift ;;
+	--json) JSON=1; shift ;;
+	--check-target) CHECK_TARGET=1; shift ;;
 	*)
 		echo "harness-notify: 不明な引数 $1" >&2
 		exit 2
@@ -62,7 +65,10 @@ info) LABEL="お知らせ"; ICON="ℹ️"; COLOR=10070709; ACTION=0 ;;
 	;;
 esac
 
-if [ -z "$TITLE" ] || [ -z "$URL" ]; then
+if { [ "$JSON" = 1 ] && [ "$DRY_RUN" = 1 ]; } || { [ "$CHECK_TARGET" = 1 ] && { [ "$JSON" = 1 ] || [ "$DRY_RUN" = 1 ] || [ "$SEEN_FILE" = 1 ]; }; }; then
+	exit 2
+fi
+if [ "$CHECK_TARGET" = 0 ] && { [ -z "$TITLE" ] || [ -z "$URL" ]; }; then
 	echo "harness-notify: --title と --url は必須です（リンク無しの通知は送らない）" >&2
 	exit 2
 fi
@@ -70,13 +76,6 @@ fi
 # --- プロジェクト識別 ---------------------------------------------------------
 if [ -z "$REPO" ]; then
 	REPO="$(cfg '.repo')"
-fi
-if [ -z "$REPO" ]; then
-	# origin が https / ssh / ローカルプロキシのいずれでも末尾2セグメントが owner/repo になる。
-	remote="$(git remote get-url origin 2>/dev/null || true)"
-	remote="${remote%.git}"
-	remote="${remote#*:}"
-	REPO="$(printf '%s' "$remote" | awk -F/ 'NF>=2 {print $(NF-1)"/"$NF}')"
 fi
 if [ -z "$PROJECT" ]; then
 	PROJECT="$(cfg '.project')"
@@ -91,6 +90,67 @@ ISSUE_URL="" PR_URL=""
 [ -n "$PR" ] && [ -n "$REPO_URL" ] && PR_URL="$REPO_URL/pull/$PR"
 
 HEADLINE="$ICON $LABEL｜${ISSUE:+#$ISSUE }$TITLE"
+
+# 設定の不正は通知先の検査でも通常送信でも同じように拒否する。
+config_path="$("$SCRIPT_DIR/harness-config" --path)"
+if [ -f "$config_path" ] && ! jq -e 'type == "object"' "$config_path" >/dev/null 2>&1; then
+	echo "harness-notify: 設定が不正です" >&2; exit 2
+fi
+umask 077
+notify_tmp="$(mktemp -d)"
+notify_pid=""
+cleanup() {
+	if [ -n "$notify_pid" ]; then
+		kill -TERM "$notify_pid" 2>/dev/null || true
+		for ((i=0;i<20;i++)); do kill -0 "$notify_pid" 2>/dev/null || break; sleep 0.05; done
+		kill -KILL "$notify_pid" 2>/dev/null || true
+		wait "$notify_pid" 2>/dev/null || true
+	fi
+	rm -rf -- "$notify_tmp"
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+run_child() { "$@" & notify_pid=$!; local rc=0; wait "$notify_pid" || rc=$?; notify_pid=""; return "$rc"; }
+# --- webhook URL の解決 -------------------------------------------------------
+WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
+if [ -z "$WEBHOOK_URL" ]; then
+	ROOT="$("$SCRIPT_DIR/harness-config" --root 2>/dev/null || pwd)"
+	env_files="$(cfg '.notify.envFiles[]?')"
+	[ -z "$env_files" ] && env_files=".env"
+	while IFS= read -r rel; do
+		[ -z "$rel" ] && continue
+		f="$ROOT/$rel"
+		[ -f "$f" ] || continue
+		line="$(grep -E '^[[:space:]]*DISCORD_WEBHOOK_URL[[:space:]]*=' "$f" | tail -n 1 || true)"
+		if [ -n "$line" ]; then
+			WEBHOOK_URL="${line#*=}"
+			WEBHOOK_URL="${WEBHOOK_URL//[[:space:]]/}"
+			WEBHOOK_URL="${WEBHOOK_URL%\"}"
+			WEBHOOK_URL="${WEBHOOK_URL#\"}"
+			WEBHOOK_URL="${WEBHOOK_URL%\'}"
+			WEBHOOK_URL="${WEBHOOK_URL#\'}"
+			break
+		fi
+	done <<<"$env_files"
+fi
+
+
+DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
+engine=false webhook=false
+if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then engine=true; fi
+if [ -n "$WEBHOOK_URL" ]; then
+	if ! node "$SCRIPT_DIR/../src/notification-receipt.ts" target "$WEBHOOK_URL" > "$notify_tmp/target.json" 2>/dev/null; then
+		echo "harness-notify: webhook URL が不正です" >&2; exit 2
+	fi
+	webhook=true
+fi
+if [ "$CHECK_TARGET" = 1 ]; then
+	jq -nc --argjson engine "$engine" --argjson webhook "$webhook" '{available:($engine or $webhook),engine:$engine,webhook:$webhook}'
+	[ "$engine" = true ] || [ "$webhook" = true ] || exit 3
+	exit 0
+fi
 
 # 明示された承認動画は、どの通知経路でも黙って省略しない。
 required_attach=0
@@ -120,11 +180,15 @@ if [ "$DRY_RUN" = 0 ] && [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
 	[ -n "$PR" ] && dle_args+=(--pr "$PR")
 	[ -n "$BODY" ] && dle_args+=(--body "$BODY")
 	[ -n "$FILE" ] && dle_args+=(--file "$FILE")
+	[ "$JSON" = 0 ] || dle_args+=(--json)
 	set +e
-	"$SCRIPT_DIR/dle" "${dle_args[@]}" >/dev/null
+	run_child "$SCRIPT_DIR/dle" "${dle_args[@]}" >"$notify_tmp/engine.json"
 	rc=$?
 	set -e
 	if [ "$rc" = 0 ]; then
+		if [ "$JSON" = 1 ]; then
+			if ! jq -ce 'if type == "object" then . + {status:"posted",source:"engine"} else error("result") end' "$notify_tmp/engine.json"; then exit 4; fi
+		fi
 		echo "harness-notify: engine 経由で Discord へ投稿しました（[$PROJECT] $LABEL）。" >&2
 		exit 0
 	fi
@@ -188,38 +252,13 @@ if [ "$DRY_RUN" = 1 ]; then
 	exit 0
 fi
 
-# --- webhook URL の解決 -------------------------------------------------------
-WEBHOOK_URL="${DISCORD_WEBHOOK_URL:-}"
-if [ -z "$WEBHOOK_URL" ]; then
-	ROOT="$("$SCRIPT_DIR/harness-config" --root 2>/dev/null || pwd)"
-	env_files="$(cfg '.notify.envFiles[]?')"
-	[ -z "$env_files" ] && env_files=".env"
-	while IFS= read -r rel; do
-		[ -z "$rel" ] && continue
-		f="$ROOT/$rel"
-		[ -f "$f" ] || continue
-		line="$(grep -E '^[[:space:]]*DISCORD_WEBHOOK_URL[[:space:]]*=' "$f" | tail -n 1 || true)"
-		if [ -n "$line" ]; then
-			WEBHOOK_URL="${line#*=}"
-			WEBHOOK_URL="${WEBHOOK_URL//[[:space:]]/}"
-			WEBHOOK_URL="${WEBHOOK_URL%\"}"
-			WEBHOOK_URL="${WEBHOOK_URL#\"}"
-			WEBHOOK_URL="${WEBHOOK_URL%\'}"
-			WEBHOOK_URL="${WEBHOOK_URL#\'}"
-			break
-		fi
-	done <<<"$env_files"
-fi
-
 if [ -z "$WEBHOOK_URL" ]; then
 	required="$(cfg '.notify.required')"
-	if [ "$required" = "false" ] && [ "$required_attach" = 0 ]; then
-		echo "harness-notify: DISCORD_WEBHOOK_URL 未設定のため skip（notify.required=false）" >&2
+	if [ "$required" = false ] && [ "$EVENT" != merge-request ]; then
+		[ "$JSON" = 0 ] || echo '{"status":"skipped"}'
 		exit 0
 	fi
-	echo "harness-notify: DISCORD_WEBHOOK_URL が未設定です。通知は必須のため失敗扱いにします（exit 3）。" >&2
-	echo "  環境変数 DISCORD_WEBHOOK_URL か、harness.json の notify.envFiles に挙げた .env に設定してください。" >&2
-	exit 3
+	echo "harness-notify: 通知先未設定（exit 3）" >&2; exit 3
 fi
 
 # --- 添付（存在 & 上限以下のみ） ----------------------------------------------
@@ -243,10 +282,25 @@ fi
 
 # --- 投稿 ---------------------------------------------------------------------
 # ?wait=true で Discord が作成したメッセージを返させ、「本当に投稿されたか」を確認する。
-args=(-sS -f --retry 2 --retry-delay 2 -o /dev/null -w '%{http_code}' -F "payload_json=$payload_json")
+args=(-sS -f --connect-timeout 10 --max-time 120 -o "$notify_tmp/message.json" -w '%{http_code}' --form-string "payload_json=$payload_json")
 [ -n "$attach" ] && args+=(-F "files[0]=@$attach")
-if ! code="$(curl "${args[@]}" "${WEBHOOK_URL}?wait=true" 2>/dev/null)"; then
-	echo "harness-notify: Discord への投稿に失敗しました（HTTP ${code:-???}）。" >&2
-	exit 4
+post_url="$(jq -r .post "$notify_tmp/target.json")"
+if ! run_child curl "${args[@]}" "$post_url" >"$notify_tmp/code" 2>/dev/null; then
+	echo "harness-notify: Discord 投稿失敗・結果不明（exit 4）。自動再送しません。" >&2; exit 4
 fi
-echo "harness-notify: Discord へ投稿しました（[$PROJECT] $LABEL${attach:+ / 添付 $(basename "$attach")}）。" >&2
+code="$(cat "$notify_tmp/code")"
+if [[ ! "$code" =~ ^2[0-9][0-9]$ ]] || ! jq -e 'type == "object" and (.id | type == "string" and test("^[1-9][0-9]*$"))' "$notify_tmp/message.json" >/dev/null 2>&1; then
+	echo "harness-notify: Discord 投稿結果不明（exit 4）" >&2; exit 4
+fi
+if [ "$JSON" = 1 ]; then
+	echo '{}' >"$notify_tmp/meta.json"
+	if [ -n "$attach" ]; then
+		meta_url="$(jq -r .meta "$notify_tmp/target.json")"
+		if ! run_child curl -sS -f --retry 1 --connect-timeout 10 --max-time 30 -o "$notify_tmp/meta.json" "$meta_url" 2>/dev/null; then echo '{}' >"$notify_tmp/meta.json"; fi
+		run_child node "$SCRIPT_DIR/../src/notification-receipt.ts" webhook-normalize "$notify_tmp/message.json" "$notify_tmp/meta.json" "$WEBHOOK_URL" >"$notify_tmp/result.json"
+		cat "$notify_tmp/result.json"
+	else
+		jq -c '{status:"posted",source:"webhook",attention:null,message_id:.id}' "$notify_tmp/message.json"
+	fi
+fi
+echo "harness-notify: Discord へ投稿しました（[$PROJECT] $LABEL）。" >&2

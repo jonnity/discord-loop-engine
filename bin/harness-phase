@@ -2,13 +2,9 @@
 #
 # harness-phase — Issue のフェーズ（harness:* ラベル）を遷移させる唯一の入口。
 #
-# 人間ゲート（interview / awaiting-merge / blocked）へ入るときは、
-#   1) 人間が読むべき本文を GitHub にコメントとして投稿し（Issue か PR）
-#   2) そのコメントへのリンク付きで Discord に通知し
-#   3) 通知が成功した場合だけラベルを付け替える
-# の順で行う。つまり「人間ゲートのラベルが付いている ⇔ 通知済み」が構造的に成り立つ。
-# oogiri-doc では「通知してから承認依頼済みと書く」がプローズのルールで、守られない事故が
-# 繰り返し起きたため、手順ではなく入口を1本にして担保する（ラベルの直接編集は harness-guard が止める）。
+# awaiting-merge は追跡ラベル→pending→必須通知→照合→完成PATCH→ラベル確認。
+# ラベルだけでは依頼完了を表さない。その他の人間ゲートはコメント→通知→ラベル。
+# 詳細は README の承認動画の手順を参照。
 #
 # 使い方:
 #   harness-phase <issue> <phase> [--comment-file F | --comment TEXT] [--pr N] [--file F]
@@ -40,6 +36,7 @@ shift 2
 
 COMMENT="" COMMENT_FILE="" PR="" FILE="" SUMMARY="" NOTIFY=0
 while [ $# -gt 0 ]; do
+	case "$1" in --comment|--comment-file|--pr|--file|--summary) [ $# -ge 2 ] || exit 2 ;; esac
 	case "$1" in
 	--comment) COMMENT="$2"; shift 2 ;;
 	--comment-file) COMMENT_FILE="$2"; shift 2 ;;
@@ -81,6 +78,16 @@ if [ "$gate" = 1 ] && [ -z "$COMMENT" ]; then
 	exit 2
 fi
 
+if [ "$PHASE" = awaiting-merge ] && [[ "$COMMENT" = *'【動きのない動画の場合だけ'* ]]; then
+	echo 'harness-phase: 動かない動画の理由を記入するか条件行を削除してください' >&2; exit 2
+fi
+if [ "$PHASE" = awaiting-merge ] && { [[ "$COMMENT" = *'<!-- harness:'* ]] || [[ "$SUMMARY" = *'<!-- harness:'* ]]; }; then
+	echo 'harness-phase: 本文と要約に harness marker は使えません' >&2
+	exit 2
+fi
+[[ "$ISSUE" =~ ^[1-9][0-9]*$ ]] || exit 2
+if [ "$PHASE" = awaiting-merge ]; then [[ "$PR" =~ ^[1-9][0-9]*$ ]] || exit 2; fi
+umask 077
 # 動画と投稿本文の一時ファイルは通知の完了まで保持する。
 media_tmp="" comment_tmp="" convert_pid=""
 cleanup() {
@@ -139,9 +146,9 @@ if [ "$PHASE" = awaiting-merge ] && [ -n "$FILE" ]; then
 	FILE="$(cd -- "$(dirname -- "$FILE")" && pwd)/$(basename -- "$FILE")"
 	command -v ffprobe >/dev/null || video_error "ffprobe が必要です。FFmpeg のツールを導入してください"
 	probe_video
+	media_tmp="$(mktemp -d)" || video_error "一時領域を作成できません"
 	if ! compatible_video; then
 		command -v ffmpeg >/dev/null || video_error "変換に ffmpeg が必要です。FFmpeg を導入してください"
-		media_tmp="$(mktemp -d)" || video_error "一時ディレクトリを作成できません。空き容量と権限を確認してください"
 		output="$media_tmp/demo-$ISSUE-h264.mp4"
 		ffmpeg -nostdin -v error -y -i "$FILE" \
 			-map 0:v:0 -map '0:a:0?' -vf 'pad=ceil(iw/2)*2:ceil(ih/2)*2' \
@@ -157,6 +164,11 @@ if [ "$PHASE" = awaiting-merge ] && [ -n "$FILE" ]; then
 		video_file "$FILE" || video_error "変換成果物が空または読取不能です。入力と空き容量を確認してください"
 		probe_video
 		compatible_video || video_error "変換後の形式が不適合です。ffmpeg の機能を確認してください"
+	else
+		cp -- "$FILE" "$media_tmp/demo-$ISSUE-h264.mp4" || video_error "コピー失敗"
+		FILE="$media_tmp/demo-$ISSUE-h264.mp4"
+		probe_video
+		compatible_video || video_error "固定ファイルが不適合です"
 	fi
 	video_file "$FILE" || video_error "最終動画が欠落・空・読取不能です。録画を確認してください"
 	max_mb="$("$SCRIPT_DIR/harness-config" '.notify.maxAttachMB' 10)" || video_error "添付上限設定を確認してください"
@@ -164,11 +176,26 @@ if [ "$PHASE" = awaiting-merge ] && [ -n "$FILE" ]; then
 	size="$(wc -c < "$FILE")" || video_error "最終動画を読み取れません。録画を確認してください"
 	jq -en --arg size "$size" --arg max "$max_mb" '($size | tonumber) <= (($max | tonumber) * 1048576)' >/dev/null \
 		|| video_error "最終動画が添付上限を超えています。短い録画を用意してください"
-	location="動画: この通知の Discord メッセージに添付（ファイル名 $(basename -- "$FILE")）。長文で分かれる場合は最後の投稿にあります。"
-	COMMENT="$COMMENT
-
-$location"
+	node "$SCRIPT_DIR/../src/notification-receipt.ts" fingerprint "$FILE" >"$media_tmp/fingerprint.json" || video_error "fingerprint 失敗"
+	location="動画: この通知の Discord メッセージに添付（ファイル名 demo-$ISSUE-h264.mp4）。長文で分かれる場合は最後の投稿にあります。"
 	SUMMARY="$(jq -nr --arg text "$SUMMARY" --arg location "$location" '$text[0:(3500 - ($location | length) - 2)] + "\n\n" + $location')"
+fi
+if [ "$PHASE" = awaiting-merge ]; then
+	[ -n "$media_tmp" ] || media_tmp="$(mktemp -d)"
+	printf '%s' "$COMMENT" >"$media_tmp/comment.md"
+	printf '%s' "$SUMMARY" >"$media_tmp/summary.md"
+	node "$SCRIPT_DIR/../src/harness-request.ts" "$ISSUE" "$PR" "$media_tmp/comment.md" "$media_tmp/summary.md" "$FILE" "$media_tmp" &
+	convert_pid=$!
+	rc=0
+	wait "$convert_pid" || rc=$?
+	convert_pid=""
+	[ "$rc" = 0 ] || exit "$rc"
+	# 表示用台帳報告は通常経路末尾と同様に best effort。
+	DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
+	if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
+		"$SCRIPT_DIR/dle" notify --event phase --phase awaiting-merge --issue "$ISSUE" --pr "$PR" --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" >/dev/null 2>&1 || true
+	fi
+	exit 0
 fi
 
 TITLE="$(gh issue view "$ISSUE" --json title -q .title)"

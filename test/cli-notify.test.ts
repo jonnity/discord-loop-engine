@@ -2,7 +2,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +16,11 @@ for (const mode of ["close", "error", "refused"] as const) {
 		writeFileSync(
 			path.join(home, "config.json"),
 			JSON.stringify({ socketPath: socket, channelIds: ["900"], allowedUserIds: ["111"] }),
+		);
+		const config = path.join(home, "harness.json");
+		writeFileSync(
+			config,
+			JSON.stringify({ project: "test", repo: "example/project", hooks: {}, notify: { envFiles: [] } }),
 		);
 		let called = false;
 		const server = net.createServer((s) => {
@@ -55,7 +60,7 @@ for (const mode of ["close", "error", "refused"] as const) {
 						timeout: 5000,
 						env: {
 							...process.env,
-							HARNESS_CONFIG: "",
+							HARNESS_CONFIG: config,
 							DLE_HOME: home,
 							DLE_SOCKET: socket,
 							DISCORD_WEBHOOK_URL: "",
@@ -74,6 +79,85 @@ for (const mode of ["close", "error", "refused"] as const) {
 			}
 		} finally {
 			if (server.listening) await new Promise<void>((r) => server.close(() => r()));
+			rmSync(home, { recursive: true, force: true });
 		}
 	});
 }
+
+test("M2: dle --jsonは結果JSONだけを出し、json指定をRPCへ渡さず通常のA出力も維持する", async () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-json-")),
+		socket = path.join(home, "engine.sock");
+	writeFileSync(
+		path.join(home, "config.json"),
+		JSON.stringify({ socketPath: socket, channelIds: ["900"], allowedUserIds: ["111"] }),
+	);
+	const config = path.join(home, "harness.json");
+	writeFileSync(
+		config,
+		JSON.stringify({ project: "test", repo: "example/project", hooks: {}, notify: { envFiles: [] } }),
+	);
+	const result = {
+		attention: "A-12",
+		message_id: "789",
+		discord: {
+			guild_id: "123",
+			channel_id: "456",
+			message_id: "790",
+			url: "https://discord.com/channels/123/456/790",
+			attachments: [],
+		},
+	};
+	const server = net.createServer((s) =>
+		s.on(
+			"data",
+			lineReader<{ type: string; id?: string; args?: Record<string, unknown> }>((m) => {
+				if (m.type === "hello") s.write(`${JSON.stringify({ type: "welcome", protocol: PROTOCOL_VERSION })}\n`);
+				if (m.type === "call") {
+					assert.equal(m.args?.json, undefined);
+					s.end(`${JSON.stringify({ type: "result", id: m.id, ok: true, data: result })}\n`);
+				}
+			}),
+		),
+	);
+	try {
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(socket, resolve);
+		});
+		for (const json of [false, true]) {
+			const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) =>
+				execFile(
+					path.resolve("bin/dle"),
+					[
+						"notify",
+						"--project",
+						"test",
+						"--event",
+						"merge-request",
+						"--title",
+						"test",
+						"--url",
+						"https://example.test",
+						...(json ? ["--json"] : []),
+					],
+					{
+						env: {
+							...process.env,
+							DLE_HOME: home,
+							DLE_SOCKET: socket,
+							HARNESS_CONFIG: config,
+							CLAUDE_PROJECT_DIR: home,
+						},
+					},
+					(err, stdout, stderr) => resolve({ code: err ? Number(err.code) : 0, stdout, stderr }),
+				),
+			);
+			assert.equal(r.code, 0, r.stderr);
+			if (json) assert.deepEqual(JSON.parse(r.stdout), result);
+			else assert.equal(r.stdout, "A-12\n");
+		}
+	} finally {
+		if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+		rmSync(home, { recursive: true, force: true });
+	}
+});

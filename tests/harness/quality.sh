@@ -3,7 +3,7 @@
 Q="$TMP/quality"
 mkdir -p "$Q/.claude" "$Q/tmp"
 qconfig() { printf '%s\n' "$1" > "$Q/.claude/harness.json"; }
-qgate() { CLAUDE_PROJECT_DIR="$Q" "$BIN/harness-gate" "$Q" >"$Q/out" 2>&1; }
+qgate() { HARNESS_CONFIG="$Q/.claude/harness.json" CLAUDE_PROJECT_DIR="$Q" "$BIN/harness-gate" "$Q" >"$Q/out" 2>&1; }
 for pre in 'null' '[]'; do
 	qconfig "{\"preflight\":$pre,\"gate\":[{\"name\":\"first\",\"run\":\"echo gate >> log; false\"},{\"name\":\"second\",\"run\":\"echo second >> log\"}],\"hooks\":{\"beforePR\":[\"echo hook >> log\"]}}"
 	rm -f "$Q/log"; qgate; rc=$?
@@ -40,18 +40,20 @@ done
 
 (
 	export PATH="$ROOT/tests/harness/fixtures/media:$ROOT/tests/harness/fixtures:$PATH"
-	export CLAUDE_PROJECT_DIR="$Q" PHASE_STUB=1
+	export CLAUDE_PROJECT_DIR="$Q" HARNESS_CONFIG="$Q/.claude/harness.json" PHASE_STUB=1 INJECT_MERGE_OK=1
+	export NODE_OPTIONS="$NODE_OPTIONS --import=$ROOT/tests/harness/fixtures/media/receipt-fetch.ts"
+	cd "$Q" || exit 1
 	export MEDIA_LOG="$Q/media.log" CURL_ARGS="$Q/curl.args" SENT_FILE="$Q/sent" SENT_COPY="$Q/copy" POST_BODY="$Q/body" MEDIA_PID="$Q/pid" TMPDIR="$Q/tmp"
-	export DISCORD_WEBHOOK_URL=https://example.test/webhook
+	export DISCORD_WEBHOOK_URL="https://discord.com/api/webhooks/123/token?thread_id=456&wait=false"
 	qconfig '{"project":"test","repo":"example/project","notify":{"required":false,"maxAttachMB":1}}'
 	input="$Q/動画 'test'.MP4"; echo source > "$input"
 	phase() { "$BIN/harness-phase" 3 awaiting-merge --pr 5 --comment "${COMMENT_TEST:-説明}" --file "$input" "$@" >"$Q/out" 2>&1; }
-	reset_media() { : > "$MEDIA_LOG"; rm -f "$SENT_FILE" "$MEDIA_PID"; }
+	reset_media() { : > "$MEDIA_LOG"; rm -f "$SENT_FILE" "$MEDIA_PID" "$SENT_COPY" "$POST_BODY" "$Q/gh-state.json"; }
 	reset_media; phase; rc=$?
-	check 'video: 適合MP4は変換せず probe→comment→notify→label' '[ "$rc" = 0 ] && [ "$(cat "$MEDIA_LOG")" = "$(printf "probe\ncomment\nnotify\nlabel")" ] && [ "$(cat "$SENT_FILE")" = "$input" ]'
+	check 'video: 適合MP4を固定し probe→label→pending→notify→patch→label' '[ "$rc" = 0 ] && [ "$(cat "$MEDIA_LOG")" = "$(printf "probe\nprobe\nlabel\ncomment\nnotify\npatch\nlabel")" ] && [ "$(cat "$SENT_FILE")" != "$input" ] && cmp -s "$input" "$SENT_COPY" && [ ! -e "$(cat "$SENT_FILE")" ]'
 	for mode in webm hevc mov pix brand format; do
 		reset_media; MEDIA_MODE="$mode" phase; rc=$?
-		check "video: $mode は変換・再検査して添付" '[ "$rc" = 0 ] && [ "$(cat "$MEDIA_LOG")" = "$(printf "probe\nconvert\nprobe\ncomment\nnotify\nlabel")" ] && [ "$(cat "$SENT_COPY")" = converted ] && [ ! -e "$(cat "$SENT_FILE")" ] && [ "$(cat "$input")" = source ]'
+		check "video: $mode は変換・再検査して添付" '[ "$rc" = 0 ] && [ "$(cat "$MEDIA_LOG")" = "$(printf "probe\nconvert\nprobe\nlabel\ncomment\nnotify\npatch\nlabel")" ] && [ "$(cat "$SENT_COPY")" = converted ] && [ ! -e "$(cat "$SENT_FILE")" ] && [ "$(cat "$input")" = source ]'
 	done
 	saved="$input"; input="$Q/actually.mov"; echo source > "$input"
 	reset_media; phase; rc=$?
@@ -89,7 +91,7 @@ done
 		rc=$?
 		description="$(sed -n 's/^payload_json=//p' "$CURL_ARGS" | jq -r '.embeds[0].description')"
 		summary_chars="$(sed -n 's/^payload_json=//p' "$CURL_ARGS" | jq '.embeds[0].description | split("\n\n動画:")[0] | length')"
-		check "video: $summary の長い日本語要約も位置と名前を保持" '[ "$rc" = 0 ] && [[ "$description" = *最後の投稿* && "$description" = *test* && "$description" != *�* ]] && { [ "$summary" != default ] || [ "$summary_chars" = 300 ]; } && grep -q "sha=abc123456789" "$POST_BODY"'
+		check "video: $summary の長い日本語要約も位置と名前を保持" '[ "$rc" = 0 ] && [[ "$description" = *最後の投稿* && "$description" = *demo-3-h264.mp4* && "$description" != *�* ]] && { [ "$summary" != default ] || [ "$summary_chars" = 300 ]; } && grep -q "sha=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa attention=none" "$POST_BODY" && grep -q "https://discord.com/channels/900/456/789" "$POST_BODY" && grep -q "SHA-256:" "$POST_BODY"'
 	done
 	jq -nr '"あ" * 50000' > "$Q/long-comment.md"
 	expected_summary="$(printf 'あ%.0s' {1..300})"
@@ -102,7 +104,7 @@ done
 		check "phase: $human_phase は5万字のコメントから文字単位で300文字を要約して遷移" '[ "$rc" = 0 ] && [ "$summary_text" = "$expected_summary" ] && grep -qx label "$MEDIA_LOG" && [ "$(head -n 1 "$POST_BODY" | wc -m)" = 50001 ]'
 	done
 	reset_media; CURL_FAIL=1 phase; rc=$?
-	check 'video: HTTP失敗は終了4、ラベル未変更' '[ "$rc" = 4 ] && ! grep -q label "$MEDIA_LOG"'
+	check 'video: HTTP失敗は終了4、追跡awaitingと最新pending' '[ "$rc" = 4 ] && [ "$(jq -c .labels "$Q/gh-state.json")" = "[\"harness:awaiting-merge\"]" ] && [ "$(jq -r '\''.comments[-1].body | contains("harness:pending")'\'' "$Q/gh-state.json")" = true ]'
 	for max in 0 -1 bad; do
 		qconfig "{\"project\":\"test\",\"repo\":\"example/project\",\"notify\":{\"maxAttachMB\":\"$max\"}}"
 		reset_media; phase; rc=$?

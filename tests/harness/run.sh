@@ -23,6 +23,8 @@ unset DLE_ROLE DLE_PROJECT DLE_LOOP DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN HARNES
 export DLE_HOME="$TMP/iso-home"
 export DLE_SOCKET="$DLE_HOME/engine.sock"
 mkdir -p "$DLE_HOME"
+reject_fetch_url="$(node -p 'require("node:url").pathToFileURL(process.argv[1]).href' "$ROOT/tests/harness/fixtures/reject-fetch.ts")" || exit "$?"
+export NODE_OPTIONS="${NODE_OPTIONS:-} --import=$reject_fetch_url"
 
 pass=0
 fail=0

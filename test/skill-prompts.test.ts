@@ -120,6 +120,7 @@ test("T1/T2: Phase 2 の生成例は導入部を展開し、CHECKLIST と gate �
 		assert.ok(r.prompt.length > 0);
 		assert.ok(r.prompt.includes("先に CLAUDE.md, README.md と .harness/notes.md"));
 		assert.ok(r.prompt.includes(checklistLiteral));
+		for (const term of ["開始状態", "操作順", "終了状態", "含めないもの"]) assert.ok(r.prompt.includes(term), term);
 		const gate = attachedGate(r.prompt);
 		assert.deepEqual(gate.value, sampleGate);
 		assert.match(gate.note, /この gate と同じコマンド列・順序/);
@@ -150,6 +151,7 @@ test("T3: 生成依頼の常時・該当時チェックリストが要件と既�
 		assert.match(always, pattern);
 	const conditional = section(r.prompt, "該当するときだけの項目", "プロジェクトの gate");
 	for (const pattern of [
+		/動画利用時[\s\S]*開始状態・操作順・終了状態・含めないもの[\s\S]*設計シナリオ・試験・humanChecks[\s\S]*全て対応[\s\S]*未決範囲は Phase 1/,
 		/憲章・規約[\s\S]*該当節[\s\S]*自動テストまたは humanChecks/,
 		/スキーマ検証に加え[\s\S]*要件[\s\S]*値[\s\S]*期待値[\s\S]*assert/,
 		/メジャー版[\s\S]*対応版[\s\S]*一次情報/,
@@ -396,10 +398,11 @@ test("W4: 実cycleのWT初期化と後続引数、loopのid走査とstatus/stop"
 				...process.env,
 				PATH: `${path.resolve("bin")}:${process.env.PATH}`,
 				CLAUDE_PROJECT_DIR: main,
+				HARNESS_CONFIG: path.join(main, ".claude/harness.json"),
 				DLE_HOME: path.join(dir, "home"),
 				DLE_PROJECT: "registered",
 			};
-			const record = "node -e 'console.log(JSON.stringify(process.argv.slice(1)))' -- \"$@\"";
+			const record = 'node -e \'require("node:fs").writeSync(1,JSON.stringify(process.argv.slice(1))+"\\n")\' -- "$@"';
 			const r = await bash(
 				`harness-hook() { ${record}; }; harness-codex() { ${record}; }; git() { ${record}; };\n${init}\n${after}`,
 				env,
@@ -469,4 +472,86 @@ test("D1/E2: 恒久文書に移行・許可・隔離の境界と確認先が残�
 	}
 	for (const id of ["G1〜G6", "W1/W2", "W3", "W4", "W5", "W6", "W8"]) assert.ok(readme.includes(id), id);
 	assert.match(onboard, /GIT_AUTHOR_|git.*作者|作者.*git/);
+});
+
+const loopSkill = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+const conciergeSkill = readFileSync(new URL("../skills/concierge/SKILL.md", import.meta.url), "utf8");
+const readme7 = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+test("S1: 失敗pendingの再依頼は原因解消時だけ、回答先Aを保って承認する", () => {
+	for (const doc of [section(skill, "## Step 0", "## Phase 1"), loopSkill]) {
+		assert.match(doc, /自分の失敗した依頼の pending/);
+		assert.match(doc, /5-4/);
+		assert.match(doc, /原因を直せたときだけ再実行/);
+		assert.match(doc, /直せなければ blocked/);
+	}
+	for (const doc of [section(skill, "### 5-4", "## Phase 6"), readme7]) {
+		for (const term of [
+			"Discord",
+			"SHA-256",
+			"手動削除",
+			"merge-ok",
+			"pending",
+			"復旧未確認",
+			"required=false",
+			"updated_at",
+			"created_at",
+		])
+			assert.ok(doc.includes(term), term);
+	}
+	for (const doc of [skill, loopSkill, conciergeSkill]) {
+		assert.match(doc, /--attention/);
+		assert.match(doc, /meta.attention/);
+	}
+	for (const doc of [section(skill, "## Phase 6", "## フォールバック"), loopSkill]) {
+		for (const term of ["info", "PRコメントURL", "現在のA", "付け替え", "同じ", "引用"])
+			assert.ok(doc.includes(term), term);
+	}
+	assert.match(readme7, /単独.*チャット承認/);
+});
+test("S2: 動画の合意範囲を質問から設計・実装・映像レビューに渡す", async () => {
+	for (const doc of [
+		section(skill, "## Phase 1", "## Phase 2"),
+		section(skill, "## Phase 2", "## Phase 3"),
+		section(skill, "## Phase 4", "## Phase 5"),
+		section(skill, "### 5-2", "### 5-3"),
+	]) {
+		for (const term of ["開始状態", "操作順", "終了状態", "含めないもの"]) assert.ok(doc.includes(term), term);
+	}
+	assert.match(section(skill, "## Phase 1", "## Phase 2"), /demo.*UI・操作/);
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-prompt7-"));
+	mkdirSync(path.join(dir, ".harness"));
+	try {
+		const start = skill.indexOf('cat > "$WT/.harness/prompt-impl-');
+		const end = skill.indexOf('\nharness-codex start "codex-impl-', start);
+		assert.ok(start > 0 && end > start);
+		const r = await bash(`harness-config() { echo demo; }\n${skill.slice(start, end).replaceAll("{n}", "3")}`, {
+			...process.env,
+			WT: dir,
+		});
+		assert.equal(r.code, 0, r.stderr);
+		const prompt = readFileSync(path.join(dir, ".harness/prompt-impl-3.md"), "utf8");
+		for (const term of [
+			"開始状態",
+			"操作順",
+			"終了状態",
+			"含めないもの",
+			"full SHA",
+			"動画パス",
+			"git add/commit/push/checkout/stash",
+		])
+			assert.ok(prompt.includes(term), term);
+		assert.doesNotMatch(prompt, /git checkout HEAD/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+	assert.match(section(skill, "### 5-2", "### 5-3"), /動画を撮ったhead＝現head/);
+});
+test("S3: 動かない理由は本文・要約先頭、humanChecksは普通の箇条書き", () => {
+	const template = section(skill, "### 5-4", "## Phase 6");
+	assert.match(template, /【動きのない動画の場合だけ/);
+	assert.match(template, /最初の行/);
+	assert.match(template, /summary.*先頭/);
+	assert.doesNotMatch(template, /- \[ \]/);
+	for (const doc of [template, readme7])
+		assert.match(doc, /完成コメントを編集すると、それより前の OK\/Approve は数えない/);
 });

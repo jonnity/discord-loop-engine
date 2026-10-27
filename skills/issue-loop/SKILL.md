@@ -117,8 +117,9 @@ tmux ウィンドウ {codex-impl-12 の window-id, ...} を最大3分監視し�
 ### 2. 人間からの返事を取り込む
 
 `harness-inbox` の結果を `issue-cycle` Step 0 の振り分けに従って処理する。
-`stale-notify` / `missing-notify` は**必ずその tick で**承認依頼をやり直す（承認依頼後に push したのに
-依頼を出し直さない、という oogiri-doc で繰り返した抜けを機械的に塞ぐ）。
+`stale-notify` / `missing-notify` はその tick で再依頼する。ただし最新が自分の失敗した依頼の pending なら、
+issue-cycle 5-4 の失敗の仕分けに従い、原因を直せたときだけ再実行し、直せなければ blocked にする。
+原因が続いたまま tick ごとに仮コメント・Discord 投稿・A-番号を増やさない。
 
 ### 3. フェーズ進行
 
@@ -185,7 +186,13 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
   フェーズの変化も `harness-phase` が台帳に報告する
 - `<channel source="dle">` で届くもの:
   - `meta.attention`（A-番号への回答）:
-    - `meta.kind=merge` で承認 → `harness-merge {meta.issue} --chat-approval "<本文>"`。NG・指摘なら Phase 6 NG
+    - `meta.kind=merge` で承認 → 対象 worktree を cwd にして `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"`。NG・指摘なら Phase 6 NG。
+      最新完成marker・ラベル・現 head・A 一致が必須。meta.attention 欠落は推測しない。webhook は GitHub 承認だけ。
+      旧 A/A なし/pending 等で非0なら harness-notify の info で理由と現在の依頼先PRコメントURL、
+      完成内容を確認して回答する必要を通知する。未完了なら復旧待ちとする。現在のA や marker 全文を出さず、
+      拒否した OK の付け替えをしない。URL が無ければ同じ認証 login の最新依頼を読み、取得不能なら既知 PR URL とその旨を案内する。
+      info 失敗も記録し、その再送で merge は再実行しない。CI/mergeable/hook の拒否だけで同じ依頼/head なら、
+      元の同じ --attention・引用で再試行可。新 head/新依頼なら新回答が必要
     - `meta.kind=interview` → 回答を Issue に「## 要件メモ（Discord で回答）」として
       `<!-- harness:note source=discord -->` 付きでコメントしてから Phase 2 へ（GitHub を正本に保つ。
       この印があるので `harness-inbox` は二重に拾わない）

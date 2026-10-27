@@ -52,7 +52,12 @@ read -r pass fail < "$W/counts"
 	cat > "$W/stubs/curl" <<'CURL'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$CURL_LOG"
-echo 204
+previous=""
+for arg in "$@"; do
+ [ "$previous" != -o ] || printf '%s' '{"id":"789","channel_id":"456","attachments":[]}' > "$arg"
+ previous="$arg"
+done
+echo 200
 CURL
 	chmod +x "$W/stubs/curl"
 	export PATH="$W/stubs:$PATH" CURL_LOG="$W/curl.log"
