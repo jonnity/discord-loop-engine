@@ -314,6 +314,12 @@ npm run check       # Biome
 engine は TypeScript をビルドせず、Node の型ストリップでそのまま実行しています。
 ハーネス（`bin/harness-*`）は bash です。
 
+### ツールの入力契約
+
+ツールは engine の入口で必須項目・型・未知の引数名を検査し、不正な入力はエラーにする。
+未知の引数名には許可された名前の候補を案内する（`dispatch.message` → `text`、`rules_set.text` → `content`）。
+`dispatch.text` と `rules_set.content` は空文字・空白だけの本文を拒否する。入力の自動補正は行わない。
+
 ### worktree の場所と worker のアクセス許可
 
 `worktreeRoot` の未指定・null・空文字列は、字句正規化した DLE_HOME の兄弟

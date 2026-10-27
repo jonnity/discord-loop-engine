@@ -33,6 +33,7 @@ import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role,
 import type { DiscordApi } from "./rest.ts";
 import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
 import type { RefreshResult, Supervisor } from "./supervisor.ts";
+import { validateToolArguments } from "./tool-validation.ts";
 import { resolveWorktreeRoot } from "./worktrees.ts";
 
 export interface GatewayLike {
@@ -215,7 +216,7 @@ export class Engine {
 					const who = session ?? { role: "cli" as Role, name: "cli", socket, pid: 0, cwd: "", since: "" };
 					if (msg.type === "call") {
 						if (session) this.touch(session.name, 0);
-						this.call(who, msg.name, msg.args ?? {}).then(
+						this.call(who, msg.name, msg.args).then(
 							(data) => send(socket, { type: "result", id: msg.id, ok: true, data }),
 							(err: Error) => send(socket, { type: "result", id: msg.id, ok: false, error: err.message }),
 						);
@@ -321,8 +322,8 @@ export class Engine {
 	}
 
 	private sendRules(session: Session) {
-		const rules = this.ledger.rules().trim();
-		if (rules)
+		const rules = this.ledger.rules();
+		if (rules.trim())
 			send(session.socket, {
 				type: "event",
 				content: `現在の仮ルール（learnings/rules.md）:\n${rules}`,
@@ -453,7 +454,8 @@ export class Engine {
 	}
 
 	// --- ツール（窓口・worker・CLI から） -----------------------------------------------------
-	async call(who: Pick<Session, "role" | "name">, name: string, a: Record<string, unknown>): Promise<unknown> {
+	async call(who: Pick<Session, "role" | "name">, name: string, raw?: unknown): Promise<unknown> {
+		const a = validateToolArguments(name, raw);
 		const isConcierge = who.role === "concierge";
 		const isCli = who.role === "cli";
 		const conciergeOnly = () => {

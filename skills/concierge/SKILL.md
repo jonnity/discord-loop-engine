@@ -65,6 +65,8 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 3. `task_create`（project・title・issue）で台帳に載せる
 4. 急ぎ・順番の指定があれば `dispatch` で worker に伝える（例:「#12 を先に」）。worker はキューの
    `harness:queued` を自分で拾うので、普段は dispatch しなくてよい
+   引数は `{"project":"プロジェクト名","text":"指示の本文"}`（必要なら `task_id`）。`message` ではなく `text` を使い、空本文は送らない。
+   未知引数のエラーが返ったら、案内された名前と許可キーを確認し、引数を直して再送する
 5. 起票した Issue の URL とタスク番号を reply する
 
 ### A-番号への返事

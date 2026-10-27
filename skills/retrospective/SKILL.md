@@ -23,7 +23,9 @@ description: discord-loop-engine の自己改善。窓口が、台帳に溜ま�
    各まとまりについて、件数・根本原因・一般ルールの案（特定の Issue に依存しない命令形）を出す
 
 3. **仮ルールにする**: `promoteAfter`（既定 3）件以上のまとまりは、仮ルールに足す。
-   - 今の `rules_get` の内容に追記した全文を `rules_set` で書き込む（動いている worker にすぐ届く）
+   - 今の `rules_get` の内容に追記した全文を `rules_set` の `content` に渡す（`{"content":"全文の Markdown"}`。`text` ではない。動いている worker にすぐ届く）
+   - 保存後に `rules_get` を呼び、全文が一致することを確認する（末尾改行がなければ1つ補われる）。成功戻り値は `{ok:true}`
+   - 必須欠落・型不正・未知引数・空の `content` はエラーになり、旧ルールは保持される。案内の引数名を確認して直し、再送する
    - 各ルールには「出どころ（学びの件数と Issue 番号）」と「追加した日付」を添える
    - ルール化した学びは `learnings_promote` で印を付ける
    - 仮ルールで**安全柵を外さない**（マージに人の OK が要る・ガード hook・Codex に git 操作をさせない、など）
@@ -35,6 +37,7 @@ description: discord-loop-engine の自己改善。窓口が、台帳に溜ま�
    - **仕組みそのもの**（スキル・スクリプト・engine の挙動）→ `jonnity/discord-loop-engine` への Issue を起票する。
      discord-loop-engine 自体も `dle add` で登録されていれば、その worker が PR まで進める
    - どちらもマージにはユーザーの OK が要る（A-番号で届く）。マージされたら、その仮ルールを `rules_set` で外す
+   - 最後の1件を外すときも空の `content` は拒否されるため、「（現在の仮ルールはありません）」など空でない本文を書く
 
 5. **報告する**（`reply`、1 回だけ・短く）:
    ```
