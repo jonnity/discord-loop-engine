@@ -482,3 +482,38 @@ SIGKILL・マシン停止後は、使用した TMPDIR の一時領域と残る�
 | WT 内でも main 設定/.env、実行 cwd は WT | `tests/harness/worktrees.sh` W8、config/gate/notify | 各 notify.envFiles・秘密ファイル |
 | 信号時は trap 回収と128+nに限定 | `test/harness-gate.test.ts` G6（各信号3回） | SIGKILL、子孫、回収の遅延 |
 | engine/channel の通信形式・必須項目を維持 | `test/engine.test.ts`、PROTOCOL_VERSION=2 | plugin 更新と実 engine/worker 再起動後の確認 |
+
+### 設計品質チェックリストとレビュー
+
+[issue-cycle](skills/issue-cycle/SKILL.md) の Phase 2 では、設計依頼に生成時点の gate を添付します。
+非空の配列は name/run と順序を保ち、コマンドとして実行しません。未定義・空・配列以外は未確認と明記し、
+CI から必要な品質コマンドとテストの対象を確認する手順を残します。これを gate 成功の根拠にはしません。
+取得失敗時の blocked は防御的な分岐です。不正 JSON は本番では手前の `harness-config --worktree` が
+終了1で停止します。T5 の取得失敗は stub による単体検証です。
+
+チェックリストは「常に確かめる項目」と「該当するときだけの項目」に分け、非該当には理由を記します。
+生成した依頼は Phase 3 と 5-1 の懐疑役・検証役の両方に渡し、再依頼でもチェックリストと gate を残します。
+gate の定義を変えた場合は更新後の列と CI の対応を照合します。
+
+| 確認項目 | 担当フェーズ | [自動試験](test/skill-prompts.test.ts) | 人による確認（humanChecks） |
+|---|---|---|---|
+| gate と同じコマンド列・順序、format/lint/test/build の省略なし、新規テストの glob・除外・呼び出し元 | Phase 2・Phase 3・5-1 | T1/T2: 値・順序・文字保持・非実行、T3/T4: 依頼と両レビュー、T5: 欠落・空・型と防御分岐 | 実プロジェクトでの gate と CI の対応、新規テストの対象包含 |
+| 憲章・規約のレビューゲートと該当節ごとの自動確認/humanChecks | Phase 2・Phase 3・5-1 | T3/T4 | 該当節と確認の対応が十分か |
+| 設定値はスキーマに加え要件値を期待値との assert で確認 | Phase 2・Phase 3・5-1 | T3/T4 | 誤った値を見逃さない期待値か |
+| 長時間 CLI の実経路（パッケージマネージャー/スクリプトランナー経由・パイプ）の異常系、N・初期化・中断/回収 | Phase 2・Phase 3・5-1 | T3/T4 | 利用者の経路を代表し、成果物・子・一時ファイルを確認したか |
+| メジャー版更新の対応版を一次情報で確認、確認不能な環境依存の停止計画 | Phase 2・レビュー共通・Phase 3・5-1・5-3 | T3/T4/T6 | 対象・未確認理由・影響・CI での確認手順が十分か。実ログと修正回数の運用 |
+| 文言・式・数値例などの具体化を「解釈」と明記 | Phase 2・Phase 3・5-1 | T3/T4 | 確定要件にすり替わっていないか |
+| 表示崩れはボタン名・要素 × 状態 × viewport と期待結果を列挙 | Phase 2・Phase 3・5-1・5-2 | T3/T4 | 実アプリの動画・スクショで網羅性と操作性を確認 |
+| 既存 gate 回帰と恒久文書の確認先 | 5-3 | T6 と [CI の全検査](.github/workflows/ci.yml) | CI green と人のマージ承認、guard、Codex の git 禁止を維持 |
+
+検証役は、一次情報で対応版を確認し、未確認の理由・影響・CI での確認手順と停止計画があれば、
+設計段階の検証計画として足りると判断します。実行できないという理由だけで同じ確認を繰り返しません。
+5-1 は停止計画の impl サマリへの引継ぎを確認し、PR 後の実ログ・修正回数を要求しません。
+5-3 は設計で停止ルール対象とした環境依存に限り、PR CI の実ログに基づく修正1回で未解消なら blocked で人に返します。
+「1回」は同じ PR で対象の失敗後に push した修正コミットと、そのコミットに対する CI 結果から数えます。
+`gh pr view {PR} --json commits` でコミットを確認し、`gh pr checks {PR}` と、過去の結果が必要なら
+`gh run list --commit <SHA>` / `gh run view <run-id> --log-failed` で対象の失敗と修正後の結果を照合します。
+clear/resume 後も worker が読めるこの履歴から復元します。既存の `learning_add`（tag: `ci-red`、engine 不在時は
+failure-log.jsonl）は記録先としてだけ使い、新しい仕組みは作りません。REAL 3回よりこの上限を優先し、CI green 後に承認依頼を出します。
+issue-loop §5 からこの例外への参照はありません。通常の CI red 運用でも上限を適用できるかは humanChecks に残します。
+文章の存在を確かめる試験だけでは、実際のレビュー役の意味理解・判断・運用順序は保証できません。
