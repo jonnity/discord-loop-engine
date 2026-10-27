@@ -1,9 +1,8 @@
 {
-	"$comment": "プロジェクトの設定の例。通常は worker が /discord-loop-engine:onboard で調べて作り、A-番号で確認を取ってから ~/.discord-loop-engine/projects/<名前>/harness.json に保存される。リポジトリの .claude/harness.json に置けばそちらが優先される。{n} は Issue 番号、{worktree} は worktree の絶対パスに置換される。preflight は gate の前の環境確認（name/run の配列。未指定・null・空配列は省略、失敗は終了3）。hooks はリポジトリ固有の手順の差し込み口（afterWorktree: worktree 作成直後 / beforePR: gate の後の追加の検査 / onCIRed: CI が赤いときの仕分け。0 = 対処済み・0 以外 = コード起因 / beforeMerge: マージ前の確認）で、どれもコマンドの配列。{pr} {main} も使える。",
+	"$comment": "プロジェクトの設定の例。worktreeRoot は省略時 ${DLE_HOME}-worktrees/<登録名>（DLE_HOME 自体の兄弟）。相対値は main 基準、絶対値も可。明示 .worktrees は従来どおり。preflight/gate は DLE_*/DISCORD_* を除去してコマンド専用の一時 DLE_HOME/DLE_SOCKET へ隔離し、beforePR は元の環境。通常は worker が /discord-loop-engine:onboard で調べて作り、A-番号で確認を取ってから ~/.discord-loop-engine/projects/<名前>/harness.json に保存される。リポジトリの .claude/harness.json に置けばそちらが優先される。{n} は Issue 番号、{worktree} は worktree の絶対パスに置換される。preflight は gate の前の環境確認（name/run の配列。未指定・null・空配列は省略、失敗は終了3）。hooks はリポジトリ固有の手順の差し込み口（afterWorktree: worktree 作成直後 / beforePR: gate の後の追加の検査 / onCIRed: CI が赤いときの仕分け。0 = 対処済み・0 以外 = コード起因 / beforeMerge: マージ前の確認）で、どれもコマンドの配列。{pr} {main} も使える。",
 	"baseBranch": "main",
 	"owners": ["owner"],
 	"maxParallel": 3,
-	"worktreeRoot": ".worktrees",
 	"branchPrefix": "fix/issue-",
 	"mergeMethod": "merge",
 	"preflight": [],

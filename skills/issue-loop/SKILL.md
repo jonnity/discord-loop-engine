@@ -57,10 +57,36 @@ printf 'last_tick_at=%s\nheartbeat_interval=%s\n' "$(date -u +%FT%TZ)" "${INTERV
 ### 1. Codex のシェパード（サブエージェントに丸ごと任せる）
 
 まず無料のチェックだけを本体で行う: **このプロジェクトの worktree** にある id ファイル
-（`$(harness-config --root)/<worktreeRoot>/issue-*/.harness/codex-*.id`。`harness-codex start` が保存）のウィンドウごとに
-`harness-codex-status status <window>` を呼ぶ。`tmux list-windows -a | grep` のような名前での検索はしない
+（解決済み worktreeRoot の `issue-*/.harness/codex-*.id`。`harness-codex start` が保存）のウィンドウごとに
+`harness-codex-status status <window> "$WT"` を呼ぶ。`tmux list-windows -a | grep` のような名前での検索はしない
 （別プロジェクトの同名ウィンドウを拾い、終了済みのウィンドウ（`remain-on-exit` で残る）も区別できず、
 サブエージェントを毎 tick 起こしてしまう）。
+
+実際の走査は以下。id の所在から WT を得るので、外部・相対・絶対・空白入りの配置でも同じ場所を監視し、片付ける。解決失敗では走査を始めない。
+
+```bash
+# CODEX_SCAN_BEGIN
+ROOT="$(harness-config --root)" || exit 1
+WROOT="$(harness-config --worktree-root)" || exit 1
+running_windows=()
+for idf in "$WROOT"/issue-*/.harness/codex-*.id; do
+  [ -f "$idf" ] || continue
+  WT="$(dirname "$(dirname "$idf")")"
+  window="$(basename "$idf" .id)"
+  state="$(harness-codex-status status "$window" "$WT")" || exit 1
+  n="${window##*-}"
+  phase="${window#codex-}"; phase="${phase%-*}"
+  case "$state" in
+  running) running_windows+=("$idf") ;;
+  exited:0)
+    if [ -f "$WT/.harness/$phase/$n.md" ]; then
+      harness-codex stop "$window" "$WT" || exit 1
+    fi
+    ;;
+  esac
+ done
+# CODEX_SCAN_END
+```
 
 - **`running` が無ければこの節のサブエージェントは起動しない**
 - `exited:*` はサブエージェントを起こさず、成果物の有無で分ける:

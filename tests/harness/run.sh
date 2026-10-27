@@ -99,6 +99,9 @@ check "issue-md: 本文が空でもエラーにしない" '[ -n "$md22" ] && gre
 PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" >/dev/null 2>&1
 check "issue-md: 番号無しは拒否(2)" '[ $? -eq 2 ]'
 
+# 旧配置を明示した利用者の互換試験。
+jq '.worktreeRoot = ".worktrees"' "$PROJ/.claude/harness.json" > "$TMP/h.json" && mv "$TMP/h.json" "$PROJ/.claude/harness.json"
+
 # --- harness-codex / harness-codex-status（codex・tmux はスタブ） ------------------
 STUBS="$ROOT/tests/harness/fixtures"
 CW="$TMP/cwt dir"   # 空白入りの worktree
@@ -258,6 +261,7 @@ check "gate: hooks.beforePR が失敗したらゲートも失敗" '[ $? -eq 1 ]'
 
 echo ""
 source "$ROOT/tests/harness/quality.sh" || exit 1
+source "$ROOT/tests/harness/worktrees.sh" || exit 1
 
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]

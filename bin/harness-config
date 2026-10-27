@@ -6,6 +6,8 @@
 #   harness-config '.project'                 # 値を出力（null/未定義なら空文字で exit 1）
 #   harness-config '.maxParallel' 3           # 未定義なら既定値 3 を出力
 #   harness-config --path                     # 設定ファイルの絶対パスを出力
+#   harness-config --worktree-root            # 解決済みの worktree 親ディレクトリ
+#   harness-config --worktree 9                # Issue 9 の絶対パス
 #   harness-config --root                     # プロジェクトルートを出力
 #
 # 設定ファイルの探索順:
@@ -13,22 +15,29 @@
 #   2) <プロジェクトルート>/.claude/harness.json（リポジトリに置いてある場合。チームで共有したいとき）
 #   3) $DLE_HOME/projects/$DLE_PROJECT/harness.json（discord-loop-engine 側。リポジトリに何も置かない既定の形）
 #
-# プロジェクトルートは $CLAUDE_PROJECT_DIR（worktree の中で呼ばれても main 側を指すため）、無ければ git toplevel。
+# プロジェクトルートは $CLAUDE_PROJECT_DIR（worktree の中で呼ばれても main 側を指すため）、無ければ標準 linked worktree の common dir から main を求める。
 
 set -euo pipefail
 
 resolve_root() {
 	if [ -n "${CLAUDE_PROJECT_DIR:-}" ] && [ -d "$CLAUDE_PROJECT_DIR" ]; then
-		printf '%s\n' "$CLAUDE_PROJECT_DIR"
+		(cd "$CLAUDE_PROJECT_DIR" && pwd -L)
 		return
 	fi
-	git rev-parse --show-toplevel 2>/dev/null || pwd
+	local common
+	if common="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" && [ "$(basename "$common")" = .git ]; then
+		dirname "$common"
+	else
+		git rev-parse --show-toplevel 2>/dev/null || pwd
+	fi
 }
 
 ROOT="$(resolve_root)"
 ENGINE_CONFIG=""
 if [ -n "${DLE_PROJECT:-}" ]; then
-	ENGINE_CONFIG="${DLE_HOME:-$HOME/.discord-loop-engine}/projects/$DLE_PROJECT/harness.json"
+	engine_home="${DLE_HOME:-$HOME/.discord-loop-engine}"
+	case "$engine_home" in /*) ;; *) engine_home="$ROOT/$engine_home" ;; esac
+	ENGINE_CONFIG="$engine_home/projects/$DLE_PROJECT/harness.json"
 fi
 if [ -n "${HARNESS_CONFIG:-}" ]; then
 	CONFIG="$HARNESS_CONFIG"
@@ -40,7 +49,61 @@ else
 	CONFIG="$ROOT/.claude/harness.json"
 fi
 
+resolve_worktree_root() {
+	local value="" kind="null" project="${DLE_PROJECT:-}" h candidate main
+	if [ -f "$CONFIG" ]; then
+		kind="$(jq -r '.worktreeRoot | type' "$CONFIG")" || return 1
+		case "$kind" in
+		null|string) value="$(jq -r '.worktreeRoot // ""' "$CONFIG")" || return 1 ;;
+		*) echo "harness-config: worktreeRoot は文字列/null/未指定で指定してください" >&2; return 1 ;;
+		esac
+	fi
+	main="$(realpath -m -s -- "$ROOT")" || return 1
+	if [ -n "$value" ]; then
+		case "$value" in
+		'~'*|'$'*) echo 'harness-config: worktreeRoot: 先頭の ~ や $ の展開は行わないため、展開済みの絶対パスまたは通常の相対パスを指定してください' >&2; return 1 ;;
+		/*) realpath -m -s -- "$value" ;;
+		*) realpath -m -s -- "$main/$value" ;;
+		esac
+		return
+	fi
+	if [ -z "$project" ] && [ -f "$CONFIG" ]; then
+		project="$(jq -r '.project // ""' "$CONFIG")" || return 1
+	fi
+	if [ -z "$project" ]; then
+		echo "harness-config: worktreeRoot: 登録名を特定できないため DLE_PROJECT に登録名を指定してください" >&2
+		return 1
+	fi
+	if [[ ! "$project" =~ ^[A-Za-z0-9._-]+$ ]] || [ "$project" = . ] || [ "$project" = .. ]; then
+		echo "harness-config: worktreeRoot: 登録名は [A-Za-z0-9._-]+（. と .. を除く）で指定してください。適切な明示 root も利用できます" >&2
+		return 1
+	fi
+	h="${DLE_HOME:-$HOME/.discord-loop-engine}"
+	case "$h" in /*) ;; *) h="$main/$h" ;; esac
+	h="$(realpath -m -s -- "$h")" || return 1
+	candidate="$(realpath -m -s -- "${h}-worktrees/$project")" || return 1
+	if [ "$main" = / ] || [ "$h" = / ] || [[ "$candidate" = "$main" || "$candidate" = "$main/"* || "$candidate" = "$h" || "$candidate" = "$h/"* ]]; then
+		echo "harness-config: worktreeRoot: 既定候補が main/DLE_HOME 配下になるため、適切な明示絶対 root を指定してください" >&2
+		return 1
+	fi
+	printf '%s\n' "$candidate"
+}
+
 case "${1:-}" in
+--worktree-root)
+	[ "$#" = 1 ] || { echo "harness-config: --worktree-root は引数不要です" >&2; exit 2; }
+	resolve_worktree_root
+	exit $?
+	;;
+--worktree)
+	if [ "$#" != 2 ] || [[ ! "${2:-}" =~ ^[1-9][0-9]*$ ]]; then
+		echo "harness-config: --worktree <正整数> を指定してください" >&2
+		exit 2
+	fi
+	WROOT="$(resolve_worktree_root)" || exit 1
+	printf '%s/issue-%s\n' "$WROOT" "$2"
+	exit 0
+	;;
 --path)
 	printf '%s\n' "$CONFIG"
 	exit 0

@@ -212,6 +212,8 @@ function refreshSetup(o: {
 	subagentAge?: number;
 	confirm?: boolean;
 	codex?: string;
+	worktreeRoot?: string;
+	startupError?: string;
 	maxTokens?: number;
 	maxEvents?: number;
 }) {
@@ -231,6 +233,7 @@ function refreshSetup(o: {
 				name,
 				cwd: "/c",
 				command: "claude",
+				startupError: o.startupError,
 				initialPrompt: "/loop",
 				refresh: {
 					prompt: o.worker ? "/loop" : "/discord-loop-engine:concierge refresh",
@@ -239,6 +242,7 @@ function refreshSetup(o: {
 					contextPercent: 15,
 					idleSeconds: 180,
 					cooldownMinutes: 30,
+					worktreeRoot: o.worktreeRoot,
 					waitForCodex: o.worker ?? false,
 					codexIgnoreAfterMinutes: 120,
 					cwd: "/c",
@@ -507,4 +511,66 @@ test("待機判定中に新しい入力が届いた場合は clear を見送る"
 	h.advance();
 	await h.sup.tick();
 	assert.deepEqual(h.typed(), []);
+});
+
+test("W6: 外部Codexの境界、壊れた列挙、id/cwdごとの120分観測", async () => {
+	for (const cwd of ["/c", "/c/.worktrees/issue-2", "/external/p/issue-2", "/external/p-other/issue-2", "/other"]) {
+		const same = cwd === "/c" || cwd.startsWith("/c/") || cwd.startsWith("/external/p/");
+		const o = { worker: true, worktreeRoot: "/external/p", codex: `codex-impl-2\t${cwd}\t@9` };
+		const h = refreshSetup(o);
+		h.advance();
+		await h.sup.tick();
+		assert.equal(h.typed().length, same ? 0 : 2, cwd);
+		if (same) {
+			h.advance(120 * 60000);
+			o.codex = `codex-impl-2\t${cwd}\t@10`;
+			await h.sup.tick();
+			assert.equal(h.typed().length, 0);
+			h.advance(120 * 60000);
+			await h.sup.tick();
+			assert.equal(h.typed()[0], "/clear");
+		}
+	}
+	for (const o of [{ codex: "broken" }, { codexFail: true }, { startupError: "p worktreeRoot: invalid" }]) {
+		const h = refreshSetup({ worker: true, worktreeRoot: "/external/p", ...o });
+		h.advance();
+		await h.sup.tick();
+		assert.equal(h.typed().length, 0);
+	}
+	const o = { worker: true, worktreeRoot: "/external/p", codex: "codex-impl-2\t/external/p/issue-2\t@9" };
+	const h = refreshSetup(o);
+	h.advance();
+	await h.sup.tick();
+	h.advance(120 * 60000);
+	o.codex = "codex-impl-2\t/external/p/issue-3\t@9";
+	await h.sup.tick();
+	assert.equal(h.typed().length, 0);
+});
+
+test("W6: startupErrorは初回からlogと通知、連投せず別projectを起動", async () => {
+	const logs: string[] = [],
+		notes: string[] = [],
+		calls: string[][] = [];
+	const reason = "bad worktreeRoot: 文字列/null/未指定で指定してください";
+	const sup = new Supervisor({
+		tmuxSession: "dle",
+		targets: () => [
+			{ name: "bad", cwd: "/bad", command: "", initialPrompt: "", startupError: reason },
+			{ name: "good", cwd: "/good", command: "claude", initialPrompt: "" },
+		],
+		tmux: async (args) => {
+			calls.push(args);
+			return { ok: true, stdout: "" };
+		},
+		isLive: () => false,
+		log: (s) => logs.push(s),
+		notify: (n, s) => notes.push(`${n}: ${s}`),
+	});
+	await sup.tick();
+	await sup.tick();
+	assert.equal(notes.length, 1);
+	assert.ok(logs.some((s) => s.includes(reason)));
+	assert.ok(notes[0]?.includes(reason));
+	assert.ok(calls.some((c) => c[0] === "new-window" && c.includes("dle-good")));
+	assert.ok(!calls.some((c) => c.includes("dle-bad")));
 });
