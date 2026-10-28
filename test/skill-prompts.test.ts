@@ -2,7 +2,16 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	realpathSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -403,8 +412,12 @@ test("W4: 実cycleのWT初期化と後続引数、loopのid走査とstatus/stop"
 				DLE_PROJECT: "registered",
 			};
 			const record = 'node -e \'require("node:fs").writeSync(1,JSON.stringify(process.argv.slice(1))+"\\n")\' -- "$@"';
+			// 起動例のパスは、共通手順どおり準備で解決した実値へ置き換える。
+			const quoted = await bash('printf %q "$TEST_WORKTREE"', { ...env, TEST_WORKTREE: `${expected}/issue-9` });
+			assert.equal(quoted.code, 0, quoted.stderr);
+			const prepared = after.replaceAll("/absolute/worktree", quoted.stdout);
 			const r = await bash(
-				`harness-hook() { ${record}; }; harness-codex() { ${record}; }; git() { ${record}; };\n${init}\n${after}`,
+				`harness-hook() { ${record}; }; harness-codex() { ${record}; }; git() { ${record}; };\n${init}\n${prepared}`,
 				env,
 			);
 			assert.equal(r.code, 0, r.stderr);
@@ -521,10 +534,8 @@ test("S2: 動画の合意範囲を質問から設計・実装・映像レビュ�
 	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-prompt7-"));
 	mkdirSync(path.join(dir, ".harness"));
 	try {
-		const start = skill.indexOf('cat > "$WT/.harness/prompt-impl-');
-		const end = skill.indexOf('\nharness-codex start "codex-impl-', start);
-		assert.ok(start > 0 && end > start);
-		const r = await bash(`harness-config() { echo demo; }\n${skill.slice(start, end).replaceAll("{n}", "3")}`, {
+		const request = section(skill, "# IMPLEMENTATION_REQUEST_BEGIN", "# IMPLEMENTATION_REQUEST_END");
+		const r = await bash(`harness-config() { echo demo; }\n${request.replaceAll("{n}", "3")}`, {
 			...process.env,
 			WT: dir,
 		});
@@ -596,4 +607,188 @@ test("P16c: READMEとスキルは設定探索と隔離の契約、要件の確�
 	const mapping = section(readme, "### 要件と検証の対応", "検証役は、");
 	for (const term of ["S16", "C16", "G16", "P16a", "P16b", "P16c", "条件付き存廃質問", "廃止に伴う表示の棚卸し"])
 		assert.ok(mapping.includes(term), term);
+});
+
+test("T17c: 起動の分離・拒否時の blocked・利用不可だけの代行を全手順で揃える", () => {
+	const common = section(skill, "## Codex の共通起動手順", "## フェーズ");
+	for (const term of ["単独の Bash", "別の Bash", "シェル変数", "絶対パス", "権限を広げ", "直接", "再試行"])
+		assert.ok(common.includes(term), term);
+	for (const stage of ["2", "4"]) {
+		const phase = section(skill, `## Phase ${stage}:`, `## Phase ${Number(stage) + 1}:`);
+		assert.match(phase, /共通起動手順/);
+		assert.match(phase, /準備[\s\S]*起動[\s\S]*監視/);
+		const starts = [...phase.matchAll(/```bash\n(harness-codex start[^\n]*)\n```/g)];
+		assert.equal(starts.length, 1);
+		assert.doesNotMatch(starts[0]?.[1] ?? "", /\$WT|&&|;|\|/);
+		assert.match(phase, /WT="\$\(harness-config --worktree/);
+	}
+	for (const phase of [
+		section(skill, "### Codex の監視", "## レビュー共通"),
+		section(skill, "## Phase 3:", "## Phase 4:"),
+		section(skill, "### 5-1.", "### 5-2."),
+		section(skill, "## Phase 6:", "## Codex 起動を blocked"),
+	])
+		assert.match(phase, /共通起動手順/);
+	const principle = section(skill, "3. **設計・実装は Codex**", "4. **");
+	const principleReasons = principle.match(/Codex が使えないとき（([^）]+)）/)?.[1];
+	assert.ok(principleReasons);
+	assert.doesNotMatch(principleReasons, /拒否|launch-failed|判別不能/);
+	const loopFallback = loopSkill.split("\n").find((line) => line.includes("既存の代行へ進む"));
+	assert.ok(loopFallback);
+	assert.doesNotMatch(loopFallback, /拒否|launch-failed|判別不能/);
+	assert.match(loopFallback, /exit 10 一律で切り替えず/);
+	const readmeReasons = readme7.match(/^- Codex が使えないとき（([^）]+)）/m)?.[1];
+	assert.ok(readmeReasons);
+	assert.doesNotMatch(readmeReasons, /拒否|launch-failed|判別不能/);
+	for (const doc of [skill, loopSkill, readme7]) {
+		for (const term of ["launch-failed", "判別不能", "blocked", "not-installed", "not-logged-in", "usage limit"])
+			assert.ok(doc.includes(term), term);
+	}
+	const fallback = section(skill, "## フォールバック", "## やらないこと");
+	assert.doesNotMatch(fallback, /launch-failed|権限判定で拒否|対処（codex login・許可/);
+	assert.match(fallback, /reason=not-installed.*not-logged-in/);
+	assert.match(fallback, /git add \/ commit \/ push/);
+	const blocked = section(skill, "## Codex 起動を blocked", "## フォールバック");
+	for (const term of ["通知失敗", "未遷移", "同じ tmux サーバー", "二重起動", "回答", "自動解除", "tick"])
+		assert.ok(blocked.includes(term), term);
+	assert.match(loopSkill, /共通起動手順/);
+	assert.match(loopSkill, /blocked[\s\S]*tick[\s\S]*再試行・代行しない/);
+	const onboard = readFileSync(new URL("../skills/onboard/SKILL.md", import.meta.url), "utf8");
+	assert.match(onboard, /起動1行[\s\S]*blocked/);
+	assert.doesNotMatch(onboard, /拒否したときは[\s\S]{0,80}Claude に切り替える/);
+	assert.doesNotMatch(readme7, /worker が記入/);
+	for (const term of [
+		"is_error: true",
+		"Permission for this action was denied",
+		"harness-codex start 経由",
+		"tool_use_id",
+		"未記録",
+		"仮ルール",
+		"A-番号",
+		"hooks.afterWorktree",
+		"読取り専用",
+		"blocked が増えうる",
+	])
+		assert.ok(readme7.includes(term), term);
+	assert.match(readme7, /Bash の拒否は 18 件[\s\S]*Codex 起動は 15 件/);
+	assert.match(readme7, /harness-codex start 経由の呼び出しは 23 件[\s\S]*拒否は 0 件/);
+});
+
+async function blocked17(options: {
+	stage: "spec" | "impl";
+	trailing?: boolean;
+	physicalHome?: boolean;
+	missing?: "config" | "prompt";
+	phaseCode?: number;
+}) {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-block17-"));
+	const physical = path.join(dir, "physical '\"$` (home)\n");
+	const logical = path.join(dir, "logical '\"$` (home)\n");
+	const home = (options.physicalHome ? physical : logical) + (options.trailing ? "/" : "");
+	const suffix = "space '\"$` (path)\n";
+	const wt = path.join(physical, suffix, "wt");
+	const config = path.join(physical, suffix, "profile.json");
+	const entry = path.join(physical, suffix, "bin", "harness-codex");
+	const prompt = path.join(wt, `.harness/prompt-${options.stage}-3.md`);
+	mkdirSync(path.dirname(entry), { recursive: true });
+	mkdirSync(path.dirname(prompt), { recursive: true });
+	symlinkSync(physical, logical, "dir");
+	writeFileSync(config, "{}");
+	writeFileSync(prompt, "本文を起動1行に埋め込まない");
+	writeFileSync(entry, '#!/usr/bin/env bash\nprintf "%s\\0" "$HARNESS_CONFIG" "$@" > "$TEST_CAPTURE/replayed"\n', {
+		mode: 0o755,
+	});
+	if (options.missing === "config") rmSync(config);
+	if (options.missing === "prompt") rmSync(prompt);
+	try {
+		const r = await bash(
+			`harness-config() { printf '%s\\n' "$HARNESS_CONFIG"; }
+harness-phase() {
+  printf '%s\\0' "$@" > "$TEST_CAPTURE/phase-args"
+  cp "$4" "$TEST_CAPTURE/body"
+  printf '%s' "$6" > "$TEST_CAPTURE/summary"
+  return ${options.phaseCode ?? 0}
+}
+${section(skill, "# CODEX_BLOCKED_BEGIN", "# CODEX_BLOCKED_END").replaceAll("{n}", "3")}
+quote_home "$HOME/logical path" > "$TEST_CAPTURE/logical-quote"
+quote_home "$TEST_OUTSIDE" > "$TEST_CAPTURE/outside-quote"
+touch "$TEST_CAPTURE/ready"`,
+			{
+				...process.env,
+				HOME: home,
+				WT: wt,
+				CODEX_STAGE: options.stage,
+				CODEX_REASON: "launch-failed",
+				HARNESS_CONFIG: config,
+				PATH: `${path.dirname(entry)}:${process.env.PATH}`,
+				TEST_CAPTURE: dir,
+				TEST_OUTSIDE: `${logical}-other/file`,
+			},
+		);
+		if (options.missing || options.phaseCode) {
+			assert.notEqual(r.code, 0);
+			assert.ok(!existsSync(path.join(dir, "ready")));
+			assert.equal(existsSync(path.join(dir, "phase-args")), !options.missing);
+			return;
+		}
+		assert.equal(r.code, 0, r.stderr);
+		const body = readFileSync(path.join(dir, "body"), "utf8");
+		const summary = readFileSync(path.join(dir, "summary"), "utf8");
+		const lines = [body, summary].map((text) => {
+			assert.ok(!text.includes(logical), "論理 HOME を含めない");
+			assert.ok(!text.includes(physical), "realpath HOME を含めない");
+			assert.ok(!text.includes("本文を起動1行に埋め込まない"));
+			const fences = [...text.matchAll(/^```bash\n([^\n]+)\n```$/gm)];
+			assert.equal(fences.length, 1, "起動1行がフェンス内にある");
+			assert.match(fences[0]?.[1] ?? "", /^HARNESS_CONFIG="\$HOME"\//);
+			return fences[0]?.[1] ?? "";
+		});
+		assert.equal(lines[0], lines[1], "本文と summary は同じ1行");
+		const phaseArgs = readFileSync(path.join(dir, "phase-args"), "utf8").split("\0").slice(0, -1);
+		assert.deepEqual(phaseArgs, [
+			"3",
+			"blocked",
+			"--comment-file",
+			path.join(wt, ".harness/codex-blocked-3.md"),
+			"--summary",
+			summary,
+		]);
+		assert.match(readFileSync(path.join(dir, "logical-quote"), "utf8"), /^"\$HOME"\//);
+		const replay = await bash(
+			`${lines[0]}\n${readFileSync(path.join(dir, "outside-quote"), "utf8").replace(/^/, "printf '%s' ")} > "$TEST_CAPTURE/outside-replayed"`,
+			{
+				...process.env,
+				HOME: home,
+				TEST_CAPTURE: dir,
+				HARNESS_CONFIG: "/wrong-config",
+			},
+		);
+		assert.equal(replay.code, 0, replay.stderr);
+		const args = readFileSync(path.join(dir, "replayed"), "utf8").split("\0").slice(0, -1);
+		assert.deepEqual(args, [
+			`${home}/${suffix}/profile.json`,
+			"start",
+			`codex-${options.stage}-3`,
+			`${home}/${suffix}/wt`,
+			`${home}/${suffix}/wt/.harness/prompt-${options.stage}-3.md`,
+		]);
+		assert.deepEqual(
+			[args[0], args[3], args[4]].map((v) => realpathSync(v ?? "")),
+			[config, wt, prompt],
+		);
+		assert.equal(readFileSync(path.join(dir, "outside-replayed"), "utf8"), `${logical}-other/file`);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test("T17c: 設計/実装の fenced 起動1行は symlink・末尾スラッシュ・特殊文字を含む HOME で貼り直せる", async () => {
+	for (const stage of ["spec", "impl"] as const)
+		for (const trailing of [false, true])
+			for (const physicalHome of [false, true]) await blocked17({ stage, trailing, physicalHome });
+});
+
+test("T17c: 設定・依頼の欠損は案内を捏造せず、通知失敗も完了にしない", async () => {
+	for (const missing of ["config", "prompt"] as const) await blocked17({ stage: "spec", missing });
+	await blocked17({ stage: "impl", phaseCode: 4 });
 });

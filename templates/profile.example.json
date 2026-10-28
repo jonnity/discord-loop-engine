@@ -14,7 +14,7 @@
 		"beforeMerge": []
 	},
 	"codex": {
-		"command": "codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox"
+		"command": "codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write"
 	},
 	"context": ["CLAUDE.md", "AGENTS.md", "README.md"],
 	"notes": "リポジトリに規約ファイルが無いときの、このプロジェクトの決まりごと（Codex とレビュー役が読む）",

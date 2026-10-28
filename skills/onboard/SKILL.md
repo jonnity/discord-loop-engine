@@ -69,7 +69,7 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
   - 規約ファイルに「PR 前に必ず〜」「マージ前に〜を確認」などがあれば、ここに写す。無ければ書かない
 - `permissions`: worker が確認なしで使ってよいコマンド（`Bash(npm:*)` など。広げすぎない）。
   Codex の起動（`harness-codex` / `tmux new-window` / `codex exec`）の許可は**足さない**（権限判定が拒否したときは
-  issue-cycle が info で知らせて Claude に切り替える。判定を回避する許可を雛形で配らない）
+  issue-cycle が起動1行を案内して blocked にする。未導入・認証切れ・usage limit だけ代行し、判定を回避する許可を雛形で配らない）
 - `humanChecks`: 自動では確かめられないもの
 - `demo`: 録画の手順が既にあるときだけ。無ければ `null`
 - `specRecordDir`: 設計記録を PR に含める慣習がリポジトリにあるときだけ。無ければ `null`

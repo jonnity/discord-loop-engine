@@ -3,8 +3,9 @@
 # harness-codex — Codex を tmux のウィンドウで起動する。起動だけを担い、状態の確認は harness-codex-status。
 #
 # 起動前に harness-codex-status check で認証を確かめ、使えなければウィンドウを作らず exit 10 で返す
-# （理由は stderr の `reason=`）。呼び出し側（issue-cycle）は exit 10 を「Codex 不可」として info 通知し、
-# harness-implementer に切り替える。
+# （理由は stderr の `reason=`）。呼び出し側（issue-cycle）は未導入・未ログインなら info 通知し、
+# harness-implementer に切り替える。launch-failed は代行せず blocked と人向け起動1行へ進む。
+# ラッパー外の権限拒否は exit 10 とせず、ツール結果を見て同じ blocked 手順へ進む。
 #
 # 起動したウィンドウは、終了しても (1) ペインに EXIT=<code> (2) <worktree>/.harness/<window>.exit
 # (3) remain-on-exit で残る。ウィンドウの id は <worktree>/.harness/<window>.id に保存する。即終了（未ログインの 401 など）でも原因を後から読める。
@@ -14,7 +15,7 @@
 #
 # 使い方: harness-codex start <window> <worktree> <prompt-file>
 #         harness-codex stop <window> <worktree>
-# 終了コード: 0=起動した / 10=Codex 不可（check が失敗、または tmux の起動に失敗） / 2=引数不正
+# 終了コード: 0=起動受付 / 10=check 失敗または launch-failed（reason で代行と blocked を分ける） / 2=引数不正
 
 set -uo pipefail
 
@@ -46,7 +47,7 @@ rm -f "$EXITFILE" "$IDFILE" # 前回の終了ファイルが残っていると�
 
 # 設定の codex.command はシェルのコマンドなので、そのまま使う（引用し直すと1語になって壊れる）。
 # 引用するのは埋め込むパスだけ（空白入りのパスに耐える）
-DEFAULT_CODEX='codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox'
+DEFAULT_CODEX='codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write'
 CODEX="$("$SCRIPT_DIR/harness-config" '.codex.command' "$DEFAULT_CODEX")"
 CODEX="${CODEX//\{worktree\}/$(printf '%q' "$WT")}"
 INNER="$CODEX \"\$(cat $(printf '%q' "$PROMPT"))\"; rc=\$?; echo EXIT=\$rc | tee $(printf '%q' "$EXITFILE"); exit \$rc"

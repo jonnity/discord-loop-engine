@@ -143,6 +143,57 @@ check "codex start: 終了コードを .exit に残す" 'grep -qx "EXIT=0" "$CW/
 cx start codex-spec-9 >/dev/null 2>&1
 check "codex start: 引数不正は 2" '[ $? -eq 2 ]'
 
+# T17a/b: 配布値だけでなく、tmux 内の bash が実際に渡す argv と片付けを確認する。
+EXPECTED17='codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write'
+check "T17a: ラッパーの既定 command は完全一致" 'grep -Fqx "DEFAULT_CODEX='"'"'$EXPECTED17'"'"'" "$BIN/harness-codex"'
+for template17 in "$ROOT/templates/profile.example.json" "$ROOT/templates/examples/kishimen-tool.json"; do
+	check "T17a: テンプレートの command は完全一致（${template17##*/}）" 'jq -e --arg expected "$EXPECTED17" '\''.codex.command == $expected'\'' "$template17" >/dev/null'
+done
+launch17() (
+	case17="$1"
+	root17="$TMP/launch17-$case17"
+	wt17="$root17/wt space '\$ (x)"
+	prompt17="$root17/prompt space '\$ (x).md"
+	mkdir -p "$wt17/.harness" "$root17/bin" || exit 1
+	export HARNESS_CONFIG="$root17/profile.json" TMUX_STUB_LOG="$root17/tmux.log" TMUX_STUB_PANES="$root17/panes"
+	case "$case17" in
+	absent) echo '{}' > "$HARNESS_CONFIG" ;;
+	empty) echo '{"codex":{}}' > "$HARNESS_CONFIG" ;;
+	legacy) jq -n --arg c 'codex -C {worktree} exec --dangerously-bypass-approvals-and-sandbox' '{codex:{command:$c}}' > "$HARNESS_CONFIG" ;;
+	custom) jq -n --arg c 'codex -C {worktree} exec --model custom' '{codex:{command:$c}}' > "$HARNESS_CONFIG" ;;
+	esac
+	printf '%s' '依頼 "quote" '\''single'\'' $value `literal`
+次の行' > "$prompt17"
+	cat > "$root17/bin/codex" <<'STUB17'
+#!/usr/bin/env bash
+printf '%s\0' "$@" | jq -Rs 'split("\u0000")[:-1]' > "$ARGV17"
+STUB17
+	chmod +x "$root17/bin/codex" || exit 1
+	: > "$TMUX_STUB_LOG"
+	echo old > "$wt17/.harness/codex-spec-17.exit"
+	cx start codex-spec-17 "$wt17" "$prompt17" >/dev/null 2>&1 || exit 1
+	[ "$(cat "$wt17/.harness/codex-spec-17.id")" = @7 ] || exit 1
+	[ ! -e "$wt17/.harness/codex-spec-17.exit" ] || exit 1
+	inner17="$(sed -n 's/^new-window -n codex-spec-17 -P -F #{window_id} //; s/ ; set-option.*$//p' "$TMUX_STUB_LOG")"
+	ARGV17="$root17/argv.json" PATH="$root17/bin:$PATH" bash -c "$inner17" >/dev/null 2>&1 || exit 1
+	[ -s "$root17/argv.json" ] || exit 1
+	case "$case17" in
+	absent|empty) args17='["-c","model_reasoning_effort=high","-c","sandbox_workspace_write.network_access=true","exec","--sandbox","workspace-write"]' ;;
+	legacy) args17='["exec","--dangerously-bypass-approvals-and-sandbox"]' ;;
+	custom) args17='["exec","--model","custom"]' ;;
+	esac
+	jq -e --arg wt "$wt17" --rawfile prompt "$prompt17" --argjson args "$args17" \
+		'. == (["-C", $wt] + $args + [$prompt])' "$root17/argv.json" >/dev/null || exit 1
+	[ "$(cat "$wt17/.harness/codex-spec-17.exit")" = EXIT=0 ] || exit 1
+	printf '@7 codex-spec-17 1\n' > "$TMUX_STUB_PANES"
+	cx stop codex-spec-17 "$wt17" >/dev/null 2>&1 || exit 1
+	grep -qx 'kill-window -t @7' "$TMUX_STUB_LOG" &&
+		[ ! -e "$wt17/.harness/codex-spec-17.id" ] && [ ! -e "$wt17/.harness/codex-spec-17.exit" ]
+)
+for case17 in absent empty legacy custom; do
+	check "T17a/b: $case17 の実 argv・ID・exit・stop" 'launch17 "$case17"'
+done
+
 # status は window 名ではなく start が保存した window-id で引く
 : >"$TMUX_STUB_PANES"; rm -f "$CW/.harness/codex-impl-4.exit" "$CW/.harness/codex-impl-4.id"
 check "codex status: ウィンドウも .exit も無ければ none" '[ "$(cs status codex-impl-4 "$CW")" = none ]'
