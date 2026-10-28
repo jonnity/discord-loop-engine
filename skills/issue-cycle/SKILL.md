@@ -19,8 +19,9 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
    ラベルの直接操作・`gh pr merge`・Discord への直接 curl は `harness-guard` hook が止める。
    **「通知したつもり」を構造的に起こさない**ための設計なので、迂回策を探さない。
 3. **設計・実装は Codex**。Claude は設計書もコードも直接書かない（NG 時も Codex に差し戻す）。
-   Codex が使えないとき（未ログイン・起動の拒否・usage limit など）は、info で知らせて
+   Codex が使えないとき（未導入・未ログイン・usage limit）は、info で知らせて
    `harness-implementer` に自動で切り替える（「フォールバック」節）。
+   起動の権限拒否・launch-failed・判別不能は代行せず blocked と人向け起動1行へ進む。
 4. **主セッションを薄く保つ**。設計書・diff・CI ログ・tmux ログ全文は主セッションに読み込まず、
    サブエージェントに読ませて結論だけ受け取る。
 5. **マージは人間が決める**。どれだけ green でも `harness-merge` は人間の承認記録なしには通らない。
@@ -76,6 +77,28 @@ preflight/gate は自分で全 DLE_*/DISCORD_* を除去し、一時 home/socket
 再依頼・復帰・Phase 6 の片付けでも、同じ `WT="$(harness-config --worktree {n})" || exit 1` で初期化する。解決失敗では後続操作を止め、旧既定へフォールバックしない。
 
 以下 `{n}` は Issue 番号、`$WT` は `harness-config --worktree {n}` の解決済み絶対パス。
+
+## Codex の共通起動手順
+
+全ての起動・再起動（Phase 2/4、設計/実装レビューNG、監視、CI red、衝突解消、ユーザーNG）は、
+以下の3段階を守る。各段階を別の Bash ツール呼び出しにする。
+
+1. **準備**: `WT` の解決、必要な `harness-codex stop`、依頼ファイルの作成・内容確認、フェーズ変更を済ませる。
+   `harness-config --path` と `command -v harness-codex`（PATH に無ければ `${CLAUDE_PLUGIN_ROOT}/bin/harness-codex`）を
+   `realpath` で絶対パスにし、実効設定・入口・WT・非空の依頼ファイルが実在することを確認する。
+2. **起動**: `harness-codex start` の1コマンドだけを単独の Bash で呼ぶ。`cd`、代入、`&&`、`;`、pipe、
+   通知・フェーズ変更・status・capture を同じ呼び出しへ足さない。呼び出し間でシェル変数が残ると考えず、
+   準備の出力から得た絶対パスを `printf %q` で引用して直接記載する。入口が PATH に無ければ解決済みの絶対入口を使う。
+   パスは %q の出力をそのまま置き、さらに引用符で囲まない。
+   以下の起動例の `{n}` とパスは実値へ置き換える。
+3. **監視**: 起動受付の0を確認した後だけ、別の Bash で WT を解決し直し、保存ID・status・`workdir:`・成果物を確認する。
+   起動受付は処理完了ではない。拒否された場合は監視へ進まない。
+
+Bash の権限判定による拒否は、start が動いていない場合もあり exit 10 として扱わない。
+`reason=launch-failed`（tmux 起動失敗、exit 10 は維持）と拒否/利用不可の判別不能も、
+「Codex 起動を blocked にする」へ進む。自動再試行・Claude 代行・直接の `tmux new-window … codex` / `codex exec`・
+フラグや別シェル/別名/env 経由の迂回をしない。worker が permissions・permission mode・設定を変えて権限を広げない。
+`reason=not-installed` / `not-logged-in` の exit 10 と、確認できた認証切れ・usage limit だけがフォールバック対象。
 
 ## フェーズ（ラベル）
 
@@ -268,9 +291,21 @@ fi
 # 完成した prompt-spec を読み、導入部・チェックリスト・gate と欠落時の説明が揃ったことを確認してから起動する。
 cat "$WT/.harness/prompt-spec-{n}.md"
 # DESIGN_REQUEST_END
-harness-codex start "codex-spec-{n}" "$WT" "$WT/.harness/prompt-spec-{n}.md"   # 10 なら「フォールバック」節へ
-sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-spec-{n}.id")" -p -S -30 | grep "workdir:"   # $WT であること（必須）
 ````
+
+準備はここで終了。共通起動手順に従い、解決済みのパスへ置換した次の1行を単独の Bash で起動する。
+exit 10 は reason を読んでフォールバックと blocked を分ける。
+
+```bash
+harness-codex start "codex-spec-{n}" /absolute/worktree /absolute/worktree/.harness/prompt-spec-{n}.md
+```
+
+起動受付後の監視は別の Bash で行う。
+
+```bash
+WT="$(harness-config --worktree {n})" || exit 1
+sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-spec-{n}.id")" -p -S -30 | grep "workdir:"   # $WT であること（必須）
+```
 
 gate は依頼生成時のスナップショットとして、非空の配列をコマンドの再評価・実行・並べ替えなしで添付する。
 定義を後で変えた場合は、更新後の列と CI の対応をレビューで照合する。欠落・空・配列以外の表示は
@@ -300,16 +335,18 @@ T5 は gate 取得の非0を stub で注入する単体検証であり、不正 
 
 ### Codex の監視と再起動（全 Phase 共通）
 
+再起動も共通起動手順の準備・単独起動・監視へ分ける。再起動時の権限拒否は上限回数を待たず直ちに blocked とし、再試行しない。
+
 **終了済みのウィンドウ**（`harness-codex-status status` が `exited:<code>` / `exited:unknown`）は、
 サブエージェントを起こさずに判定する: ペイン末尾（`tmux capture-pane -pt "$(cat "$WT/.harness/<window>.id")" | tail -30`）か
 `$WT/.harness/<window>.exit` を見て、認証切れ・usage limit なら「フォールバック」節へ、それ以外は
-`harness-codex stop <window> "$WT"`（ウィンドウと `.id`・`.exit` を消す。`tmux kill-window` を直接打たない）で片付けてから同じ依頼で `harness-codex start` し直す。**終了済みのウィンドウは必ず
+`harness-codex stop <window> "$WT"`（ウィンドウと `.id`・`.exit` を消す。`tmux kill-window` を直接打たない）で片付けてから同じ依頼で共通起動手順に従い `harness-codex start` し直す。**終了済みのウィンドウは必ず
 `harness-codex stop` で片付ける**（残すとシェパードが毎 tick 拾う）。
 
 15分経っても出力が無ければ `tmux capture-pane -pt "$(cat "$WT/.harness/codex-<spec|impl>-{n}.id")" | tail -30` を **サブエージェントに**
 読ませて状態だけ受け取る。
 
-- 異常終了・無応答 → `harness-codex stop <window> "$WT"` して同じ依頼で `harness-codex start` し直す（`exec` は一回実行なので
+- 異常終了・無応答 → `harness-codex stop <window> "$WT"` して同じ依頼で共通起動手順に従い `harness-codex start` し直す（`exec` は一回実行なので
   `send-keys` で追い依頼しない）
 - 承認プロンプト・usage limit で止まっている → issue-loop の「codex シェパード」に従う
 - 同じ依頼で2回失敗 → 依頼を具体化（対象ファイル・期待出力）して再依頼
@@ -351,13 +388,17 @@ gate と同じ列・順序の検査、新規テストの探索/除外/呼び出�
 - **OK** → 設計書を Issue にコメント（`## 実装プラン` 見出し＋本文、末尾 `<!-- harness:note -->`）し、
   `harness-phase {n} implementing` → Phase 4
 - **NG** → `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストと gate を残した同じファイルを渡して
-  `codex-spec-{n}` を `harness-codex stop` → `harness-codex start` で再起動し、spec を書き直させる（Claude は直さない）。
+  `codex-spec-{n}` を共通起動手順（準備で `harness-codex stop` → 別 Bash で `harness-codex start`）で再起動し、spec を書き直させる（Claude は直さない）。
   フォールバックにもこの同じ依頼ファイルのパスを渡す
 
 ## Phase 4: 実装（Codex）
 
+共通起動手順の準備として、WT を解決し直してから依頼を作る。
+
 ```bash
+WT="$(harness-config --worktree {n})" || exit 1
 harness-codex stop codex-spec-{n} "$WT"   # id が無くても安全（harness-implementer で書いた場合など）
+# IMPLEMENTATION_REQUEST_BEGIN
 cat > "$WT/.harness/prompt-impl-{n}.md" <<EOF
 .harness/spec/{n}.md の設計書に従って実装してください。テストを先に書き、既存テストを壊さないこと。
 完了したら .harness/impl/{n}.md に完了サマリ（変更ファイル・受け入れ条件ごとの確認方法・
@@ -370,7 +411,21 @@ $(harness-config '.demo.run') で pass させ、動画が $(harness-config '.dem
 Issue と無関係な差分は元の内容に戻し、戻せなければサマリで worker へ報告してください。
 Codex は git add/commit/push/checkout/stash 等の git 操作をしないこと。
 EOF
-harness-codex start "codex-impl-{n}" "$WT" "$WT/.harness/prompt-impl-{n}.md"   # 10 なら「フォールバック」節へ
+# IMPLEMENTATION_REQUEST_END
+cat "$WT/.harness/prompt-impl-{n}.md"
+```
+
+準備後、共通起動手順に従いパスを実値に置換して、次の1行だけを単独の Bash で起動する。
+exit 10 は reason を確認し、拒否・launch-failed・判別不能なら blocked とする。
+
+```bash
+harness-codex start "codex-impl-{n}" /absolute/worktree /absolute/worktree/.harness/prompt-impl-{n}.md
+```
+
+起動受付後の監視は別の Bash にする。
+
+```bash
+WT="$(harness-config --worktree {n})" || exit 1
 sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-impl-{n}.id")" -p -S -30 | grep "workdir:"
 ```
 
@@ -392,7 +447,7 @@ gate の列・順序と終了値、新規テストの探索/除外/呼び出し�
 停止計画が impl サマリへ引き継がれたかも確認する。未実施は未確認として残す。
 この時点では実 CI ログ・修正回数を要求せず、その判定は PR 作成後の 5-3 に置く。
 
-- **NG** → 指摘を添えて `codex-impl-{n}` を `harness-codex start` で再起動（軽微でも Claude は直さない）
+- **NG** → 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動（軽微でも Claude は直さない）
 
 ### 5-2. 実動作の確認（UI 変更のとき）
 
@@ -513,7 +568,7 @@ attention 属性のない旧 gate は全承認経路で再依頼が必要。依�
 
 ```bash
 git -C "$WT" fetch origin && git -C "$WT" merge "origin/$(harness-config '.baseBranch' main)"   # base が進んでいれば
-# 衝突したコードの解消は Codex に依頼（`harness-codex start`）。push 後は CI green を待ち、head が変わったので承認依頼をやり直す
+# 衝突したコードの解消は Codex に依頼（共通起動手順で別 Bash の `harness-codex start`）。push 後は CI green を待ち、head が変わったので承認依頼をやり直す
 (cd "$WT" && harness-merge {n}) || exit 1             # PR 上の承認
 (cd "$WT" && harness-merge {n} --chat-approval "<回答本文>" --attention "<回答のmeta.attention>") || exit 1  # engine の回答だけ
 harness-codex stop codex-impl-{n} "$WT"   # worktree を消す前に（消した後は id を読めない）
@@ -539,22 +594,100 @@ worktree・tmux ウィンドウの片付けだけを行う。
 1. PR は閉じない。worktree も残す
 2. `learning_add`（tag: `user-ng`）で記録する（自己改善の材料）。engine が無い環境では `.harness/failure-log.jsonl` に1行追記:
    `jq -nc --arg ts "$(date -u +%FT%TZ)" --argjson issue {n} --arg tag user-ng --arg summary "..." --arg detail "..." '{ts:$ts,issue:$issue,tag:$tag,summary:$summary,detail:$detail,promoted:false}' >> "$(harness-config --root)/.harness/failure-log.jsonl"`
-3. 指摘を添えて `codex-impl-{n}` を `harness-codex start` で再起動し、`harness-phase {n} impl-review` で Phase 5 へ戻す
+3. 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動し、`harness-phase {n} impl-review` で Phase 5 へ戻す
+
+## Codex 起動を blocked にする
+
+権限拒否・`reason=launch-failed`・判別不能は、観測した層と秘密を除いた理由を本文へ書き、
+起動とは別の Bash で `harness-phase {n} blocked --comment-file ... --summary ...` を呼ぶ。
+通知失敗なら未遷移であり、blocked 完了としない。ラベルを直接変更しない。
+`loop_meta.codex_unavailable` は利用不可専用で、権限拒否の解除には使わない。
+
+以下は人が貼る起動1行を準備して通知する例であり、自動再試行には使わない。
+`WT` を解決し、`CODEX_STAGE` を拒否された段階（設計 `spec`、実装 `impl`）、
+`CODEX_REASON` を `tool-denied` / `launch-failed` / `unknown` のいずれかに設定してから実行する。
+実際の理由の補足も秘密・生ログ・ホーム絶対パスを含めずに記す。
+設定・入口・依頼が欠損する場合、この例は通知前に止まる。不足を本文へ書いて既存の blocked 入口で依頼し、
+実在しない設定指定や起動1行を捏造しない。
+
+ホーム末尾の `/` を除き、論理 `$HOME` と `realpath "$HOME"` の両方を接頭辞候補にする。
+引用前にディレクトリ境界で接頭辞を外し、残りだけを `%q` で引用して `"$HOME"/…` へ連結する。
+本文の説明も同じ表記にする。Markdown がバックスラッシュを消さないよう、本文・Discord summary の両方で
+同じ起動1行をフェンスのコードブロックに入れる（インラインコードにしない）。
+
+````bash
+# CODEX_BLOCKED_BEGIN
+case "$CODEX_STAGE" in spec|impl) ;; *) exit 1 ;; esac
+case "$CODEX_REASON" in tool-denied|launch-failed|unknown) ;; *) exit 1 ;; esac
+home_prefix="$HOME"
+while [ "$home_prefix" != / ] && [ "${home_prefix%/}" != "$home_prefix" ]; do
+  home_prefix="${home_prefix%/}"
+done
+IFS= read -r -d '' real_home < <(realpath -z "$home_prefix") || exit 1
+quote_home() {
+  local value="$1" prefix remainder quoted
+  for prefix in "$home_prefix" "$real_home"; do
+    if [ "$value" = "$prefix" ]; then
+      printf '"$HOME"'
+      return
+    fi
+    case "$value" in
+    "${prefix%/}/"*)
+      remainder="${value#"${prefix%/}/"}"
+      printf -v quoted '%q' "$remainder"
+      printf '"$HOME"/%s' "$quoted"
+      return
+      ;;
+    esac
+  done
+  printf '%q' "$value"
+}
+config_path="$(harness-config --path)" || exit 1
+config_path="$(realpath "$config_path")" || exit 1
+[ -s "$config_path" ] || exit 1
+codex_entry="$(command -v harness-codex)" || codex_entry="${CLAUDE_PLUGIN_ROOT:-}/bin/harness-codex"
+codex_entry="$(realpath "$codex_entry")" || exit 1
+[ -x "$codex_entry" ] || exit 1
+WT="$(realpath "$WT")" || exit 1
+window="codex-$CODEX_STAGE-{n}"
+prompt_path="$WT/.harness/prompt-$CODEX_STAGE-{n}.md"
+[ -s "$prompt_path" ] || exit 1
+config_q="$(quote_home "$config_path")"
+entry_q="$(quote_home "$codex_entry")"
+wt_q="$(quote_home "$WT")"
+prompt_q="$(quote_home "$prompt_path")"
+printf -v window_q '%q' "$window"
+human_line="HARNESS_CONFIG=$config_q $entry_q start $window_q $wt_q $prompt_q"
+blocked_file="$WT/.harness/codex-blocked-{n}.md"
+{
+  printf 'Issue #%s / %s\n理由: %s（起動停止。代行・迂回・自動再試行なし）\n' '{n}' "$CODEX_STAGE" "$CODEX_REASON"
+  printf '実効設定: %s\n入口: %s\nworktree: %s\n依頼: %s\n' "$config_q" "$entry_q" "$wt_q" "$prompt_q"
+  printf '\n同じユーザー・同じ tmux サーバーに接続した Bash で実行してください。\n\n```bash\n%s\n```\n' "$human_line"
+  printf '\n起動結果を同じ blocked の回答先へ返してください。回答・status・workdir・成果物を確認して元の段階へ復帰します。\n'
+} > "$blocked_file"
+printf -v blocked_summary 'Codex 起動停止: %s\n\n```bash\n%s\n```' "$CODEX_REASON" "$human_line"
+harness-phase {n} blocked --comment-file "$blocked_file" --summary "$blocked_summary" || exit 1
+# CODEX_BLOCKED_END
+````
+
+人は既存 engine と同じユーザー・同じ tmux サーバーに接続した Bash ターミナルで起動する。
+カスタム socket・PATH・配置の違いがあれば接続先を確認して案内し直す。人が既に実行した可能性があるときは
+`.id` と status を先に確認し、二重起動しない。設定内容・認証値・依頼本文は公開本文へ貼らない。
+人の回答後、worker は status・正しい cwd・成果物を確認し、元の designing/implementing または対応する review へ
+`harness-phase` で戻す。成果物や login check の成功だけで blocked を自動解除しない。
+blocked 中の tick で起動や通知を繰り返さず、人の回答を待つ。
 
 ## フォールバック: Codex が使えない（自動で Claude に切り替える）
 
-次のどれも「Codex 不可」として同じに扱う。**Codex の起動・再起動は、どの場面でも**（Phase 2/4、Phase 3/5/6 の
-NG 差し戻し、マージ前の衝突解消、issue-loop の CI 差し戻しを含む）`harness-codex start` を通し、
-exit 10 ならこの節に入る。
+exit 10 一律ではなく reason と監視結果で、次の場合だけ「Codex 利用不可」と判断する。
+全起動・再起動は共通起動手順を通す。
 
-- `harness-codex-status check` / `harness-codex start` が exit 10（`reason=not-installed` / `not-logged-in` / `launch-failed`）
-- `harness-codex start` を含む Bash 呼び出しが**権限判定で拒否された**。別のコマンド・別のフラグ・別の経路を
-  探さない（判定を回避しない）。拒否の理由を info の本文に入れる
+- `harness-codex-status check` / `harness-codex start` が exit 10 かつ `reason=not-installed` / `not-logged-in`
 - 監視中に usage limit・認証切れ・起動直後の即終了（`exited:*` で原因が認証か limit）を確認した
 
 動作:
 
-1. `harness-notify --event info --title "Codex が使えないため Claude で進めます（#{n}）" --url <Issue の URL> --body "<reason と対処（codex login・許可・復帰時刻）>"`
+1. `harness-notify --event info --title "Codex が使えないため Claude で進めます（#{n}）" --url <Issue の URL> --body "<reason と対処（codex login・復帰時刻）>"`
    を**同じ原因につき一度だけ**出す（`handoff.md` の `loop_meta.codex_unavailable: <reason>@<時刻>` に記録し、
    `harness-codex-status check` が 0 になるまで再通知しない）。info なので人の返事は待たず、blocked にもしない。
    Codex が制限で止まっているなら Claude 側に余裕があるはず、という前提で待たずに切り替える

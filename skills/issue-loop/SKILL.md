@@ -93,7 +93,12 @@ for idf in "$WROOT"/issue-*/.harness/codex-*.id; do
   - `exited:0` で成果物あり（spec なら `.harness/spec/{n}.md`、impl なら `.harness/impl/{n}.md`）→ 正常終了。
     再起動せず `harness-codex stop <window> <worktree>` で片付けるだけ（`.id`・`.exit` も消えるので次の tick から拾わない）
   - 成果物なし、または非 0 → `issue-cycle` の「Codex の監視と再起動」の判定
-    （認証切れ・usage limit → フォールバック、それ以外 → `harness-codex stop` して `harness-codex start` で再起動）
+    （認証切れ・usage limit → フォールバック、それ以外 → 共通起動手順の準備で `harness-codex stop`、別 Bash の `harness-codex start` で再起動）
+
+再依頼も issue-cycle の共通起動手順（準備・単独の Bash 起動・別 Bash の監視）へ従う。
+起動の権限拒否・`reason=launch-failed`・拒否/利用不可の判別不能は、代行せず blocked と人向け起動1行へ進む。
+blocked 中は tick で再試行・代行しない。通知も繰り返さず人の回答を待ち、login check の成功だけで解除しない。
+exit 10 一律で切り替えず、`reason=not-installed` / `not-logged-in` と確認済みの認証切れ・usage limit だけ既存の代行へ進む。
 
 `running` のウィンドウがあれば `model: "haiku"` のサブエージェント1体に、全ウィンドウの監視を最大3分任せる:
 
@@ -167,7 +172,7 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
    **再トリガー目的の空コミットは積まない**（harness-guard が止める）
 3. `REAL` → サブエージェントに「根本原因と、Codex に渡す修正指示を1段落で」まとめさせ、
    `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する
-   （Claude はコードを直さない）。直ったら `harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
+   （Claude はコードを直さない。再依頼も共通起動手順で起動を単独の Bash に分け、拒否されたら直ちに blocked）。直ったら `harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
    0なら push、1ならコード検査失敗として差し戻し、2なら設定を修正する。
    3なら環境不備なので push を止め、Codex へ再差し戻しせず、この失敗は REAL の回数に加算しない。
    自動解消できなければ `harness-phase {n} blocked --comment-file ...` で項目名・失敗理由・必要な環境対応を依頼する。

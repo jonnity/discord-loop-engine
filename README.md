@@ -300,6 +300,28 @@ claude plugin update discord-loop-engine@discord-loop-engine
 dle down && dle up
 ```
 
+### Codex の設定移行
+
+Codex の既定値と配布雛形は次のコマンドです。明示された `codex.command` は優先されるため、既存設定は自動で変わりません。
+
+```text
+codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write
+```
+
+`workspace-write` では `$HOME` は読取り専用です（codex-cli 0.164.0 で確認）。ネットワークを許しても `~/.npm`・`~/.cargo` 等のキャッシュ書込みや、
+依存導入・ビルドが失敗しえます。依存導入は worker 側の `hooks.afterWorktree` か gate で行い、Codex の書込み範囲は広げません。
+一時領域・追加 root の可否は実設定に依存し、外側の sandbox・OS・組織ポリシー・認証・プロキシをネットワーク設定で越えることはできません。
+
+engine 側の harness.json に `codex.command` を明示しているプロジェクトには、既定値の変更が効きません。
+窓口が該当するプロジェクトと実効設定の一覧を確認します。`HARNESS_CONFIG`、main の設定、engine 側設定の優先を確認し、
+対象ごとの旧→新 command・他項目を保つ完全な設定案・Codex に依存導入やビルドをさせているか・ホーム制限の影響と worker との分担を提示します。
+独自 command を自動置換せず、上書き元が不明なら移行を止めます。
+plugin/engine/worker の更新後、A-番号の承認を得てから窓口が書き換えます。worker は engine 側 harness.json やユーザーの settings を編集しません。
+作業中の Codex の二重起動・途中切替を避け、次の起動で command・cwd・ネットワーク・拒否時分岐を確認し、同じ回答先へ結果を返します。
+拒否時に代行させる旧来の仮ルールが台帳にあれば、窓口が撤回または更新し、復帰時も新方針が渡ることを確認します。
+
+更新から設定移行まで、明示 bypass の設定には既定変更が効かず、拒否時の代行だけがなくなるため blocked が増えうる影響があります。
+
 ### うまく動かないとき
 
 | 症状 | 見るところ |
@@ -387,9 +409,45 @@ projects/<名前>/       プロジェクトごとの設定（harness.json）と�
 - Claude Code の channels はリサーチプレビューです。自作の channel を使うため `--dangerously-load-development-channels`
   で起動しています。仕様が変わったら engine の起動コマンドと channel を直します
 - Team / Enterprise の組織アカウントでは、管理者が channels を有効にする必要があります（個人の Pro / Max なら不要）
-- Codex が使えないとき（未ログイン・起動が権限判定で拒否された・usage limit）は、worker が Discord に info で一度だけ知らせ、
+- Codex が使えないとき（`reason=not-installed` / `not-logged-in`、確認済みの認証切れ・usage limit）は、worker が Discord に info で一度だけ知らせ、
   設計・実装を Claude（`harness-implementer`）に自動で切り替えます。Codex が戻れば次の段階から Codex に戻ります
+- 起動の権限拒否・`reason=launch-failed`（tmux 起動失敗）・拒否/利用不可の判別不能は、代行せず `blocked` と人向け起動1行を案内します。
+  exit 10 だけで代行を決めません。拒否時の自動再試行・直接起動・フラグ変更・許可追加による迂回は行いません
 - 届くのはセッションが動いている間だけです。窓口が止まっている間の発言は保存しておき、起動したら渡します
+
+### Codex の起動と拒否時の案内
+
+全ての起動・再起動は [issue-cycle の共通起動手順](skills/issue-cycle/SKILL.md#codex-の共通起動手順) に従います。
+依頼ファイル作成・stop・フェーズ変更を準備で済ませ、解決済み絶対パスを引用した `harness-codex start` の1コマンドを
+単独の Bash ツール呼び出しで実行し、監視は別の呼び出しに分けます。engine に起動許可は追加しません。
+
+権限拒否・launch-failed・判別不能は、理由と当該段階の人向け起動1行を GitHub 本文・Discord summary の両方へ入れ、
+`harness-phase` で blocked にします。両方の1行をフェンスのコードブロックに入れて、Markdown に引用を壊させません。
+人向け1行は実効 `HARNESS_CONFIG` と解決済み絶対入口を含みます。ホーム末尾の `/` を除き、`$HOME` と `realpath "$HOME"` の
+接頭辞を引用前に外して残りだけを `%q` で引用し、`"$HOME"/…` とつなぎます。本文のパスも同じ表記にします。
+生成して通知する実行例は [issue-cycle の blocked 手順](skills/issue-cycle/SKILL.md#codex-起動を-blocked-にする) にあります。
+同じユーザー・同じ tmux サーバーの Bash で人が実行し、同じ blocked の回答先へ結果を返します。
+worker は回答・status・workdir・成果物を確認して元の段階へ復帰し、二重起動しません。
+通知失敗を完了扱いせず、blocked 中の tick では再起動・再通知を繰り返しません。
+
+原因の切り分けでは、ラッパー集約が Bash に直接の bypass や tmux 起動を渡す経路を減らし、
+単独呼び出しへの分離が準備や通知との複合経路を減らします。既定値の変更はラッパー内部の Codex の実権限に効きます。
+分類器の内部因果は推測であり、workspace-write なら必ず通るとは断定しません。
+拒否として数えたのは、`is_error: true` かつ本文が `Permission for this action was denied` で始まる tool_result と、
+対応する Bash tool_use だけです。`tool_use_id` で重複を除外し、bypass 有無・起動の経路・単独／複合の形を交差集計しました。
+対象は運用中の transcript です。読み取れなかったファイルの件数は未記録です。
+
+集計（2026-10）: Bash の拒否は 18 件で、そのうち Codex 起動は 15 件でした（残り 3 件は Codex と無関係）。
+
+| bypass フラグ | 起動の経路 | 単独 | 複合 | 計 |
+|---|---|---|---|---|
+| あり | 直接（tmux new-window / codex exec） | 1 | 11 | 12 |
+| なし | 直接（tmux new-window） | 0 | 3 | 3 |
+| あり・なし | harness-codex start 経由 | 0 | 0 | 0 |
+
+複合は、heredoc・harness-phase・Issue コメント・tmux new-session・sleep/grep などを `&&` や改行で同じコマンドにまとめたものです。
+harness-codex start 経由の呼び出しは 23 件あり、拒否は 0 件でした。`--sandbox workspace-write` を含む起動の拒否も 0 件でした。
+言えるのは「拒否は直接起動と複合呼び出しに集中していた」までで、分類器の内部因果や将来の成功率は断定できません。
 
 ## 開発
 

@@ -230,6 +230,20 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	assert.match(k?.command ?? "", /'Bash\(harness-issue-md:\*\)'/);
 	assert.match(k?.command ?? "", /'Bash\(harness-codex-status:\*\)'/, "読み取り専用の確認は無人で通す");
 	assert.doesNotMatch(k?.command ?? "", /harness-codex:|harness-codex\)/, "Codex の起動（start）は許可しない");
+	// T17d: 細分した起動許可や判定回避用の mode も組込みでは渡さない。
+	for (const permission of [
+		"Bash(harness-codex:*)",
+		"Bash(harness-codex start:*)",
+		"Bash(tmux new-window:*)",
+		"Bash(codex exec:*)",
+	])
+		assert.ok(!k?.command.includes(permission), permission);
+	assert.doesNotMatch(k?.command ?? "", /Bash\([^)]*(?:harness-codex(?:\s|:)|tmux\s+new-window|codex\s+exec)/);
+	assert.doesNotMatch(
+		k?.command ?? "",
+		/--permission-mode (?:bypassPermissions|dontAsk)|--dangerously-skip-permissions/,
+	);
+	assert.deepEqual(k?.command.match(/--permission-mode \S+/g), ["--permission-mode acceptEdits"]);
 
 	assert.equal(o?.initialPrompt, "/parallel-cycle-loop", "native はそのリポジトリのループで始める");
 	assert.equal(o?.tmuxSession, "dev");

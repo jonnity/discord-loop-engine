@@ -30,7 +30,7 @@
 		}
 	],
 	"codex": {
-		"command": "codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox"
+		"command": "codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write"
 	},
 	"context": ["spec.md", "README.md"],
 	"demo": null,
