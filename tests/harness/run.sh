@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # 実行中の engine（worker の中で走らせる場合）の環境を拾わない。拾うと harness-notify / harness-phase が
 # 実 engine のソケットに繋がり、本物の Discord に投稿してしまう
-unset DLE_ROLE DLE_PROJECT DLE_LOOP DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN HARNESS_CONFIG
+unset DLE_ROLE DLE_PROJECT DLE_LOOP DLE_CONFIG_HOME DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN HARNESS_CONFIG
 export DLE_HOME="$TMP/iso-home"
 export DLE_SOCKET="$DLE_HOME/engine.sock"
 mkdir -p "$DLE_HOME"
@@ -228,6 +228,77 @@ gguard() { jq -nc --arg c "$1" '{tool_input:{command:$c}}' | env "${@:2}" "$BIN/
 check "guard: engine 側の設定があれば働く" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool)" = 2 ]'
 check "guard: native モードでは何もしない（独自のループの gh pr merge を止めない）" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool DLE_LOOP=native)" = 0 ]'
 check "guard: 設定の無いプロジェクトでは何もしない" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=oogiri-doc)" = 0 ]'
+
+# --- C16: 設定 home と実行 home の分離 -------------------------------------------
+(
+	C16="$TMP/config16"
+	MAIN16="$C16/main"
+	CWD16="$C16/wt"
+	LEGACY16="$C16/legacy home"
+	CONFIG16="$C16/config home"
+	USER16="$C16/user"
+	mkdir -p "$MAIN16/.claude" "$CWD16" "$USER16"
+	for base in "$LEGACY16" "$MAIN16/legacy relative" "$USER16/.discord-loop-engine"; do
+		mkdir -p "$base/projects/fixture"
+		echo '{"project":"legacy"}' > "$base/projects/fixture/harness.json"
+	done
+	for base in "$CONFIG16" "$MAIN16/config relative"; do
+		mkdir -p "$base/projects/fixture"
+		echo '{"project":"config-home"}' > "$base/projects/fixture/harness.json"
+	done
+	echo '{"project":"explicit"}' > "$C16/explicit.json"
+	cd "$CWD16" || exit 1
+	export CLAUDE_PROJECT_DIR="$MAIN16" DLE_PROJECT=fixture
+	unset HARNESS_CONFIG DLE_HOME DLE_CONFIG_HOME
+	config16() { env HOME="$USER16" "$@" "$BIN/harness-config" "${ARGS16[@]}"; }
+	assert16() {
+		local expected_path="$1" expected_value="$2"
+		shift 2
+		ARGS16=(--path)
+		[ "$(config16 "$@")" = "$expected_path" ] || return 1
+		ARGS16=(.project)
+		[ "$(config16 "$@")" = "$expected_value" ]
+	}
+	missing16() {
+		ARGS16=(.project)
+		config16 "$@" >/dev/null 2>&1
+		[ "$?" = 1 ] || return 1
+		ARGS16=(.project fallback)
+		[ "$(config16 "$@")" = fallback ]
+	}
+	for runtime in unset '' "$LEGACY16" 'legacy relative'; do
+		RUNTIME16=()
+		case "$runtime" in
+		unset) BASE16="$USER16/.discord-loop-engine" ;;
+		'') BASE16="$USER16/.discord-loop-engine"; RUNTIME16=(DLE_HOME=) ;;
+		/*) BASE16="$runtime"; RUNTIME16=("DLE_HOME=$runtime") ;;
+		*) BASE16="$MAIN16/$runtime"; RUNTIME16=("DLE_HOME=$runtime") ;;
+		esac
+		for config in unset '' "$CONFIG16" 'config relative'; do
+			CONFIG_ENV16=()
+			VALUE16=legacy
+			EXPECTED16="$BASE16/projects/fixture/harness.json"
+			case "$config" in
+			unset) ;;
+			'') CONFIG_ENV16=(DLE_CONFIG_HOME=) ;;
+			/*) CONFIG_ENV16=("DLE_CONFIG_HOME=$config"); EXPECTED16="$config/projects/fixture/harness.json"; VALUE16=config-home ;;
+			*) CONFIG_ENV16=("DLE_CONFIG_HOME=$config"); EXPECTED16="$MAIN16/$config/projects/fixture/harness.json"; VALUE16=config-home ;;
+			esac
+			check "C16: home=$runtime config=$config のパスと値" 'assert16 "$EXPECTED16" "$VALUE16" "${RUNTIME16[@]}" "${CONFIG_ENV16[@]}"'
+		done
+	done
+	check "C16: 専用設定homeでもworktreeRootは実行homeの兄弟" 'ARGS16=(--worktree-root); [ "$(config16 "DLE_HOME=$LEGACY16" "DLE_CONFIG_HOME=$CONFIG16")" = "$LEGACY16-worktrees/fixture" ]'
+	echo '{"project":"repo"}' > "$MAIN16/.claude/harness.json"
+	check "C16: repoは設定homeに優先する" 'assert16 "$MAIN16/.claude/harness.json" repo "DLE_HOME=$LEGACY16" "DLE_CONFIG_HOME=$CONFIG16"'
+	check "C16: 明示指定はrepoと設定homeに優先する" 'assert16 "$C16/explicit.json" explicit "HARNESS_CONFIG=$C16/explicit.json" "DLE_CONFIG_HOME=$CONFIG16"'
+	check "C16: 欠損した明示指定はfallbackしない" 'ARGS16=(--path); [ "$(config16 "HARNESS_CONFIG=$C16/missing.json" "DLE_CONFIG_HOME=$CONFIG16")" = "$C16/missing.json" ] && missing16 "HARNESS_CONFIG=$C16/missing.json" "DLE_CONFIG_HOME=$CONFIG16"'
+	rm "$MAIN16/.claude/harness.json"
+	check "C16: 登録名なしでは設定homeを使わない" 'ARGS16=(--path); [ "$(config16 DLE_PROJECT= "DLE_CONFIG_HOME=$CONFIG16")" = "$MAIN16/.claude/harness.json" ] && ARGS16=(.project fallback) && [ "$(config16 DLE_PROJECT= "DLE_CONFIG_HOME=$CONFIG16")" = fallback ]'
+	check "C16: 設定home欠損時は旧homeを探し直さない" 'ARGS16=(--path); [ "$(config16 "DLE_HOME=$LEGACY16" "DLE_CONFIG_HOME=$C16/missing")" = "$MAIN16/.claude/harness.json" ] && missing16 "DLE_HOME=$LEGACY16" "DLE_CONFIG_HOME=$C16/missing"'
+	check "C16: 全候補欠損は終了1、既定値付きは終了0" 'missing16 "DLE_HOME=$C16/missing"'
+	printf '%s %s\n' "$pass" "$fail" > "$C16/counts"
+) || exit 1
+read -r pass fail < "$TMP/config16/counts"
 
 # --- harness-hook / harness-gate ------------------------------------------------
 HP="$TMP/hookproj"

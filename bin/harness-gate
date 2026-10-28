@@ -8,6 +8,9 @@
 #
 # 使い方: harness-gate [<実行ディレクトリ>]   # 既定はカレント（worktree で実行する）
 #
+# 設定先は harness-config が DLE_CONFIG_HOME 等から隔離前に解決する。
+# 通常は手で DLE_HOME を差し替える必要はない。
+#
 # harness.json:
 #   "gate": [ {"name": "types", "run": "npm run typecheck"}, ... ]
 #   "hooks": { "beforePR": ["pnpm ci:local"] }   # gate の後に、リポジトリ独自の PR 前検査として実行する
@@ -18,6 +21,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${1:-$(pwd)}"
 cd "$DIR" || exit 2
 
+# DLE_CONFIG_HOME は設定読取り用。子では他の DLE_* と同様に除去する。
 CONFIG="$("$SCRIPT_DIR/harness-config" --path)"
 if [ ! -f "$CONFIG" ] || ! jq -e 'type == "object" and (.gate | type == "array")' "$CONFIG" >/dev/null 2>&1; then
 	echo "harness-gate: harness.json に gate が定義されていません" >&2
