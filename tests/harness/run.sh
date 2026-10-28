@@ -281,8 +281,8 @@ check "guard: 設定の無いプロジェクトでは何もしない" '[ "$(ggua
 			case "$config" in
 			unset) ;;
 			'') CONFIG_ENV16=(DLE_CONFIG_HOME=) ;;
-			/*) CONFIG_ENV16=("DLE_CONFIG_HOME=$config"); EXPECTED16="$config/projects/fixture/harness.json"; VALUE16=config-home ;;
-			*) CONFIG_ENV16=("DLE_CONFIG_HOME=$config"); EXPECTED16="$MAIN16/$config/projects/fixture/harness.json"; VALUE16=config-home ;;
+			/*) CONFIG_ENV16=("DLE_CONFIG_HOME=$config"); EXPECTED16="$config/projects/fixture/harness.json"; VALUE16="config-home" ;;
+			*) CONFIG_ENV16=("DLE_CONFIG_HOME=$config"); EXPECTED16="$MAIN16/$config/projects/fixture/harness.json"; VALUE16="config-home" ;;
 			esac
 			check "C16: home=$runtime config=$config のパスと値" 'assert16 "$EXPECTED16" "$VALUE16" "${RUNTIME16[@]}" "${CONFIG_ENV16[@]}"'
 		done
