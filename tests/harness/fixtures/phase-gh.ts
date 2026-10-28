@@ -5,7 +5,7 @@ const args=process.argv.slice(2), key=args.join(" ");
 const log=process.env.MEDIA_LOG!;const stateFile=path.join(path.dirname(log),"gh-state.json");
 const head="a".repeat(40);
 interface Comment {id:number;body:string;html_url:string;user:{login:string};created_at:string;updated_at:string}
-const state:{head:string;labels:string[];comments:Comment[];reviews:unknown[];edits:number}=existsSync(stateFile)?JSON.parse(readFileSync(stateFile,"utf8")):{head,labels:["harness:impl-review","harness:merge-ok"],comments:[],reviews:[],edits:0};
+const state:{head:string;labels:string[];comments:Comment[];reviews:unknown[];labelEvents?:unknown[];edits:number}=existsSync(stateFile)?JSON.parse(readFileSync(stateFile,"utf8")):{head,labels:["harness:impl-review","harness:merge-ok"],comments:[],reviews:[],edits:0};
 const save=()=>writeFileSync(stateFile,JSON.stringify(state));const out=(x:unknown)=>{const bytes=Buffer.from(`${typeof x==="string"?x:JSON.stringify(x)}\n`);let offset=0;while(offset<bytes.length){try{offset+=writeSync(1,bytes,offset,Math.min(4096,bytes.length-offset));}catch(error){if((error as NodeJS.ErrnoException).code!=="EAGAIN")throw error;Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,1);}}};const event=(x:string)=>appendFileSync(log,`${x}\n`);
 const fail=process.env.GH_FAILURE;
 if(key==="repo view --json nameWithOwner -q .nameWithOwner")out("example/project");
@@ -19,7 +19,7 @@ else if(key==="pr view 5 --json headRefOid -q .headRefOid"){
  if((fail==="head-before"&&state.comments.length)||(fail==="head-final"&&state.comments.some(c=>c.body.includes("harness:gate")))){state.head="b".repeat(40);save();}out(state.head);
 }
 else if(key==="pr view 5 --json headRefOid,url")out({headRefOid:state.head,url:"https://github.com/example/project/pull/5"});
-else if(key==="pr view 5 --json mergeable,mergeStateStatus,statusCheckRollup")out({mergeable:"MERGEABLE",statusCheckRollup:process.env.CI_BAD?[{name:"test",conclusion:"FAILURE"}]:[]});
+else if(key==="pr view 5 --json mergeable,mergeStateStatus,statusCheckRollup")out({mergeable:process.env.MERGEABLE??"MERGEABLE",statusCheckRollup:process.env.CI_BAD?[{name:"test",conclusion:"FAILURE"}]:[]});
 else if(key==="issue view 3 --json labels"){
  if(fail==="label-final-read"&&state.comments.some(c=>c.body.includes("harness:gate")))process.exit(1);
  out({labels:state.labels.map(name=>({name}))});
@@ -50,9 +50,9 @@ else if(args[0]==="api"&&args.includes("--input")){
  }
 }
 else if(args[0]==="api"&&/^repos\/example\/project\/issues\/comments\/[0-9]+$/.test(args[1]??"")){out(state.comments.find(c=>c.id===Number(args[1].split("/").at(-1))));}
-else if(args[0]==="api"&&args.includes("--slurp")){if(key.endsWith("/comments"))out(state.comments.map(c=>[c]));else if(key.endsWith("/reviews"))out([state.reviews]);else throw Error("unknown api");}
+else if(args[0]==="api"&&args.includes("--slurp")){if(key.endsWith("/comments"))out(state.comments.map(c=>[c]));else if(key.endsWith("/reviews"))out([state.reviews]);else if(key.endsWith("/issues/3/events"))out((state.labelEvents??[{event:"labeled",label:{name:"harness:merge-ok"},created_at:"2026-10-27T00:00:11Z"}]).map(e=>[e]));else throw Error("unknown api");}
 else if((args[0]==="pr"||args[0]==="issue")&&args[1]==="comment"){
- event("comment");const file=args.indexOf("--body-file");if(file>=0&&process.env.POST_BODY)writeFileSync(process.env.POST_BODY,readFileSync(args[file+1]));out("https://github.com/example/project/pull/5#issuecomment-99");
+ event("comment");const file=args.indexOf("--body-file");if(file>=0&&process.env.POST_BODY)writeFileSync(process.env.POST_BODY,readFileSync(args[file+1]));const body=args.indexOf("--body");if(body>=0&&process.env.POST_BODY)writeFileSync(process.env.POST_BODY,args[body+1]);out("https://github.com/example/project/pull/5#issuecomment-99");
 }
 else if(args[0]==="pr"&&args[1]==="merge")event(`merge ${args.slice(3).join(" ")}`);
 else throw Error(`unexpected gh fixture: ${key}`);

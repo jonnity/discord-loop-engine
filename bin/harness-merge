@@ -4,7 +4,7 @@
 #
 # 承認として認めるもの（どれか1つ）:
 #   - harness-inbox が merge-ok を返す（owner の "OK" コメント / Approve / harness:merge-ok ラベル）
-#   - --chat-approval "<ユーザーの発言の引用>"（対話チャットで OK をもらった場合。PR に記録を残す）
+#   - --chat-approval と --attention（台帳の回答済み OK を再検証し、その原文を PR に記録する）
 # マージ前に、承認依頼を出した head sha と現在の head が一致していること、CI が green であること、
 # mergeable であること、profile の hooks.beforeMerge（例: SonarCloud の New issues が 0）が通ることを確認する。
 # どれかが崩れていたらマージしない。
@@ -16,67 +16,100 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
 
+CHAT="" ATTENTION="" seen_chat=0 seen_attention=0
+PR="" current_url=""
+# 拒否した入力の A だけを返し、現在の A や台帳全文を診断へ載せない。
+reject() {
+	local reason="$1" fallback_url="$current_url"
+	if [ -z "$fallback_url" ] && [ -n "$PR" ]; then
+		fallback_url="$(gh pr view "$PR" --json headRefOid,url | jq -r .url)" || fallback_url=""
+	fi
+	if [ "$seen_chat" = 1 ] || [ "$seen_attention" = 1 ]; then
+		jq -nc --arg attention "$ATTENTION" --arg reason "$reason" --arg url "$fallback_url" \
+			'{kind:"chat-rejection",attention:(if ($attention | test("^A-[1-9][0-9]*$")) then $attention else null end),reason:$reason,url:$url}' >&2
+	fi
+	echo "harness-merge: $reason。マージしません。現在の依頼: $current_url。現在の完成依頼を確認し、PR に GitHub で『OK』とコメントするか、窓口に『#$ISSUE の承認依頼を出し直して』と頼んでください。" >&2
+	return 1
+}
+invalid() { reject invalid-arguments || true; exit 2; }
 ISSUE="${1:-}"
 [ $# -ge 1 ] || exit 2
 shift
-CHAT="" ATTENTION="" seen_chat=0 seen_attention=0
 while [ $# -gt 0 ]; do
 	case "$1" in
-	--chat-approval) [ "$seen_chat" = 0 ] && [ $# -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || exit 2; CHAT="$2"; seen_chat=1; shift 2 ;;
-	--attention) [ "$seen_attention" = 0 ] && [ $# -ge 2 ] || exit 2; ATTENTION="$2"; seen_attention=1; shift 2 ;;
-	*) exit 2 ;;
+	--chat-approval) seen_chat=1; [ -z "$CHAT" ] && [ $# -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || invalid; CHAT="$2"; seen_chat=1; shift 2 ;;
+	--attention) [ "$seen_attention" = 0 ] && [ $# -ge 2 ] || invalid; ATTENTION="$2"; seen_attention=1; shift 2 ;;
+	*) invalid ;;
 	esac
 done
-if [ "$seen_chat" != "$seen_attention" ]; then exit 2; fi
-if [ "$seen_attention" = 1 ] && [[ ! "$ATTENTION" =~ ^A-[1-9][0-9]*$ ]]; then exit 2; fi
-[[ "$ISSUE" =~ ^[1-9][0-9]*$ ]] || exit 2
+if [ "$seen_chat" != "$seen_attention" ]; then invalid; fi
+if [ "$seen_attention" = 1 ] && [[ ! "$ATTENTION" =~ ^A-[1-9][0-9]*$ ]]; then invalid; fi
+[[ "$ISSUE" =~ ^[1-9][0-9]*$ ]] || invalid
 prefix="$(cfg '.branchPrefix' 'fix/issue-')"
 method="$(cfg '.mergeMethod' 'merge')"
 case "$method" in merge|squash|rebase) ;; *) exit 1 ;; esac
-PR="$(gh pr list --state open --head "${prefix}${ISSUE}" --json number -q '.[0].number // empty')"
-[ -n "$PR" ] || exit 1
+PR="$(gh pr list --state open --head "${prefix}${ISSUE}" --json number -q '.[0].number // empty')" || { reject pr-unavailable || true; exit 1; }
+[ -n "$PR" ] || { reject pr-unavailable || true; exit 1; }
 validate() {
-	local worktree recovery
+	local worktree recovery reason
+	snapshot="$(node "$SCRIPT_DIR/../src/harness-approval.ts" "$ISSUE" "$PR" --with-attention)" || { reject approval-unavailable; return 1; }
+	current_url="$(jq -er '.url | select(type == "string" and length > 0)' <<<"$snapshot")" || { reject approval-unavailable; return 1; }
 	worktree="$(cfg --worktree "$ISSUE")"
 	for recovery in ".harness/merge-recovery-$ISSUE.json" ${worktree:+"$worktree/.harness/merge-recovery-$ISSUE.json"}; do
 		if [ -e "$recovery" ] || [ -L "$recovery" ]; then
 			echo "harness-merge: 復旧未確認のためマージしません" >&2
+			reject recovery-unconfirmed
 			return 1
 		fi
 	done
-	snapshot="$(node "$SCRIPT_DIR/../src/harness-approval.ts" "$ISSUE" "$PR")" || return 1
-	if ! jq -e --arg attention "$ATTENTION" --arg chat "$CHAT" '
-		.status == "ready" and .gate != null and .verdict.kind != "merge-ng"
-		and (if $chat != "" then .gate.attention == $attention else .verdict.kind == "merge-ok" end)' <<<"$snapshot" >/dev/null; then
-		current_url="$(jq -r .url <<<"$snapshot")"
-		echo "harness-merge: この回答は現在の完成した承認依頼に対応しないか、承認なし・NG・未完了です。マージしません。現在の依頼: $current_url。未完了なら復旧後の完成を待ち、内容を確認して回答してください。" >&2
-		return 1
-	fi
+	reason="$(jq -r --arg attention "$ATTENTION" --arg chat "$CHAT" '
+		if .ownersUnavailable then "attention-unavailable"
+		elif .verdict.kind == "merge-ng" then "github-ng"
+		elif .requestState == "pending" then "request-failed"
+		elif .requestInactive then "request-inactive"
+		elif .status == "stale-notify" then "request-stale"
+		elif .status != "ready" or .gate == null then "request-missing"
+		elif .githubApprovalBlocked then .attentionCheck.reason
+		elif $chat == "" then (if .verdict.kind == "merge-ok" then "" else "request-inactive" end)
+		elif .gate.attention == null then "attention-none"
+		elif .gate.attention != $attention then "attention-stale"
+		elif .attentionCheck.state == "approved" then ""
+		elif .attentionCheck.state == "missing" then "attention-not-found"
+		elif .attentionCheck.state == "open" then "attention-open"
+		else (.attentionCheck.reason // "attention-unavailable") end' <<<"$snapshot")" || { reject approval-unavailable; return 1; }
+	if [ -n "$reason" ]; then reject "$reason"; return 1; fi
+}
+identity() {
+	jq -c --arg chat "$CHAT" '{gate,answer:(if $chat != "" then .attentionCheck else null end)}' <<<"$snapshot"
 }
 validate || exit 1
-initial="$(jq -c .gate <<<"$snapshot")"
+initial="$(identity)"
 
-state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,statusCheckRollup)"
+state="$(gh pr view "$PR" --json mergeable,mergeStateStatus,statusCheckRollup)" || { reject approval-unavailable || true; exit 1; }
 mergeable="$(printf '%s' "$state" | jq -r .mergeable)"
 bad_checks="$(printf '%s' "$state" | jq -r '[.statusCheckRollup[]? | select((.conclusion // .state) as $c | ($c != "SUCCESS" and $c != "NEUTRAL" and $c != "SKIPPED"))] | map(.name // .context) | join(", ")')"
 if [ "$mergeable" != "MERGEABLE" ]; then
-	echo "harness-merge: PR #$PR が mergeable ではありません（$mergeable）。base を取り込んでから再実行してください" >&2
+	reject mergeable-unconfirmed || true
+	echo "harness-merge: PR #$PR の未処理承認と待ち理由を記録し、base を取り込んで必要な修正後は再依頼してください（$mergeable）" >&2
 	exit 1
 fi
 if [ -n "$bad_checks" ]; then
+	reject ci-not-green || true
 	echo "harness-merge: green でないチェックがあります: $bad_checks" >&2
 	exit 1
 fi
 
 if ! "$SCRIPT_DIR/harness-hook" beforeMerge --issue "$ISSUE" --pr "$PR"; then
+	reject before-merge-failed || true
 	echo "harness-merge: hooks.beforeMerge が通らないためマージしません" >&2
 	exit 1
 fi
 
 validate || exit 1
-[ "$(jq -c .gate <<<"$snapshot")" = "$initial" ] || { echo "harness-merge: 依頼/head/完成時刻が変化したため停止します" >&2; exit 1; }
+[ "$(identity)" = "$initial" ] || { reject approval-changed || true; exit 1; }
 head="$(jq -r .gate.head <<<"$snapshot")"
 if [ -n "$CHAT" ]; then
+	IFS= read -r -d '' CHAT < <(jq -j '.attentionCheck.body, "\u0000"' <<<"$snapshot") || true
 	gh pr comment "$PR" --body "チャットでマージ承認を受けました:
 > $CHAT
 

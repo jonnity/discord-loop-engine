@@ -10,7 +10,7 @@
 //                            --harness で独自ループがあっても dle のループで回す）
 //   dle projects [--json]    登録済みのリポジトリ（モード・接続・設定の状態）
 //   dle tasks [--all]        台帳のタスク
-//   dle attention            あなた待ち
+//   dle attention            あなた待ち（--all / --answered と --json で保存済み台帳）
 //   dle board                ボード
 //   dle restart <名前>       窓口や worker を起動し直す（concierge / プロジェクト名）
 //   dle mode <名前> harness|native [--command <c>]  ループの進め方を切り替える（登録し直しでは引き継がれるため）
@@ -21,6 +21,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { readAttentionSnapshot } from "./attention-read.ts";
 import { CONFIG_TEMPLATE, type Config, loadConfig, readToken } from "./config.ts";
 import { Engine } from "./engine.ts";
 import { Gateway } from "./gateway.ts";
@@ -242,6 +243,30 @@ async function cmdRead(name: string, args: Record<string, unknown>, local: (l: L
 	show(r ?? local(new Ledger(home)));
 }
 
+async function cmdAttention(argv: string[]) {
+	if (!argv.some((arg) => /^--(?:all|answered)(?:=|$)/.test(arg)))
+		return cmdRead("attention_list", {}, (l) => l.openAttention());
+	const valid = new Set(["--all", "--answered", "--json"]);
+	if (
+		argv.length !== 2 ||
+		new Set(argv).size !== 2 ||
+		!argv.includes("--json") ||
+		argv.some((arg) => !valid.has(arg))
+	) {
+		console.error("attention: --all または --answered と --json を指定してください");
+		process.exitCode = 2;
+		return;
+	}
+	try {
+		const snapshot = await readAttentionSnapshot(home);
+		if (argv.includes("--answered")) snapshot.items = snapshot.items.filter((item) => item.status === "resolved");
+		console.log(JSON.stringify(snapshot));
+	} catch {
+		console.error("attention: 保存済み台帳を読み取れません");
+		process.exitCode = 1;
+	}
+}
+
 async function cmdProjects(json: boolean) {
 	const config = loadConfig(home);
 	const viaEngine = (await callEngine(config, "projects_list", {}).catch(() => null)) as
@@ -392,7 +417,7 @@ const commands: Record<string, () => unknown> = {
 		cmdRead("tasks_list", { all: flags.all === true }, (l) =>
 			l.tasks().filter((t) => flags.all || t.status !== "done"),
 		),
-	attention: () => cmdRead("attention_list", {}, (l) => l.openAttention()),
+	attention: () => cmdAttention(argv),
 	board: () => cmdRead("board_show", {}, (l) => l.renderBoard()),
 	restart: () => cmdRestart(rest[0]),
 	mode: () => cmdMode(rest[0], rest[1], flags),

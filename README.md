@@ -227,9 +227,37 @@ pending/旧 gate でもこの NG は inbox が先に返します。同時刻の�
 最終確認後に付く merge-ok ラベルを head/依頼へ結び付けるイベント照合はありません。最新完成依頼を確認して付けてください。
 
 engine の回答は worker が `harness-merge <issue> --chat-approval "<引用>" --attention "<回答のmeta.attention>"` に渡します。
-旧 A/A なし/none/pending は拒否し、現在の PR コメントへ案内します。現在 A は出さず、拒否した OK を付け替えません。
-CI/mergeable/hook だけが理由で依頼/head が同じなら、同じ A と引用で再試行できます。新 head/新依頼には新回答が必要です。
-webhook や engine なしの単独 issue-cycle ではチャット承認を利用できず、GitHub 承認を使います。
+引数の引用は承認の証拠にせず、保存済み台帳の同じ A が回答済み OK で、project/Issue/PR・最新完成marker・現 head・時刻が一致することを2回読み直します。
+読取不能・A 不在・非 OK ではマージしません。回答時刻は A 作成時刻以後が条件で、完成前に届いた OK も同じ A の完成後に使えます。
+worker は即時配送に加え tick の `chat-merge-ok` を同じ tick で回収し、main 取り込みや CI red/競合修正等の head 変更前にも確認します。
+CI 待ちだけなら同じ A を保ち、進めない具体的理由は Issue に残します。新 head/新依頼には新回答が必要です。
+正常な台帳内に A が本当にない場合だけ正式に再依頼します。台帳不通・sequence 不足・scope 不一致は再確認し、自動解消できなければ blocked で人に返します。
+単独運用で保存済み engine 台帳を使わない場合はチャット承認を利用できません。webhook の attention=none は従来の GitHub 承認を使います。engine が停止中、MCP 未接続でも同じホストの保存台帳が読めれば回収できます。
+
+本文は ECMAScript の trim 後、owners の `<名前> が Discord で回答。` に先頭が完全一致する場合だけ1回除いて再度 trim し、`OK` で始まれば承認です。
+大小文字変換・全角化の補正・否定語/後続文の検査はしません。`OK ではない`・`OK、ただし NG`・`OKです`・`OKじゃない` も OK になることは、**人が承知のうえで選んだ**仕様です。
+`ok`・`ＯＫ`・`LGTM`・`A-12 OK` はこの本文判定では非 OK です。台帳原文を変更せず、マージの記録にも原文を使います。
+前置きの名前は Discord の表示名で、owners（GitHub login）と完全に一致するときだけ除きます。表示名を変えると前置き付きの回答は非 OK になり、以下の出口に回ります。
+承認できる人は allowedUserIds で決まり、owners 限定はそれを絞りません。前置きのない `OK（Discord: 任意の名前）` は owners に関係なく本文判定を通ります。
+
+承認に使えなかった回答は A・理由ごとに1回だけ info で理由と現在の依頼 URL を案内します。
+現在の A の有効な非 OK 回答は GitHub の OK（コメント・Approve・merge-ok ラベルの付与時刻）と比べ、下記の条件なら GitHub 経路も止め、同じ共通通知へ回します。台帳を照合できない場合の GitHub 承認経路は従来どおりです。owners が読めない場合はスナップショットの ownersUnavailable で故障を伝え、inbox は承認判定より先に attention-unavailable を返し、マージも GitHub 経路を含め拒否します。
+解釈: 比較は保存された時刻を絶対時刻に変換し、engine の時計の遅れに5分の余裕を持たせ、`resolvedAt >= GitHub OK の時刻 − 5分` なら止めます。GitHub OK と同時刻、5分前の境界も止める側です。余裕は `src/harness-approval.ts` の定数 GITHUB_APPROVAL_CLOCK_SKEW_MS で定義します。時計自体を同期するものではなく、5分を超えるずれや読取り後の更新による限界は残ります。
+現在の完成依頼を確認して PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼んでください。
+後者は worker が正式な新 A を発行し新回答を待ちます。resolved の古い A への再入力や旧 OK の付け替えはしません。
+通知の正本は認証 login 自身の Issue コメントの claimed/posted/failed-or-unknown です。他者の同じキーでは抑制せず、結果不明でも自動再送しません。
+Phase 5-4 はフォアグラウンドで、終了前に届いた OK は終了後に処理します。終了0・完成marker・復旧ファイル消失後なら info 0回で回収します。
+pending の異常や非0終了、完成 marker と復旧ファイルが残って終了値不明の状態は失敗仕分けへ送り、自動解消できなければ blocked にします。
+
+`dle attention --answered --json` は resolved の全件（非 OK・置換も含む）、`dle attention --all --json` は存在と回答の照合用の全件を返します。
+新モードは `schemaVersion: 1, items: [...]` の JSON で、DLE_HOME の attention.json を読取り専用で参照します。DLE_CONFIG_HOME は台帳には使いません。
+新モードは --json 必須・併用不可、正常0・読取/形式失敗1・不正引数2です。従来の `dle attention` / `--json` 単独は open 一覧のままです。
+`src/attention-read.ts` は readAttentionSnapshot(home)、readAttentionSequence(home)、stripDiscordAnswerPreamble(answer, owners)、isAttentionAnswerOk(answer, owners) を公開します。
+本文判定の boolean だけでは A/head/scope/時刻を保証しません。利用側が対象との結び付きを別途検証してください。
+
+更新後は plugin/CLI と engine の配置・同じ DLE_HOME の読取り権限を確認し、稼働 worker を再起動して新スキルのロード版を確認します。
+旧 worker は tick の新手順を自動では学びません。旧 engine の既存台帳は形式を変更せず利用できます。
+番号が有効な別 home までは自動識別できないため、実配置の home 一致を確認してください。
 
 失敗時は終了値と段階を保存します。0 だけが依頼完了です。
 

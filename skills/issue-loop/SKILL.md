@@ -121,10 +121,24 @@ tmux ウィンドウ {codex-impl-12 の window-id, ...} を最大3分監視し�
 
 ### 2. 人間からの返事を取り込む
 
-`harness-inbox` の結果を `issue-cycle` Step 0 の振り分けに従って処理する。
-`stale-notify` / `missing-notify` はその tick で再依頼する。ただし最新が自分の失敗した依頼の pending なら、
-issue-cycle 5-4 の失敗の仕分けに従い、原因を直せたときだけ再実行し、直せなければ blocked にする。
-原因が続いたまま tick ごとに仮コメント・Discord 投稿・A-番号を増やさない。
+`harness-inbox` の終了値と全 JSONL を確認し、非0なら部分出力を採用せず head 変更も止める。
+`issue-cycle` Step 0 と「承認回収の仕分けと共通通知」（CHAT_REJECTION_BEGIN〜CHAT_REJECTION_END）を使う。
+`chat-merge-ok` は対象 WT を解決し、body と attention を引数のまま渡して同じ tick の Phase 6 で harness-merge を試す。
+GitHub NG を優先し、ready な GitHub OK より台帳の非 OK 回答（resolvedAt）が新しければ `chat-not-approved` として共通通知へ回す。それ以外の `merge-ok` は台帳系より優先。open A は回答待ちで通知/再依頼しない。
+`chat-not-approved` は A・reason ごとに1回だけ共通通知。失敗した tick 中に具体的な待ち理由を Issue に残す。
+`missing-attention` は正常な台帳と attentionSeq で実不在を確認したものだけ、同じ WT で Phase 5-4 の正式な新 A を発行する。
+`attention-unavailable`（sequence 超過を含む）/`attention-mismatch` は再読取りして home/設定/権限等を確認し、
+自動解消できなければ `harness-phase {n} blocked --comment-file ...` で通知する。自動再依頼はしない。
+`stale-notify` / `missing-notify` は再依頼の前に pending と復旧状態を仕分ける。自分の失敗した依頼の pending は Phase 5-4 に従い、原因を直せたときだけ再実行し、直せなければ blocked にする。
+Phase 5-4 はフォアグラウンドなので実行中の tick 処理はない。対象 phase の終了値 `0 / nonzero / unknown` を共通例へ明示引数で渡す。
+終了前に届いた OK も終了0・同じ A/head の完成marker・復旧ファイル消失後に処理し、info 0回・merge 1回とする。
+pending＋復旧ファイルなしは request-failed。pending＋復旧ファイルありは非0終了で request-failed、終了0または不明なら recovery-unconfirmed。
+完成 marker＋復旧ファイル＋対象 phase の終了値なしも Phase 5-4 の失敗仕分けへ送り、自動解消できなければ blocked。
+復旧ファイルは cwd と WT の両方で symlink も存在とする。プロセス台帳を作らず、別 Issue の終了値や単に記録がないことを実行中の証拠にしない。
+原因が続いたまま tick ごとに仮コメント・Discord 投稿・A-番号を増やさない。旧 OK の付け替えは禁止。
+通知には PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼む、の出口を必ず含める。
+理由の正本は Issue。通知のURLは現在の依頼先PRコメントURLを使い、現在のA や marker 全文は表示しない。認証済み login 自身の claimed/posted/failed-or-unknown を照合し、他者の同じキーでは抑制しない。
+通知/記録未確認なら自動再送せず handoff に残して停止する。
 
 ### 3. フェーズ進行
 
@@ -161,6 +175,8 @@ Phase 1 の質問の答えが **CLAUDE.md に明記された規約**から一意
 
 PR の CI が失敗したら（購読イベント、または tick ごとの `gh pr checks <PR>`）:
 
+**head を変える前に再確認する**。awaiting-merge は inbox を再読取りし、未処理 OK をまず現 head の harness-merge に渡す。CI 待ちだけなら head/A を保持する。衝突や CI red の修正が必要なら、その head で進めない理由を Issue に残してから変更し、修正後は Phase 5-4 の新依頼・新回答を待つ。
+
 1. **仕分ける**。profile に `hooks.onCIRed` があれば `harness-hook onCIRed --issue {n} --pr <PR>` を実行する
    （例: oogiri-doc の `pnpm ci:triage` → INFRA なら `gh run rerun`）。
    - 終了コード 0 → コード起因ではなく対処済み（再実行した等）。このフェーズでは何もせず、次の CI の結果を待つ
@@ -191,18 +207,20 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
   フェーズの変化も `harness-phase` が台帳に報告する
 - `<channel source="dle">` で届くもの:
   - `meta.attention`（A-番号への回答）:
-    - `meta.kind=merge` で承認 → 対象 worktree を cwd にして `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"`。NG・指摘なら Phase 6 NG。
-      最新完成marker・ラベル・現 head・A 一致が必須。meta.attention 欠落は推測しない。webhook は GitHub 承認だけ。
-      旧 A/A なし/pending 等で非0なら harness-notify の info で理由と現在の依頼先PRコメントURL、
-      完成内容を確認して回答する必要を通知する。未完了なら復旧待ちとする。現在のA や marker 全文を出さず、
-      拒否した OK の付け替えをしない。URL が無ければ同じ認証 login の最新依頼を読み、取得不能なら既知 PR URL とその旨を案内する。
-      info 失敗も記録し、その再送で merge は再実行しない。CI/mergeable/hook の拒否だけで同じ依頼/head なら、
-      元の同じ --attention・引用で再試行可。新 head/新依頼なら新回答が必要
+    - `meta.kind=merge` → 明示の NG・修正指示なら Phase 6 NG（issue-cycle の ### NG）へ進む。
+      それ以外は対象 WT で `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` を試す即時経路を維持する。
+      台帳の保存済み回答・最新完成marker・現 head・scope を再検証し、引数の引用だけでは承認しない。meta.attention 欠落は推測しない。
+      非0なら stderr の構造化診断を issue-cycle の CHAT_REJECTION_BEGIN〜CHAT_REJECTION_END の共通手順へ渡す。
+      pending/復旧は対象 phase の終了値で再分類し、同じ A・reason の通知は1回。CI/mergeable/hook は Issue の待ち理由だけを残す。
+      先頭が OK でないだけの承認風の回答は共通通知へ回す。「非 OK だけを自動で NG と断定して実装を始めない」は tick の chat-not-approved に限る。現在の A や marker 全文は表示せず、拒否した OK の付け替えをしない。
+      通知を再処理して merge は再実行しない。新 head/新依頼には新回答が必要。
+      前置きの名前は Discord の表示名で owners（GitHub login）と完全一致のときだけ除く。表示名変更後の前置き付き回答は非 OK になり出口へ回る。
+      承認できる人は allowedUserIds で決まり、owners 限定はそれを絞らない。
     - `meta.kind=interview` → 回答を Issue に「## 要件メモ（Discord で回答）」として
       `<!-- harness:note source=discord -->` 付きでコメントしてから Phase 2 へ（GitHub を正本に保つ。
       この印があるので `harness-inbox` は二重に拾わない）
     - `meta.kind=blocked` → 書かれた指示に従って再開する
-  - `meta.from=concierge`（窓口からの依頼）: 優先順位の変更・特定 Issue の着手など。従う
+  - `meta.from=concierge`（窓口からの依頼）: 優先順位の変更・特定 Issue の着手など。従う。窓口に『#n の承認依頼を出し直して』と頼む案内から届いた依頼なら、対象 Issue/PR/WT・依頼内容・現 head・humanChecks を確認し、Phase 5-4 の harness-phase で新 A を発行してその回答を待つ。既にマージ済みなら再依頼せず片付ける
   - `meta.kind=rules`（仮ルール）: 以後の作業で守る。起動時にも届く
 - **うまくいかなかったことは `learning_add` で記録する**（CI 失敗・レビュー NG・人の NG・Codex が止まった・
   マージ後に見つかった漏れ）。自己改善の材料になる。`tag` は `ci-red` / `review-ng` / `user-ng` / `stall` /

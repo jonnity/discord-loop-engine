@@ -2,6 +2,7 @@
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { gh, run, validTime } from "./harness-approval.ts";
+import { resolveHarnessProject } from "./harness-project.ts";
 import { object, verifyMedia } from "./notification-receipt.ts";
 
 const bin = path.resolve(import.meta.dirname, "../bin");
@@ -76,8 +77,7 @@ async function main() {
 		throw error;
 	}
 	const config = path.join(bin, "harness-config");
-	const project =
-		process.env.DLE_PROJECT || (await run(config, [".project", ""])) || path.basename(await run(config, ["--root"]));
+	const project = await resolveHarnessProject();
 	try {
 		const worktree = await run(config, ["--worktree", issue]);
 		if (worktree) states.add(path.join(worktree, ".harness", `merge-recovery-${issue}.json`));
