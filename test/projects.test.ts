@@ -208,6 +208,11 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	];
 	const [c, k, o, ...rest] = sessionTargets(cfg, projects, ledger);
 	assert.equal(rest.length, 0, "active でないものは起動しない");
+	for (const target of [c, k, o]) {
+		assert.ok(target?.command.includes(`DLE_HOME=${home} `));
+		assert.ok(target?.command.includes(`DLE_CONFIG_HOME=${home} `));
+		assert.ok(target?.command.includes(`DLE_SOCKET=${cfg.socketPath} `));
+	}
 	assert.match(
 		c?.command ?? "",
 		/DLE_ROLE=concierge claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle /,
@@ -313,7 +318,7 @@ test("enabled: false と旧 maxEvents: 0 の窓口には refresh を配線しな
 
 test("W6: --add-dir・exec env の実argv/cwd/PID、sh/dash、mkdir失敗とrepo優先", async () => {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-launch-"));
-	const home = path.join(dir, "home"),
+	const home = path.join(dir, "home space 'quoted'"),
 		main = path.join(dir, "main");
 	mkdirSync(home);
 	mkdirSync(main);
@@ -328,7 +333,7 @@ test("W6: --add-dir・exec env の実argv/cwd/PID、sh/dash、mkdir失敗とrepo
 		release = path.join(dir, "release");
 	writeFileSync(
 		stub,
-		`#!/usr/bin/env node\nconst fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),exists:fs.existsSync(process.argv[process.argv.indexOf('--add-dir')+1])}));const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(timer)},10);`,
+		`#!/usr/bin/env node\nconst fs=require('node:fs');fs.writeFileSync(${JSON.stringify(ready)},JSON.stringify({pid:process.pid,argv:process.argv.slice(2),cwd:process.cwd(),configHome:process.env.DLE_CONFIG_HOME,exists:fs.existsSync(process.argv[process.argv.indexOf('--add-dir')+1])}));const timer=setInterval(()=>{if(fs.existsSync(${JSON.stringify(release)}))clearInterval(timer)},10);`,
 		{ mode: 0o755 },
 	);
 	cfg.claudeBin = stub;
@@ -345,7 +350,10 @@ test("W6: --add-dir・exec env の実argv/cwd/PID、sh/dash、mkdir失敗とrepo
 			for (const shell of ["sh", "dash"]) {
 				rmSync(ready, { force: true });
 				rmSync(release, { force: true });
-				const child: ReturnType<typeof spawn> = spawn(shell, ["-c", t.command], { cwd: main, env: process.env });
+				const child: ReturnType<typeof spawn> = spawn(shell, ["-c", t.command], {
+					cwd: main,
+					env: { ...process.env, DLE_CONFIG_HOME: path.join(dir, "other") },
+				});
 				const done = once(child, "close");
 				try {
 					for (let i = 0; i < 500 && !existsSync(ready); i++) await delay(10);
@@ -353,6 +361,7 @@ test("W6: --add-dir・exec env の実argv/cwd/PID、sh/dash、mkdir失敗とrepo
 					const r = JSON.parse(readFileSync(ready, "utf8"));
 					assert.equal(r.pid, child.pid);
 					assert.equal(r.cwd, main);
+					assert.equal(r.configHome, home);
 					assert.equal(r.exists, true);
 					assert.equal(r.argv.filter((x: string) => x === "--add-dir").length, 1);
 					assert.equal(r.argv[r.argv.indexOf("--add-dir") + 1], expected);

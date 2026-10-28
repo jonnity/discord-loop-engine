@@ -435,14 +435,22 @@ ready worker の自動整理も同じ root の Codex を待ちます（同 id/cw
 Read/Edit/Write・gate・代行実装への許可継承を確認してください。実 Claude/Codex/tmux の認証・信頼確認は手動です。
 
 標準 linked worktree 内でも設定探索の root は main になります。
-gate/hook/Codex の定義は main の `.claude/harness.json`（なければ engine 側）を読み、実行 cwd は WT のままです。
+設定の優先順位は非空 `HARNESS_CONFIG` → main の `.claude/harness.json` →
+`DLE_CONFIG_HOME/projects/$DLE_PROJECT/harness.json` です。DLE_CONFIG_HOME が未設定・空なら `DLE_HOME`、
+さらに未設定・空なら `$HOME/.discord-loop-engine` を使い、相対 home は main 基準です。
+DLE_CONFIG_HOME は engine 側の設定先だけを変え、worktreeRoot の既定計算は従来どおり DLE_HOME を使います。
+engine は worker・窓口の起動時に `DLE_CONFIG_HOME=cfg.home` を渡します。
+gate/hook/Codex はこの規則で定義を読み、実行 cwd は WT のままです。
+通常は手で DLE_HOME を差し替える必要はありません。設定の場所を別に指す必要があれば
+DLE_CONFIG_HOME（または既存の HARNESS_CONFIG）を指定します。
 notify の `.env` と相対 `notify.envFiles` も main 基準です。WT 側だけで設定や `.env` を変えても自動では選ばれません。
 ブランチの定義を試す場合は `HARNESS_CONFIG=<WT の設定ファイルの絶対パス>` を明示します。
 
 preflight と gate の各コマンドは、継承したすべての `DLE_*`・`DISCORD_*` を外し、
 空の専用一時ディレクトリを `DLE_HOME`、その直下の存在しない `engine.sock` を `DLE_SOCKET` に設定します。
 設定とコマンド定義は隔離前の親環境で読みます。PATH・通常の認証・git 作者・cwd・標準入出力は維持し、
-`hooks.beforePR` は元の worker 環境で実行します。隔離準備失敗は終了3で停止し、元の環境へ戻して再試行しません。
+`hooks.beforePR` は呼出し元の環境で実行し、渡された DLE_HOME/DLE_SOCKET/DLE_CONFIG_HOME を保持します。
+DLE_CONFIG_HOME は通知無効化の保証を与えません。隔離準備失敗は終了3で停止し、元の環境へ戻して再試行しません。
 これはネットワークを遮断する sandbox ではありません。main の `.env`、envFiles、BASH_ENV、明示 URL/socket からの
 再設定や任意の秘密ファイル読取りを防ぐものではありません。
 
@@ -473,6 +481,9 @@ SIGKILL・マシン停止後は、使用した TMPDIR の一時領域と残る�
 
 | 要件・決定 | 対応ファイルと自動試験 | 手動確認 |
 |---|---|---|
+| 専用 home からの設定探索とセッションへの引継ぎ、通常は手動差替え不要 | `bin/harness-config`、`src/projects.ts`、`test/projects.test.ts` S16、`tests/harness/run.sh` C16、`test/harness-gate.test.ts` G16 | 実際の設定場所、更新後の engine・worker・窓口の再起動、beforePR の環境 |
+| 条件付き存廃質問 | issue-cycle Phase 1、`test/skill-prompts.test.ts` P16a/P16c | 関連案件だけに残す／消すの選択肢があり、質問1〜3点に収まるか |
+| 廃止に伴う表示の棚卸し | issue-cycle Phase 2・3・5-1、`test/skill-prompts.test.ts` P16b/P16c | UI・CLI 出力・通知文面の一覧と残す／消すの理由の十分さ |
 | preflight/gate は常時 DLE_*/DISCORD_* を除去、一時 home/socket、親で設定先行読取り、beforePR 非隔離 | `bin/harness-gate`、`test/harness-gate.test.ts` G1〜G6、`tests/harness/quality.sh` | 独自 hook の環境依存・明示接続先 |
 | lint 競合の回避方法は外部既定、絶対/相対、明示 .worktrees 互換 | `src/worktrees.ts`、`bin/harness-config`、status/codex-status、templates、`test/worktrees.test.ts` W1/W2、`tests/harness/worktrees.sh` W3 | 配置先の親設定・権限・依存・実 lint |
 | 作成・再開・シェパード・片付けは同じ WT、登録名不明なら停止 | issue-cycle/issue-loop、`test/skill-prompts.test.ts` W4 | 実 Codex/tmux の復帰と片付け |
@@ -503,6 +514,7 @@ gate の定義を変えた場合は更新後の列と CI の対応を照合し�
 | 長時間 CLI の実経路（パッケージマネージャー/スクリプトランナー経由・パイプ）の異常系、N・初期化・中断/回収 | Phase 2・Phase 3・5-1 | T3/T4 | 利用者の経路を代表し、成果物・子・一時ファイルを確認したか |
 | メジャー版更新の対応版を一次情報で確認、確認不能な環境依存の停止計画 | Phase 2・レビュー共通・Phase 3・5-1・5-3 | T3/T4/T6 | 対象・未確認理由・影響・CI での確認手順が十分か。実ログと修正回数の運用 |
 | 文言・式・数値例などの具体化を「解釈」と明記 | Phase 2・Phase 3・5-1 | T3/T4 | 確定要件にすり替わっていないか |
+| 廃止に伴う表示の棚卸しと残す／消すの設計 | Phase 2・Phase 3・5-1 | P16b/P16c | 廃止対象のためだけにあった UI・CLI 出力・通知文面の漏れがないか |
 | 表示崩れはボタン名・要素 × 状態 × viewport と期待結果を列挙 | Phase 2・Phase 3・5-1・5-2 | T3/T4 | 実アプリの動画・スクショで網羅性と操作性を確認 |
 | 既存 gate 回帰と恒久文書の確認先 | 5-3 | T6 と [CI の全検査](.github/workflows/ci.yml) | CI green と人のマージ承認、guard、Codex の git 禁止を維持 |
 

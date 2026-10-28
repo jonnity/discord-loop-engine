@@ -13,7 +13,8 @@
 # 設定ファイルの探索順:
 #   1) $HARNESS_CONFIG
 #   2) <プロジェクトルート>/.claude/harness.json（リポジトリに置いてある場合。チームで共有したいとき）
-#   3) $DLE_HOME/projects/$DLE_PROJECT/harness.json（discord-loop-engine 側。リポジトリに何も置かない既定の形）
+#   3) $DLE_CONFIG_HOME/projects/$DLE_PROJECT/harness.json（engine 側。未設定・空なら $DLE_HOME、さらに $HOME/.discord-loop-engine）
+# 設定用の DLE_CONFIG_HOME は、実行用 DLE_HOME と worktreeRoot の計算には使わない。
 #
 # プロジェクトルートは $CLAUDE_PROJECT_DIR（worktree の中で呼ばれても main 側を指すため）、無ければ標準 linked worktree の common dir から main を求める。
 
@@ -35,7 +36,7 @@ resolve_root() {
 ROOT="$(resolve_root)"
 ENGINE_CONFIG=""
 if [ -n "${DLE_PROJECT:-}" ]; then
-	engine_home="${DLE_HOME:-$HOME/.discord-loop-engine}"
+	engine_home="${DLE_CONFIG_HOME:-${DLE_HOME:-$HOME/.discord-loop-engine}}"
 	case "$engine_home" in /*) ;; *) engine_home="$ROOT/$engine_home" ;; esac
 	ENGINE_CONFIG="$engine_home/projects/$DLE_PROJECT/harness.json"
 fi

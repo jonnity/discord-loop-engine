@@ -25,6 +25,7 @@ function setup() {
 		CLAUDE_PROJECT_DIR: main,
 		HARNESS_CONFIG: file,
 		DLE_HOME: home,
+		DLE_CONFIG_HOME: path.join(dir, "config home"),
 		DLE_SOCKET: path.join(home, "engine.sock"),
 		DLE_PROJECT: "test",
 		DLE_ROLE: "worker",
@@ -134,7 +135,11 @@ test("G1/G2/G3/G4: 各2コマンド・並行呼出しの環境、一時home、�
 			const p = { gate: [{ name: source, run: `echo ${source}` }] };
 			// 設定探索そのものの試験だけ明示設定を外す。root/home/cwd は全て所有領域。
 			let extra = { HARNESS_CONFIG: "" };
-			if (source === "engine") h.put(p);
+			if (source === "engine") {
+				const file = path.join(h.env.DLE_CONFIG_HOME, "projects/test/harness.json");
+				mkdirSync(path.dirname(file), { recursive: true });
+				writeFileSync(file, JSON.stringify(p));
+			}
 			if (source === "repo") {
 				mkdirSync(path.join(h.main, ".claude"));
 				writeFileSync(path.join(h.main, ".claude/harness.json"), JSON.stringify(p));
@@ -314,6 +319,60 @@ test("G3/G4/G6: 定義先行抽出・hook順序・コマンド専用領域の準
 		assert.equal(failed.stdout, "");
 		assert.match(failed.stderr, /隔離.*一時/);
 		assert.deepEqual(readdirSync(h.env.TMPDIR), []);
+	} finally {
+		h.close();
+	}
+});
+
+test("G16: 実行homeを差し替えても設定homeの定義を順に実行し、beforePRは親環境を保持する", async () => {
+	const h = setup();
+	const file = path.join(h.env.DLE_CONFIG_HOME, "projects/test/harness.json");
+	const log = path.join(h.dir, "phases.jsonl");
+	const record = path.join(h.dir, "record.cjs");
+	const runtimeHome = path.join(h.dir, "runtime");
+	mkdirSync(runtimeHome);
+	mkdirSync(path.dirname(file), { recursive: true });
+	writeFileSync(
+		record,
+		`const fs=require('node:fs');fs.appendFileSync(process.argv[2],JSON.stringify({phase:process.argv[3],marker:process.argv[4],env:process.env,cwd:process.cwd()})+'\\n');`,
+	);
+	const command = (phase: string) => `node ${shq(record)} ${shq(log)} ${phase} config-home`;
+	const config = JSON.stringify({
+		preflight: [{ name: "pre", run: command("preflight") }],
+		gate: [{ name: "gate", run: command("gate") }],
+		hooks: { beforePR: [command("beforePR")] },
+	});
+	writeFileSync(file, config);
+	const extra = { HARNESS_CONFIG: "", DLE_HOME: runtimeHome, DLE_SOCKET: path.join(runtimeHome, "engine.sock") };
+	try {
+		const result = await h.run(extra);
+		assert.equal(result.code, 0, result.stderr);
+		const content = readFileSync(log, "utf8");
+		const rows = content
+			.trim()
+			.split("\n")
+			.map((line) => JSON.parse(line));
+		assert.deepEqual(
+			rows.map((row) => row.phase),
+			["preflight", "gate", "beforePR"],
+		);
+		for (const row of rows) {
+			assert.equal(row.marker, "config-home");
+			assert.equal(row.cwd, h.main);
+		}
+		for (const [key, value] of Object.entries({ ...h.env, ...extra })) {
+			if (/^(DLE_|DISCORD_)/.test(key)) assert.equal(rows[2].env[key], value);
+		}
+		assert.equal(readFileSync(file, "utf8"), config);
+		assert.deepEqual(readdirSync(h.env.TMPDIR), []);
+		assert.deepEqual(readdirSync(runtimeHome), []);
+		writeFileSync(file, JSON.stringify({ gate: [{ name: "fail", run: "false" }] }));
+		assert.equal((await h.run(extra)).code, 1);
+		assert.equal((await h.run({ ...extra, TMPDIR: path.join(h.dir, "missing") })).code, 3);
+		rmSync(file);
+		assert.equal((await h.run(extra)).code, 2);
+		assert.deepEqual(readdirSync(h.env.TMPDIR), []);
+		assert.ok(existsSync(h.env.DLE_CONFIG_HOME));
 	} finally {
 		h.close();
 	}

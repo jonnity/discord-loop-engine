@@ -175,7 +175,7 @@ export function gitIdentityEnv(cfg: Config): Record<string, string> {
 }
 
 export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger): SessionTarget[] {
-	const baseEnv = { DLE_HOME: cfg.home, DLE_SOCKET: cfg.socketPath };
+	const baseEnv = { DLE_HOME: cfg.home, DLE_CONFIG_HOME: cfg.home, DLE_SOCKET: cfg.socketPath };
 	const channelArgs = ["--dangerously-load-development-channels", PLUGIN_SPEC];
 	const concierge: SessionTarget = {
 		name: "concierge",

@@ -555,3 +555,45 @@ test("S3: 動かない理由は本文・要約先頭、humanChecksは普通の�
 	for (const doc of [template, readme7])
 		assert.match(doc, /完成コメントを編集すると、それより前の OK\/Approve は数えない/);
 });
+
+test("P16a: Phase 1は既存フロー・画面・出力に触れるときだけ存廃も選択肢にする", () => {
+	const phase = section(skill, "## Phase 1:", "## Phase 2:");
+	assert.match(phase, /既存のフロー・画面・出力に触れる案件/);
+	assert.match(phase, /残す前提にせず[\s\S]*残すか消すかも選択肢/);
+	assert.match(phase, /決まっている場合は回答を引用/);
+	assert.match(phase, /関係しない案件に[\s\S]*機械的に追加しない/);
+	assert.match(phase, /1〜3点の質問/);
+});
+
+test("P16b: 生成依頼の該当時だけに廃止表示の棚卸しを置き、両レビューへ引き継ぐ", async () => {
+	const r = await designRequest({ stub: true, profile: { gate: sampleGate } });
+	assert.equal(r.code, 0, r.stderr);
+	const always = section(r.prompt, "常に確かめる項目", "該当するときだけの項目");
+	assert.doesNotMatch(always, /廃止|棚卸し/);
+	const conditional = section(r.prompt, "該当するときだけの項目", "プロジェクトの gate");
+	assert.match(
+		conditional,
+		/廃止する場合[\s\S]*その要素のためだけにあった表示[\s\S]*UI・CLI の出力・通知の文面[\s\S]*残すか消すかを設計に書く/,
+	);
+	for (const phase of [section(skill, "## Phase 3:", "## Phase 4:"), section(skill, "### 5-1.", "### 5-2.")]) {
+		assert.match(phase, /廃止対象に付随した表示の棚卸しと残す／消すの判断/);
+		assert.match(phase, /設計品質チェックリスト/);
+	}
+});
+
+test("P16c: READMEとスキルは設定探索と隔離の契約、要件の確認先を説明する", () => {
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	for (const text of [
+		section(readme, "標準 linked worktree", "### 既存 worktree"),
+		section(skill, "## 設定", "主に使うキー"),
+	]) {
+		assert.match(text, /HARNESS_CONFIG[\s\S]*main[\s\S]*DLE_CONFIG_HOME[\s\S]*DLE_HOME/);
+		assert.match(text, /手で DLE_HOME を差し替える必要は(ない|ありません)/);
+		assert.match(text, /hooks.beforePR[\s\S]*呼出し元[\s\S]*環境/);
+		assert.match(text, /DLE_CONFIG_HOME[\s\S]*通知[\s\S]*保証/);
+		assert.doesNotMatch(text, /\.harness\//);
+	}
+	const mapping = section(readme, "### 要件と検証の対応", "検証役は、");
+	for (const term of ["S16", "C16", "G16", "P16a", "P16b", "P16c", "条件付き存廃質問", "廃止に伴う表示の棚卸し"])
+		assert.ok(mapping.includes(term), term);
+});
