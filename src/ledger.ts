@@ -51,6 +51,11 @@ export interface Attention {
 	messageId?: string;
 }
 
+export interface AddedAttention {
+	attention: Attention;
+	resolved: Attention[];
+}
+
 /**
  * harness: discord-loop-engine の issue-loop で進める（設定はリポジトリか engine 側の harness.json）
  * native:  リポジトリ独自のループ（oogiri-doc の /parallel-cycle-loop など）で進める。ハーネスの設定もガードも使わない
@@ -378,8 +383,10 @@ export class Ledger {
 		return this.attention().filter((a) => a.status === "open");
 	}
 
-	addAttention(input: Omit<Attention, "id" | "status" | "createdAt">): Attention {
+	/** attention=新しい依頼、resolved=それに置き換えられて閉じた古い依頼（engine が印を付けるため） */
+	addAttention(input: Omit<Attention, "id" | "status" | "createdAt">): AddedAttention {
 		const list = this.attention();
+		const resolved: Attention[] = [];
 		// 同じタスクの同じ種類は1つだけ開いておく（承認依頼の出し直しは古い方を置き換える）
 		for (const a of list) {
 			const samePr =
@@ -395,6 +402,7 @@ export class Ledger {
 				a.status = "resolved";
 				a.resolvedAt = this.iso();
 				a.answer = "（新しい依頼に置き換え）";
+				resolved.push(a);
 			}
 		}
 		const seq = this.state().attentionSeq + 1;
@@ -405,7 +413,7 @@ export class Ledger {
 		this.journal(
 			`${a.id} [${a.project}] ${KIND_LABEL[a.kind]}${a.issue ? ` #${a.issue}` : a.pr ? ` PR #${a.pr}` : ""}: ${a.title}`,
 		);
-		return a;
+		return { attention: a, resolved };
 	}
 
 	setAttentionMessage(id: string, messageId: string) {
@@ -430,18 +438,20 @@ export class Ledger {
 		return a;
 	}
 
-	resolveAttentionForTask(taskId: string, answer: string) {
+	/** このタスクの開いている依頼を閉じ、今回閉じたものを返す（すでに閉じていたものは含めない） */
+	resolveAttentionForTask(taskId: string, answer: string): Attention[] {
 		const list = this.attention();
-		let changed = false;
+		const closed: Attention[] = [];
 		for (const a of list) {
 			if (a.status === "open" && a.taskId === taskId) {
 				a.status = "resolved";
 				a.resolvedAt = this.iso();
 				a.answer = answer;
-				changed = true;
+				closed.push(a);
 			}
 		}
-		if (changed) this.saveAttention(list);
+		if (closed.length) this.saveAttention(list);
+		return closed;
 	}
 
 	resolveAttentionForPr(project: string, pr: string, answer: string) {

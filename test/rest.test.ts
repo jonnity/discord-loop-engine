@@ -45,3 +45,27 @@ test("REST: multipartの実bytesとMessage保持、channel GET、429を1回だ�
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("REST: 印の絵文字を URL エンコードして PUT し、失敗しても次のリクエストは進む", async () => {
+	const seen: { url: string; method?: string }[] = [];
+	const statuses = [204, 403, 204];
+	const rest = new Rest({
+		token: "fake",
+		sleep: async () => {},
+		fetchImpl: async (url, init) => {
+			seen.push({ url: String(url), method: init?.method });
+			return new Response(null, { status: statuses[seen.length - 1] });
+		},
+	});
+	await rest.react("900", "123", "✅");
+	await assert.rejects(rest.react("900", "123", "☑️"));
+	await rest.react("900", "123", "☑️");
+	assert.deepEqual(
+		seen.map((s) => [s.method, s.url.split("/channels/")[1]]),
+		[
+			["PUT", `900/messages/123/reactions/${encodeURIComponent("✅")}/@me`],
+			["PUT", `900/messages/123/reactions/${encodeURIComponent("☑️")}/@me`],
+			["PUT", `900/messages/123/reactions/${encodeURIComponent("☑️")}/@me`],
+		],
+	);
+});

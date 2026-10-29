@@ -15,8 +15,13 @@ export interface DiscordMessage {
 	referenced_message?: DiscordMessage | null;
 }
 
-// engine の投稿と harness-notify（webhook）の投稿は、どちらも本文先頭が "**[<project>]** ..." になっている
-const HEADLINE_RE = /^\*\*\[([^\]]+)\]\*\*\s*(.*)$/;
+// engine の投稿と harness-notify（webhook）の投稿は、どちらも本文先頭が "**[<project>]** ..." になっている。
+// engine の新しい見出しは前に絵文字が1つ付く（"🟡 **[<project>]** ..."）。任意の前置きは読み飛ばさない
+const HEADLINE_RE =
+	/^(?:\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*\s+)?\*\*\[([^\]]+)\]\*\*\s*(.*)$/u;
+// 窓口の返信は1行目が種類だけで、A-番号や issue は本文の1行目（2行目）にある。「（続き）」は含めない
+const REPLY_HEADLINE_RE =
+	/^(?:\p{Extended_Pictographic}(?:\uFE0F|\u200D\p{Extended_Pictographic})*\s+)?\*\*\[[^\]]+\]\*\*\s*返信$/u;
 const ATTENTION_RE = /\bA-(\d+)\b/;
 const LEADING_ATTENTION_RE = /^\s*A-?(\d+)\b[\s:：、,]*([\s\S]*)$/i;
 const NUMBER_IN_LINK_RE = /\[#(\d+)\]/;
@@ -34,10 +39,13 @@ export interface ParsedPost {
 
 export function parsePost(message: DiscordMessage | null | undefined): ParsedPost | null {
 	if (!message) return null;
-	const firstLine = (message.content ?? "").split("\n")[0] ?? "";
+	const lines = (message.content ?? "").split("\n");
+	const firstLine = lines[0] ?? "";
 	const m = HEADLINE_RE.exec(firstLine);
 	if (!m) return null;
-	const out: ParsedPost = { project: m[1] as string, headline: (m[2] as string).trim() };
+	let headline = (m[2] as string).trim();
+	if (REPLY_HEADLINE_RE.test(firstLine)) headline = `${headline} ${lines[1] ?? ""}`.trim();
+	const out: ParsedPost = { project: m[1] as string, headline };
 	const att = ATTENTION_RE.exec(out.headline);
 	if (att) out.attention = `A-${att[1]}`;
 	const embed = message.embeds?.[0];
@@ -126,7 +134,12 @@ export function chunkText(text: string, limit = 2000): string[] {
 	let rest = text;
 	while (rest.length > limit) {
 		let cut = rest.lastIndexOf("\n", limit);
-		if (cut < limit / 2) cut = limit;
+		if (cut < limit / 2) {
+			cut = limit;
+			// サロゲートペア（絵文字など）の真ん中では切らない
+			const c = rest.charCodeAt(cut - 1);
+			if (c >= 0xd800 && c <= 0xdbff) cut -= 1;
+		}
 		out.push(rest.slice(0, cut));
 		rest = rest.slice(cut).replace(/^\n/, "");
 	}
@@ -136,4 +149,38 @@ export function chunkText(text: string, limit = 2000): string[] {
 
 export function withProject(project: string, text: string): string {
 	return `**[${project}]** ${text}`;
+}
+
+export interface PostHeading {
+	icon: string;
+	label: string;
+	attention?: string;
+	issue?: string;
+}
+
+const POST_SEPARATOR = "───";
+const CONTINUED = "（続き）";
+
+function headingLine(project: string, h: PostHeading): string {
+	return `${h.icon} **[${project}]** ${h.label}${h.attention ? ` ${h.attention}` : ""}${h.issue ? `｜#${h.issue}` : ""}`;
+}
+
+/**
+ * 1回の投稿を、見出し付き・末尾に区切り線付きの Discord メッセージ（2000 文字以下）に分ける。
+ * 2通目以降の見出しには「（続き）」を付け、区切り線は最後の1通にだけ置く。
+ * 見出しのために本文を黙って切り捨てることはしない（見出しが長すぎるときは例外）。
+ */
+export function formatPostChunks(project: string, body: string, heading: PostHeading, limit = 2000): string[] {
+	const head = headingLine(project, heading);
+	const cont = `${head}${CONTINUED}`;
+	const budget = limit - Math.max(head.length, cont.length) - 1 - `\n${POST_SEPARATOR}`.length;
+	if (budget <= 0) throw new Error("見出しが長すぎて本文を置けません");
+	const parts = chunkText(body, budget);
+	if (parts.length === 0) parts.push("");
+	return parts.map((part, i) => {
+		const lines = [i === 0 ? head : cont];
+		if (part) lines.push(part);
+		if (i === parts.length - 1) lines.push(POST_SEPARATOR);
+		return lines.join("\n");
+	});
 }

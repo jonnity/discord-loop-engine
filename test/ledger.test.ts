@@ -42,8 +42,8 @@ test("あなた待ちは A-番号で採番され、同じタスクの同じ種�
 	const l = fresh();
 	const t = l.createTask({ project: "k", title: "x", issue: "1" });
 	const base = { taskId: t.id, project: "k", issue: "1", pr: "5", title: "x", url: "u", summary: "" };
-	const a1 = l.addAttention({ ...base, kind: "merge" });
-	const a2 = l.addAttention({ ...base, kind: "merge" });
+	const a1 = l.addAttention({ ...base, kind: "merge" }).attention;
+	const a2 = l.addAttention({ ...base, kind: "merge" }).attention;
 	assert.deepEqual([a1.id, a2.id], ["A-1", "A-2"]);
 	assert.deepEqual(
 		l.openAttention().map((a) => a.id),
@@ -98,6 +98,37 @@ test("ボードにあなた待ち・作業中・次に着手が出る", () => {
 	assert.match(b, /■ 次に着手\n {2}T-0001 \[k\] #12 票を破棄/);
 });
 
+test("依頼の置き換え・タスクでの解消は、今回閉じた依頼だけを返す", () => {
+	const l = fresh();
+	const t = l.createTask({ project: "k", title: "x", issue: "1" });
+	const other = l.createTask({ project: "k", title: "y", issue: "2" });
+	const base = { taskId: t.id, project: "k", issue: "1", pr: "", title: "x", url: "u", summary: "" };
+	const first = l.addAttention({ ...base, kind: "merge" });
+	assert.deepEqual(first.resolved, []);
+	l.addAttention({ ...base, kind: "interview" });
+	l.addAttention({ ...base, taskId: other.id, kind: "merge" });
+	const none1 = l.addAttention({ ...base, taskId: "", kind: "setup" });
+	const none2 = l.addAttention({ ...base, taskId: "", kind: "setup" });
+	assert.deepEqual(none1.resolved, [], "taskId が空なら置き換えない");
+	assert.deepEqual(none2.resolved, []);
+	const replaced = l.addAttention({ ...base, kind: "merge" });
+	assert.deepEqual(
+		replaced.resolved.map((a) => [a.id, a.status, a.answer]),
+		[[first.attention.id, "resolved", "（新しい依頼に置き換え）"]],
+	);
+	l.resolveAttention(l.openAttention().find((a) => a.kind === "interview")?.id ?? "", "回答");
+	const closed = l.resolveAttentionForTask(t.id, "（完了）");
+	assert.deepEqual(
+		closed.map((a) => a.id),
+		[replaced.attention.id],
+		"回答済みは含めない",
+	);
+	assert.deepEqual(l.resolveAttentionForTask(t.id, "（完了）"), []);
+	const saved = JSON.parse(readFileSync(path.join(l.dir, "attention.json"), "utf8"));
+	assert.ok(Array.isArray(saved));
+	assert.equal(saved.find((a: { id: string }) => a.id === first.attention.id).answer, "（新しい依頼に置き換え）");
+});
+
 test("T18-6: IssueなしPRのmerge Aだけを置換・完了解決し、PRを表示する", () => {
 	const l = fresh();
 	const base = { taskId: "", project: "k", issue: "", pr: "25", title: "x", url: "u", summary: "" };
@@ -106,12 +137,12 @@ test("T18-6: IssueなしPRのmerge Aだけを置換・完了解決し、PRを表
 	const setup = l.addAttention({ ...base, kind: "setup" });
 	const issue = l.addAttention({ ...base, issue: "1", taskId: "T-1", kind: "merge" });
 	const next = l.addAttention({ ...base, kind: "merge" });
-	assert.equal(l.attention().find((a) => a.id === old.id)?.status, "resolved");
+	assert.equal(l.attention().find((a) => a.id === old.attention.id)?.status, "resolved");
 	assert.match(readFileSync(path.join(l.dir, "attention.md"), "utf8"), /PR #25/);
 	l.resolveAttentionForPr("k", "25", "（GitHub の NG で停止）");
-	assert.equal(l.attention().find((a) => a.id === next.id)?.status, "resolved");
+	assert.equal(l.attention().find((a) => a.id === next.attention.id)?.status, "resolved");
 	assert.deepEqual(
 		l.openAttention().map((a) => a.id),
-		[other.id, setup.id, issue.id],
+		[other.attention.id, setup.attention.id, issue.attention.id],
 	);
 });
