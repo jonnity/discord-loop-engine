@@ -266,6 +266,8 @@ check "guard: 通常の gh は通す" '[ "$(guard "gh pr view 5 --json url")" = 
 rm "$PROJ/.claude/harness.json"
 check "guard: harness.json が無いプロジェクトでは何もしない" '[ "$(guard "gh pr merge 5")" = 0 ]'
 
+check "guard: PR 専用入口を通す" '[ "$(guard "harness-pr request --pr 25")" = 0 ] && [ "$(guard "harness-merge --pr 25")" = 0 ]'
+
 # --- engine 側の設定（リポジトリに何も置かない形） ---------------------------------
 DLEH="$TMP/dle-home"
 mkdir -p "$DLEH/projects/kishimen-tool"

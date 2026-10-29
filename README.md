@@ -615,3 +615,52 @@ clear/resume 後も worker が読めるこの履歴から復元します。既�
 failure-log.jsonl）は記録先としてだけ使い、新しい仕組みは作りません。REAL 3回よりこの上限を優先し、CI green 後に承認依頼を出します。
 issue-loop §5 からこの例外への参照はありません。通常の CI red 運用でも上限を適用できるかは humanChecks に残します。
 文章の存在を確かめる試験だけでは、実際のレビュー役の意味理解・判断・運用順序は保証できません。
+
+### Dependabot PR の承認とマージ
+
+harness プロジェクトで、作成者が厳密に `dependabot[bot]` **かつ** head が `dependabot/*` の PR **のみ**に対応します。
+同じ repo の open・非 draft PR だけが対象です。main の `.github/dependabot.yml` がある、または対象の open PR がある
+プロジェクトだけを worker が心拍で監視します。全ページの読取り失敗は「対象なし」と扱いません。
+
+`harness-pr scan` は状態一覧、`harness-pr inbox` は保存済み回答と待ち状態を JSONL で返します。
+CI green 後に `harness-pr request --pr N` で承認 head SHA を固定した A-番号を発行します。
+人の A への実回答の OK 後、`harness-merge --pr N` が現 head・CI・依頼・台帳を再検証します。
+PR 本文は依頼・A.summary・通知・scan/inbox に含めません。内容は PR リンクで確認してください。
+GitHub の OK/Approve/merge-ok ラベルだけではこの経路の承認になりません。GitHub の手動マージは可能です。
+PR 専用依頼には A を発行できる engine が必須です。webhook だけで A なしの完成依頼にはしません。
+既存の Issue/fix ブランチの GitHub 承認・webhook 経路はそのままです。
+
+PR の枠は Issue の maxParallel と別で、プロジェクトごとに同時1件、created_at→PR 番号の古い順です。
+同じ head の完成依頼は再利用し、pending/復旧未確認・rebase 待ち・OK 後・キュー待ちも枠を保持します。
+owner NG/非 OK、rebase 期限切れ、auto-merge 有効での停止、Approve 後の停止や保護不足は、info 後に枠を解放します。
+owner NG は open A をシステム理由で解決します。システムによる置換・完了解決は OK になりません。
+NG/非 OK 後は新 head でも自動再依頼しません。原因解消と窓口経由の人の再依頼を確認した場合だけ、
+worker が `harness-pr request --pr N --retry` で新 A を発行し、新しい OK を待ちます。
+retry も指定 PR だけを対象とし、枠使用中や先行候補があれば理由付きの非0です。窓口へその理由を返します。
+
+behind/dirty の rebase は枠に入る候補と OK 後のマージ段階だけで依頼し、head が変われば CI と新 A からやり直します。
+**解釈**として rebase の期限は120分です。再起動しても開始時刻を延長せず、同じ head のコメントを増やしません。
+新経路の CI green は SUCCESS が1件以上で全件 SUCCESS/NEUTRAL/SKIPPED、CheckRun は COMPLETED が必要という解釈です。
+チェックなし・全 skip/neutral は依頼しません。同一 repo 限定・maxParallel 枠外・台帳の A の OK のみも解釈です。
+
+設定済み mergeMethod と beforeMerge を使います。beforeMerge がある場合だけ承認 SHA の一時 worktree を作り、
+Issue は空、PR 番号と一時 worktree/main の変数を渡します。依存導入や afterWorktree は追加せず、準備も既存 hook の責務です。
+hook が0件なら fetch/一時 worktree を作りません。実行上限180秒は解釈です。空 Issue・一時 worktree・上限に
+対応しない hook は省略せず止めます。main や Issue の既存 worktree で代用しません。
+
+レビュー必須の場合も人の A の OK 後だけ、その head に Approve します。直前に auto_merge が厳密に null と確認できなければ停止し、
+有効なら Approve せず PR/head ごとに1回知らせます。Approve 後にも auto_merge・head・CI・A・保護状態を確認します。
+停止時は Approve が残ることと理由を1回知らせ、dismiss はしません。stale な Approve は保護設定によって新 head でも
+必要レビュー数に数えられうるため、dle はマージを止め、新 head の新 A を待ちます。worker が直接 Approve したり auto-merge を有効にしたりしません。
+必要レビュー数/CODEOWNERS/不足権限を迂回しません。merge queue は実 merged まで待ち、投入を繰り返しません。
+
+実 merged/head の確認後だけ、同じ SHA の exact remote branch を削除し、PR の done を通知します。外部 closed は done にしません。
+依頼進行の復旧記録は成功時に消しますが、rebase・info の送信意図/結果・枠解放の記録は独立して保持します。
+送信結果不明は成功扱いや自動再送にせず、未完了は復旧確認後の明示 retry だけで再依頼します。
+マージ済み・後始末未完了は実 state を再取得し、マージを再送せず削除/回収/通知だけを再開します。
+通知自体の結果不明は自動再送せず、人が確認します。残存 lock と一時物は所有 PID・起動時刻・専用パスを確認し、
+実行中の hook/子孫が停止してから所有領域だけを回収してください。共有 worktree の一括回収はしません。
+既存 runner は直接の子を扱い、強制終了時の子孫・孤児の終了までは保証しません。
+
+実 GitHub/Discord の認証・権限、auto_merge 応答、Approve/rebase/削除、対象保護・queue と hook の適合は
+fake 試験と区別して実環境で確認してください。この repo の read-only CI だけでは実効性を証明できません。

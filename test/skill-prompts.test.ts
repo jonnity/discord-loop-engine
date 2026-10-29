@@ -1101,3 +1101,29 @@ fs.writeFileSync(p,JSON.stringify(comments));
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("T18-8: PR監視・回答・枠・明示retry・承認操作の入口を定義する", () => {
+	const loop = readFileSync(path.resolve(import.meta.dirname, "../skills/issue-loop/SKILL.md"), "utf8");
+	const concierge = readFileSync(path.resolve(import.meta.dirname, "../skills/concierge/SKILL.md"), "utf8");
+	for (const phrase of [
+		"harness-pr inbox",
+		"harness-pr scan",
+		"dependabot.yml",
+		"読取り失敗",
+		"maxParallel 枠外",
+		"rebase 待ちも枠",
+		"同時1件",
+		"meta.issue が空",
+		"meta.pr",
+		"meta.from=concierge",
+		"--retry",
+		"枠が空いてから再依頼",
+		"60分",
+		"120分",
+		"監視は継続",
+	])
+		assert.ok(loop.includes(phrase), phrase);
+	for (const text of [loop, skill])
+		assert.ok(text.includes("worker が直接 Approve したり、auto-merge を有効にしたりしない"));
+	assert.ok(concierge.includes("meta.issue が空で meta.pr"));
+});

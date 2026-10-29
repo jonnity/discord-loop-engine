@@ -754,7 +754,7 @@ export class Engine {
 		}
 		this.deliver(
 			"concierge",
-			`[${project}] ${att.id} ${label}を Discord に出しました${task ? `（${task.id}）` : ""}。あなたから重ねて投稿する必要はありません。`,
+			`[${project}] ${att.id} ${label}を Discord に出しました${task ? `（${task.id}）` : pr ? `（PR #${pr}）` : ""}。あなたから重ねて投稿する必要はありません。`,
 			{ kind: "notice", attention: att.id, project },
 		);
 		this.scheduleBoard();
@@ -891,6 +891,13 @@ export class Engine {
 				if (status === "done") this.onTaskDone(t);
 				else if (status === "ai-working") this.ledger.resolveAttentionForTask(task.id, "（作業再開）");
 			}
+			if (!issue && /^[1-9][0-9]*$/.test(pr) && (phase === "done" || phase === "blocked")) {
+				this.ledger.resolveAttentionForPr(
+					project,
+					pr,
+					phase === "done" ? "（PR merged）" : body === "（GitHub の NG で停止）" ? body : "（PR closed）",
+				);
+			}
 			// マージ完了は CI の webhook ではなく engine が知らせる（リポジトリ側に通知の仕組みを置かないため）
 			if (phase === "done" && pr) {
 				const p = this.ledger.projects().find((x) => x.name === project);
@@ -904,7 +911,7 @@ export class Engine {
 		}
 
 		// それ以外（着手・お知らせ）は台帳にだけ残す。投稿はボードの更新で足りる
-		this.ledger.journal(`[${project}] ${event}: ${title}${issue ? ` (#${issue})` : ""}`);
+		this.ledger.journal(`[${project}] ${event}: ${title}${issue ? ` (#${issue})` : pr ? ` (PR #${pr})` : ""}`);
 		if (event === "info" && body) await this.post(project, `ℹ️ ${title}\n${body}${url ? `\n<${url}>` : ""}`);
 		this.scheduleBoard();
 		return { task: task?.id ?? null };
