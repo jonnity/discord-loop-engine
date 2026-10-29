@@ -31,7 +31,8 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 ## 起動時
 
 1. **状態把握**: `issue-cycle` の Step 0（`harness-status` / `harness-inbox`）
-2. **心拍**: `CronList` にこのループの心拍が無ければ張る。プロンプトは**スキル呼び出し単体**に固定し、
+2. **心拍**: 手順 1 の結果がキュー空・アクティブなしでも、ここで早期終了せず必ず実行する。
+   `CronList` にこのループの心拍が無ければ張る（engine 配下で再起動した worker は、空キューでも心拍なしの idle になりやすい）。プロンプトは**スキル呼び出し単体**に固定し、
    複合プロンプト（`/clear` を混ぜる等）にしない（oogiri-doc で心拍が無言で空振りし続けた事故がある）:
    ```
    CronCreate({ cron: "*/15 * * * *", prompt: "/discord-loop-engine:issue-loop", recurring: true, durable: true })
@@ -225,6 +226,9 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 環境変数 `DLE_ROLE=worker` で起動されたセッションは、discord-loop-engine の worker。
 **ユーザーとは直接話さない**（Discord に投稿するツールは持たない）。人とのやり取りは窓口と engine が受け持つ。
 
+- engine は idle の worker を起こすために、`/discord-loop-engine:issue-loop` を単体で入力することがある（回答・dispatch・
+  `harness:queued` の追加・再接続を検知したとき）。これは「受信箱確認の依頼」として通常の tick と同じに扱う
+  （`harness-inbox` → `harness-merge`。承認記録が無ければマージしない既存の手順のまま。依頼の中身は渡されない）
 - **人の判断が要る通知は、これまでどおり `harness-phase` で出す**。engine が動いていれば
   `harness-notify` が自動で engine に渡し、engine が台帳に A-番号を付けて Bot から投稿する。
   フェーズの変化も `harness-phase` が台帳に報告する
@@ -301,6 +305,8 @@ clear 後は「起動時」の状態把握からやり直し、`CronList` で心
 - Dependabot の監視対象なら、Issue キューが空でも心拍を60分、無変化2時間後120分で保持する。
   キュー完了通知は「Issue キュー完了・Dependabot PR の監視は継続」と1回だけ補足する。
   両方の監視条件が無くなれば PR 監視用心拍を削除する。読取り失敗では削除しない。
-- キューが空で、アクティブも全部終わり、Dependabot の監視対象でもない → 心拍を `CronDelete` し、`harness-notify --event info` で
-  「キュー完了」を1回だけ通知して終える
+- キューが空で、アクティブも全部終わり、Dependabot の監視対象でもない:
+  - `DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `*/60` に緩めて保持する（engine の起こしが取りこぼしたときの
+    最後の安全網にする）。`harness-notify --event info` の「キュー完了」は1回だけ（心拍を残しても繰り返さない）
+  - engine 無しの単体実行 → 心拍を `CronDelete` し、`harness-notify --event info` で「キュー完了」を1回だけ通知して終える
 - ユーザーが止めるよう言った → 心拍・one-shot を全部消す

@@ -474,3 +474,40 @@ test("W6: 実targetの型/既定配置エラーはsupervisorで初回診断し�
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test("起こしの対象（wake）は harness・ready の worker にだけ付き、送る文字列は持たない", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-t-"));
+	const ledger = new Ledger(home);
+	const repo = path.join(home, "r");
+	mkdirSync(path.join(repo, ".claude"), { recursive: true });
+	writeFileSync(path.join(repo, ".claude", "harness.json"), "{}");
+	const mk = (enabled?: boolean) =>
+		({
+			home,
+			socketPath: `${home}/engine.sock`,
+			claudeBin: "claude",
+			concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { enabled: false } },
+			worker: {
+				model: null,
+				extraArgs: [],
+				initialPrompt: "/discord-loop-engine:issue-loop",
+				refresh: { enabled: false },
+				...(enabled === undefined ? {} : { wake: { enabled } }),
+			},
+		}) as unknown as Config;
+	const base = { repo: "x/y", active: true, addedAt: "" };
+	const projects: Project[] = [
+		{ ...base, name: "ready", path: repo, mode: "harness" },
+		{ ...base, name: "onboard", path: "/w/o", mode: "harness" },
+		{ ...base, name: "native", path: "/w/n", mode: "native", initialPrompt: "/x" },
+	];
+	const wake = (cfg: Config) => Object.fromEntries(sessionTargets(cfg, projects, ledger).map((t) => [t.name, t.wake]));
+	assert.deepEqual(wake(mk()), {
+		concierge: undefined,
+		ready: { enabled: true },
+		onboard: undefined,
+		native: undefined,
+	});
+	assert.equal(wake(mk(false)).ready, undefined, "enabled:false は付けない");
+	assert.deepEqual(Object.keys(wake(mk()).ready ?? {}), ["enabled"], "prompt は持たない");
+});

@@ -77,3 +77,9 @@ test("負数・文字列・範囲外は既定値に戻し、0 のトークン閾
 	assert.equal(c.worker.refresh.cooldownMinutes, 30);
 	assert.equal(c.worker.refresh.codexIgnoreAfterMinutes, 120);
 });
+
+test("worker.wake.enabled は既定で true、false で上書きできる", () => {
+	assert.equal(load({}).worker.wake?.enabled, true);
+	assert.equal(load({ worker: { wake: { enabled: false } } }).worker.wake?.enabled, false);
+	assert.equal(load({ worker: { wake: { enabled: "no" } } }).worker.wake?.enabled, true);
+});

@@ -272,6 +272,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 							],
 						)}`,
 				initialPrompt,
+				...(!native && !startupError && ready && cfg.worker.wake?.enabled !== false ? { wake: { enabled: true } } : {}),
 				...(!native && !startupError && ready && cfg.worker.refresh.enabled
 					? {
 							refresh: {

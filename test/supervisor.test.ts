@@ -574,3 +574,337 @@ test("W6: startupErrorは初回からlogと通知、連投せず別projectを起
 	assert.ok(calls.some((c) => c[0] === "new-window" && c.includes("dle-good")));
 	assert.ok(!calls.some((c) => c.includes("dle-bad")));
 });
+
+// --- idle の worker を起こす（#32） ---------------------------------------------------------
+const IDLE = "会話の履歴\n❯ ";
+
+function wakeSetup(
+	o: {
+		panes?: (string | null)[]; // capture のたびに順に返す（尽きたら最後を繰り返す）
+		wake?: boolean;
+		live?: boolean;
+		status?: string;
+		sessionMissing?: boolean;
+		logAge?: number;
+		failFlags?: Set<string>; // "-l" / "Enter" を失敗させる
+		onWait?: () => void;
+	} = {},
+) {
+	const calls: string[][] = [];
+	const skipped: string[] = [];
+	const state = {
+		panes: o.panes ?? [IDLE],
+		i: 0,
+		live: o.live ?? true,
+		fail: o.failFlags ?? new Set<string>(),
+		now: 10 * 60_000,
+		status: o.status ?? "idle",
+	};
+	const sup = new Supervisor({
+		tmuxSession: "dle",
+		targets: () => [
+			{
+				name: "w",
+				cwd: "/c",
+				command: "claude",
+				initialPrompt: "/other-prompt",
+				...(o.wake === false ? {} : { wake: { enabled: true } }),
+			},
+		],
+		tmux: async (args) => {
+			calls.push(args);
+			if (args[0] === "list-windows") return { ok: true, stdout: "dle-w" };
+			if (args[0] === "display-message") return { ok: true, stdout: "123" };
+			if (args[0] === "capture-pane") {
+				const p = state.panes[Math.min(state.i++, state.panes.length - 1)];
+				return p === null || p === undefined ? { ok: false, stdout: "" } : { ok: true, stdout: p };
+			}
+			if (args[0] === "send-keys") {
+				const key = args.includes("-l") ? "-l" : "Enter";
+				if (state.fail.has(key)) return { ok: false, stdout: "" };
+			}
+			return { ok: true, stdout: "" };
+		},
+		readSession: async () =>
+			o.sessionMissing ? null : { sessionId: "s", cwd: "/c", status: state.status, updatedAt: 0 },
+		readTranscript: async () => ({
+			tokens: 1,
+			mtimeMs: state.now - (o.logAge ?? 60_000),
+			subagentMtimeMs: 0,
+		}),
+		isLive: () => state.live,
+		notify: () => {},
+		onWakeSkipped: (_n, r) => skipped.push(r),
+		now: () => state.now,
+		promptDelayMs: 0,
+		wait: async () => o.onWait?.(),
+	});
+	const keys = () => calls.filter((c) => c[0] === "send-keys").map((c) => c.slice(3).join(" "));
+	return {
+		sup,
+		calls,
+		skipped,
+		state,
+		keys,
+		advance: (ms: number) => {
+			state.now += ms;
+		},
+	};
+}
+
+const WAKE = "/discord-loop-engine:issue-loop";
+
+test("起こし: 空の入力欄・idle・静止した画面なら WAKE_PROMPT と Enter を 1 回ずつ送る", async () => {
+	const h = wakeSetup();
+	h.sup.requestWake("w", "回答 A-1");
+	h.sup.requestWake("w", "queued #3");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+	await h.sup.wakeTick();
+	assert.equal(h.keys().length, 2, "複数の理由は 1 回にまとまり、送信後は pending が残らない");
+});
+
+test("起こし: 作業中・確認画面・入力途中・❯ なし・画面が動いている・取得失敗は送らず、直ったら次で送る", async () => {
+	for (const bad of ["esc to interrupt\n❯ ", "Do you want to proceed?\n❯ ", "❯ 入力途中", "何もない画面", null]) {
+		const h = wakeSetup({ panes: [bad, bad, bad] });
+		h.sup.requestWake("w", "dispatch");
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [], String(bad));
+		h.state.panes = [IDLE];
+		h.state.i = 0;
+		await h.sup.wakeTick();
+		assert.equal(h.keys().length, 2, `直ったら送る: ${bad}`);
+	}
+	const moving = wakeSetup({ panes: [IDLE, `${IDLE}\n続き`, IDLE] });
+	moving.sup.requestWake("w", "dispatch");
+	await moving.sup.wakeTick();
+	assert.deepEqual(moving.keys(), []);
+});
+
+test("起こし: セッションを読めない・idle でない・直前まで動いていた worker には送らない（読めないときの journal は 1 回）", async () => {
+	const unreadable = wakeSetup({ sessionMissing: true });
+	unreadable.sup.requestWake("w", "dispatch");
+	await unreadable.sup.wakeTick();
+	await unreadable.sup.wakeTick();
+	assert.deepEqual(unreadable.keys(), []);
+	assert.equal(unreadable.skipped.length, 1);
+	assert.match(unreadable.skipped[0] ?? "", /判定できない/);
+	for (const o of [{ status: "busy" }, { logAge: 5_000 }]) {
+		const h = wakeSetup(o);
+		h.sup.requestWake("w", "dispatch");
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [], JSON.stringify(o));
+	}
+});
+
+test("起こし: 非 live・wake 未設定の target は送らない", async () => {
+	const dead = wakeSetup({ live: false });
+	dead.sup.requestWake("w", "dispatch");
+	await dead.sup.wakeTick();
+	assert.deepEqual(dead.keys(), []);
+	const native = wakeSetup({ wake: false });
+	native.sup.requestWake("w", "dispatch");
+	await native.sup.wakeTick();
+	assert.deepEqual(native.keys(), []);
+});
+
+test("起こし: 判定中に二重に maybeWake が走っても送信は 1 回で、通常 tick と wakeTick が重なっても同じ", async () => {
+	let h: ReturnType<typeof wakeSetup>;
+	let nested: Promise<void> | null = null;
+	h = wakeSetup({
+		onWait: () => {
+			// probe の待ち中に通常 tick が来る
+			nested ??= h.sup.tick();
+		},
+	});
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	await nested;
+	assert.equal(h.keys().filter((k) => k.startsWith("-l")).length, 1);
+	assert.equal(h.keys().filter((k) => k === "Enter").length, 1);
+});
+
+test("起こし: 成功した送信どうしは 60 秒あける", async () => {
+	const h = wakeSetup();
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	h.sup.requestWake("w", "queued #4");
+	h.advance(30_000);
+	await h.sup.wakeTick();
+	assert.equal(h.keys().length, 2);
+	h.advance(31_000);
+	await h.sup.wakeTick();
+	assert.equal(h.keys().length, 4);
+});
+
+test("起こし: 送信後に入力欄へコマンドが残っていれば Enter を 1 回だけ足す", async () => {
+	// 判定 2 回 + 直前 1 回は空、確認で残っている
+	const h = wakeSetup({ panes: [IDLE, IDLE, IDLE, `x\n❯ ${WAKE}`, `x\n❯ ${WAKE}`] });
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter", "Enter"]);
+	assert.equal(h.skipped.length, 1, "それでも残れば journal に残す");
+});
+
+test("起こし: -l が失敗したら pending を残し、60 秒以内でも次の tick で最初から再試行する", async () => {
+	const h = wakeSetup({ failFlags: new Set(["-l"]) });
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`]);
+	h.state.fail.clear();
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, `-l ${WAKE}`, "Enter"]);
+});
+
+test("起こし: -l 成功・Enter 失敗なら次は Enter だけ再送し、入力欄が別の文字なら諦める", async () => {
+	const h = wakeSetup({ failFlags: new Set(["Enter"]) });
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+	h.state.fail.clear();
+	h.state.panes = [`x\n❯ ${WAKE}`, `x\n❯ ${WAKE}`, `x\n❯ ${WAKE}`, IDLE];
+	h.state.i = 0;
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter", "Enter"], "-l は再送しない");
+	await h.sup.wakeTick();
+	assert.equal(h.keys().length, 3, "pending はクリア済み");
+
+	const human = wakeSetup({ failFlags: new Set(["Enter"]) });
+	human.sup.requestWake("w", "dispatch");
+	await human.sup.wakeTick();
+	human.state.fail.clear();
+	human.state.panes = ["x\n❯ 人の入力"];
+	human.state.i = 0;
+	await human.sup.wakeTick();
+	assert.equal(human.keys().length, 2, "人の入力には送らない");
+	human.state.panes = [IDLE];
+	human.state.i = 0;
+	await human.sup.wakeTick();
+	assert.deepEqual(human.keys().slice(2), [`-l ${WAKE}`, "Enter"], "enterOnly 解除後は通常判定");
+});
+
+test("起こし: 判定のあと送信直前に画面が変わったら送らず pending を残す", async () => {
+	for (const last of ["esc to interrupt\n❯ ", "❯ 入力", "Do you want to proceed?\n❯ ", null]) {
+		const h = wakeSetup({ panes: [IDLE, IDLE, last, IDLE] });
+		h.sup.requestWake("w", "dispatch");
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [], String(last));
+		h.state.panes = [IDLE];
+		h.state.i = 0;
+		await h.sup.wakeTick();
+		assert.equal(h.keys().length, 2);
+	}
+});
+
+test("起こし: wakeTick は spawn・checkStuck を通さず、tick 中・実行中は何もしない", async () => {
+	const calls: string[][] = [];
+	const sup = new Supervisor({
+		tmuxSession: "dle",
+		targets: () => [{ name: "w", cwd: "/c", command: "claude", initialPrompt: "", wake: { enabled: true } }],
+		tmux: async (args) => {
+			calls.push(args);
+			return { ok: true, stdout: args[0] === "list-windows" ? "" : "Do you want to proceed?" };
+		},
+		isLive: () => true,
+		notify: () => {},
+	});
+	sup.requestWake("w", "dispatch");
+	await sup.wakeTick();
+	assert.ok(!calls.some((c) => c[0] === "new-window" || c[0] === "new-session"));
+	assert.ok(!calls.some((c) => c[0] === "capture-pane"), "ウィンドウが無ければ画面も見ない");
+	const h = wakeSetup();
+	h.sup.requestWake("w", "dispatch");
+	const running = h.sup.wakeTick();
+	await h.sup.wakeTick(); // 自身が実行中なら戻る
+	await running;
+	assert.equal(h.keys().filter((k) => k.startsWith("-l")).length, 1);
+});
+
+test("起こし: refreshing 中・needsPrompt 中は送らない", async () => {
+	const h = wakeSetup();
+	h.sup.requestWake("w", "dispatch");
+	(h.sup as unknown as { st(n: string): { refreshing: boolean } }).st("w").refreshing = true;
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), []);
+	const p = wakeSetup();
+	p.sup.requestWake("w", "dispatch");
+	(p.sup as unknown as { st(n: string): { needsPrompt: boolean } }).st("w").needsPrompt = true;
+	await p.sup.wakeTick();
+	assert.deepEqual(p.keys(), []);
+});
+
+test("起こし: 判定中に refreshing が立ったら（再確認で）送らない", async () => {
+	let sup: { st(n: string): { refreshing: boolean } } | undefined;
+	const h = wakeSetup({
+		onWait: () => {
+			if (sup) sup.st("w").refreshing = true;
+		},
+	});
+	sup = h.sup as unknown as { st(n: string): { refreshing: boolean } };
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), []);
+});
+
+test("整理: 判定の await 中に起こしが送信を始めたら /clear を送らず見送る", async () => {
+	let sup: { st(n: string): { wake: { sending: boolean } } } | undefined;
+	const h = refreshSetup({
+		worker: true,
+		onReadTranscript: () => {
+			if (sup) sup.st("worker").wake.sending = true;
+		},
+	});
+	sup = h.sup as unknown as { st(n: string): { wake: { sending: boolean } } };
+	h.advance();
+	await h.sup.tick();
+	assert.deepEqual(h.typed(), []);
+	assert.deepEqual(h.phases, []);
+});
+
+test("起こし: onRegistered は起動した worker では pending を消し、既存の worker では reconnect を積む（即送らない）", async () => {
+	const started = wakeSetup();
+	const internal = started.sup as unknown as { st(n: string): { needsPrompt: boolean } };
+	started.sup.requestWake("w", "outbox");
+	internal.st("w").needsPrompt = true;
+	await started.sup.onRegistered("w");
+	assert.deepEqual(started.keys(), ["-l /other-prompt", "Enter"]);
+	await started.sup.wakeTick();
+	assert.equal(started.keys().length, 2, "pending はクリア済みで二重に送らない");
+
+	const existing = wakeSetup();
+	await existing.sup.onRegistered("w");
+	assert.deepEqual(existing.keys(), [], "即送らない");
+	await existing.sup.tick();
+	assert.deepEqual(existing.keys(), [`-l ${WAKE}`, "Enter"], "次の tick が拾う");
+
+	const refreshing = wakeSetup();
+	(refreshing.sup as unknown as { st(n: string): { refreshing: boolean } }).st("w").refreshing = true;
+	await refreshing.sup.onRegistered("w");
+	(refreshing.sup as unknown as { st(n: string): { refreshing: boolean } }).st("w").refreshing = false;
+	await refreshing.sup.tick();
+	assert.deepEqual(refreshing.keys(), [], "refresh 中の再接続は積まない");
+});
+
+test("起こし: 判定中に onRegistered が初期プロンプトを入れ始めても WAKE_PROMPT は送らない", async () => {
+	const h = wakeSetup();
+	const internal = h.sup as unknown as { st(n: string): { needsPrompt: boolean }; o: { wait: () => Promise<void> } };
+	let registering: Promise<void> | null = null;
+	internal.o.wait = async () => {
+		if (registering) return;
+		// probe の待ち中に engine が再接続を受けて初期プロンプトの投入を始める
+		internal.st("w").needsPrompt = true;
+		registering = h.sup.onRegistered("w");
+	};
+	h.sup.requestWake("w", "outbox");
+	await h.sup.wakeTick();
+	await registering;
+	assert.deepEqual(h.keys(), ["-l /other-prompt", "Enter"], "初期プロンプト 1 回分だけ");
+});
+
+test("起こし: 送る文字列は定数のみで、reason や initialPrompt は入らない", async () => {
+	const h = wakeSetup();
+	h.sup.requestWake("w", "回答 A-1\nrm -rf /; $(evil)");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+	assert.ok(!h.calls.flat().some((a) => a.includes("evil") || a.includes("other-prompt")));
+});

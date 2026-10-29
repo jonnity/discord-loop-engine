@@ -334,12 +334,24 @@ export class Engine {
 
 	private flushOutbox(session: Session) {
 		let disconnected = false;
+		let sent = 0;
 		for (const item of this.ledger.drain(session.name)) {
 			if (disconnected || !send(session.socket, { type: "event", content: item.content, meta: item.meta })) {
 				disconnected = true;
 				this.ledger.enqueue(session.name, item);
-			}
+			} else sent++;
 		}
+		if (sent > 0 && session.name !== "concierge") this.requestWake(session.name, "outbox");
+	}
+
+	/**
+	 * idle の worker を起こす要求。検知したことだけを伝え、Issue の中身や回答文はキー入力に使わない。
+	 * reconnect だけは supervisor 側で積む（ここからは呼ばない）。
+	 */
+	private requestWake(project: string, reason: string) {
+		if (!this.supervisor) return;
+		this.supervisor.requestWake(project, reason);
+		this.supervisor.wakeTick().catch(() => {});
 	}
 
 	/** supervisor が /clear する前後に呼ぶ */
@@ -562,6 +574,7 @@ export class Engine {
 					from: "concierge",
 					...(task ? { task } : {}),
 				});
+				this.requestWake(project, "dispatch");
 				if (task) this.ledger.updateTask(task, {}, `worker に依頼: ${str(a.text).slice(0, 80)}`);
 				return { delivery: how };
 			}
@@ -947,6 +960,7 @@ export class Engine {
 				`${a.id}（${label}${a.issue ? `・#${a.issue}` : ""}${a.pr ? `・PR #${a.pr}` : ""}）への回答が届きました（窓口経由・Discord）:\n${answer}`,
 				{ attention: a.id, kind: a.kind, issue: a.issue, pr: a.pr, task: a.taskId, source: "discord" },
 			);
+			this.requestWake(a.project, `回答 ${a.id}`);
 		}
 		if (a.taskId)
 			this.ledger.updateTask(a.taskId, { status: "ai-working", waiting: "" }, `${a.id} 回答: ${answer.slice(0, 80)}`);
@@ -980,6 +994,50 @@ export class Engine {
 	}
 
 	// --- CI の監視 -------------------------------------------------------------------------------
+	/**
+	 * harness:queued の Issue を 60 秒ごとに見て、新しく付いた番号があれば worker を起こす。
+	 * engine は GitHub のラベルの変化を受け取れないので polling にする。初回は覚えるだけ（起動時に issue-loop が走る）。
+	 * 取得に失敗したときは「変化なし」とみなし、queuedSeen も更新しない（次回に新規として拾えるように）。
+	 */
+	async queueTick() {
+		if (this.config.worker.wake?.enabled === false) return;
+		const seen = { ...(this.ledger.state().queuedSeen ?? {}) };
+		let changed = false;
+		for (const p of this.ledger.projects()) {
+			if (!p.active || !p.repo || p.mode !== "harness" || !this.ledger.isReady(p)) continue;
+			const r = await this.exec("gh", [
+				"issue",
+				"list",
+				"-R",
+				p.repo,
+				"--state",
+				"open",
+				"--label",
+				"harness:queued",
+				"--json",
+				"number",
+				"--limit",
+				"50",
+			]);
+			if (!r.ok) continue;
+			let numbers: string[];
+			try {
+				const parsed = JSON.parse(r.stdout) as { number: number }[];
+				if (!Array.isArray(parsed) || parsed.some((x) => !Number.isInteger(x?.number))) continue;
+				numbers = parsed.map((x) => String(x.number));
+			} catch {
+				continue;
+			}
+			const before = seen[p.name];
+			seen[p.name] = numbers;
+			changed = true;
+			if (!before) continue;
+			const fresh = numbers.filter((n) => !before.includes(n));
+			if (fresh.length > 0) this.requestWake(p.name, `queued #${fresh.join(",#")}`);
+		}
+		if (changed) this.ledger.saveState({ queuedSeen: seen });
+	}
+
 	/**
 	 * 各リポジトリの既定ブランチの CI を見て、新しく失敗した run を Bot で知らせる。
 	 * リポジトリに通知用のワークフローや Secrets を置かずに済むよう、engine が gh で見に行く。

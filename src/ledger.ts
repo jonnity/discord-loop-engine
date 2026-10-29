@@ -108,6 +108,8 @@ interface State {
 	/** プロジェクトごとに、通知済み（または起動時に既にあった）CI の run ID */
 	ciSeen: Record<string, number[]>;
 	defaultBranches: Record<string, string>;
+	/** プロジェクトごとの、前回 queueTick で見えた harness:queued の Issue 番号（任意項目。無ければ初回） */
+	queuedSeen?: Record<string, string[]>;
 }
 
 export const KIND_LABEL: Record<AttentionKind, string> = {
