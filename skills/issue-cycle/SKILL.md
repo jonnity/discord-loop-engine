@@ -134,7 +134,12 @@ closed なのに `harness:*` ラベルが残っている Issue（GitHub 画面�
 - `answer`（interview への回答）→ Phase 1 の続き
 - `merge-ok` → Phase 6 OK
 - `merge-ng` / awaiting-merge 中の `answer` → Phase 6 NG
-- `stale-notify` / `missing-notify` → 現 head で承認依頼をやり直す。ただし最新が自分の失敗した依頼の pending なら、5-4 の失敗の仕分けに従う。原因を直せたときだけ再実行し、直せなければ blocked にする。tick ごとの無条件再送をしない。
+- `stale-notify` / `missing-notify` → 先に「承認回収の仕分けと共通通知」で pending と復旧を分類してから、現 head で承認依頼をやり直す。ただし最新が自分の失敗した依頼の pending なら、5-4 の失敗の仕分けに従う。原因を直せたときだけ再実行し、直せなければ blocked にする。tick ごとの無条件再送をしない。
+
+Step 0 の追加振り分け: `chat-merge-ok` は同じ tick の Phase 6、`chat-not-approved` は共通通知へ。
+`missing-attention` は Phase 5-4、`attention-unavailable` / `attention-mismatch` は再確認後に解消不能なら blocked。
+`stale-notify` / `missing-notify` の pending は先に「承認回収の仕分けと共通通知」で分類する。
+
 
 ## Phase 1: 要件確認（非ブロッキング）
 
@@ -508,7 +513,7 @@ UI 非変更や demo=null の全案件には録画を強制しない。長い変
 ```
 
 依頼とマージは対象の同じ worktree を cwd にして実行する。復旧未確認の状態ファイルもそこに置かれる。
-動画なしは `--file` を省く。終了値を保存し、**0 だけ**承認依頼済みと扱う。
+動画なしは `--file` を省く。フォアグラウンドで実行し、対象 Issue/PR/WT の終了値を保存し、**0 だけ**承認依頼済みと扱う。
 処理は静的通知先検査→merge-ok 取消し/他 phase ラベル除去/追跡 awaiting 確認→仮コメント pending→
 必須通知→添付の再取得・bytes/SHA-256 照合→同 ID のリンク/A 入り完成 PATCH→merge-ok 再取消し/最終ラベル確認。
 PR 本文には「添付」だけで済ませず、harness-phase が生成する Discord メッセージリンクを使う。
@@ -566,24 +571,169 @@ attention 属性のない旧 gate は全承認経路で再依頼が必要。依�
 
 ### OK（`harness-inbox` の `merge-ok`、またはチャットでの OK）
 
+先に対象 WT を解決し、`harness-inbox` の終了値と全 JSONL を確認する。`chat-merge-ok` は body と attention を引数として渡し、同じ tick でフェーズ進行より先に試す。即時配送も同じ入口を使う。
+
 ```bash
-git -C "$WT" fetch origin && git -C "$WT" merge "origin/$(harness-config '.baseBranch' main)"   # base が進んでいれば
-# 衝突したコードの解消は Codex に依頼（共通起動手順で別 Bash の `harness-codex start`）。push 後は CI green を待ち、head が変わったので承認依頼をやり直す
-(cd "$WT" && harness-merge {n}) || exit 1             # PR 上の承認
-(cd "$WT" && harness-merge {n} --chat-approval "<回答本文>" --attention "<回答のmeta.attention>") || exit 1  # engine の回答だけ
+(cd "$WT" && harness-merge {n}) || exit 1              # PR 上の承認だけの場合
+(cd "$WT" && harness-merge {n} --chat-approval "$BODY" --attention "$ATTENTION") || exit 1  # 保存済み回答を再照合
+```
+
+どちらか該当する一方だけを実行する。成功時だけ従来の done・`harness-codex stop`・worktree の片付けへ進む。
+`harness-merge` が承認・head の一致・CI・mergeable を確認し、マージ後に `done`（ラベル除去）まで行う。
+実 PR が MERGED かも確認し、merge queue への投入だけなら done/片付けを完了扱いしない。
+確認できた成功時の片付けは従来どおり:
+
+```bash
 harness-codex stop codex-impl-{n} "$WT"   # worktree を消す前に（消した後は id を読めない）
 git -C "$(harness-config --root)" worktree remove "$WT"
 ```
 
-`harness-merge` が承認・head の一致・CI・mergeable を確認し、マージ後に `done`（ラベル除去）まで行う。
 最新完成marker・ラベル・現 head・回答先 A の一致が全承認経路で必須。meta.attention 欠落は推測しない。
-webhook は GitHub 承認だけ。engine なしで単独利用する issue-cycle ではチャット承認を利用できない。
-旧 A/A なし/pending 等で拒否されたら harness-notify の info で理由・現在の依頼先PRコメントURL・
-完成内容を確認して回答する必要を伝える（未完了なら復旧待ち）。現在のA は表示せず、同じ OK の付け替えをしない。
-URL が診断に無ければ認証 login の最新依頼を同じ規則で読み、取得不能ならその旨と既知 PR URL を案内する。
-info の通知失敗も記録する。CI/mergeable/hook だけが理由で同じ依頼/head なら、同じ --attention と引用での再試行は可能。
+webhook は GitHub 承認だけ。engine の保存台帳を読めれば MCP 未接続でも tick で回収できる。
+CI/mergeable/hook の拒否だけで同じ依頼/head なら、元の同じ A と台帳原文で再試行できる。
 新 head/新依頼には新回答が必要。拒否理由に従って直す（迂回しない）。「🔵 マージ完了」の Discord 通知は、`done` の報告を受けた
 engine が出すので、ここでは送らない。
+
+**head 変更前の確認**: main 取り込み、rebase、amend、競合修正、CI red の Codex 再依頼の直前には inbox を再読取りする。
+前 tick の空結果は使わない。GitHub NG を優先し、判定不能・走査非0なら head を変えない。
+未処理 OK があればまず現 head で harness-merge を試す。CI 待ちだけなら同じ head/A のまま待つ。
+衝突等で修正が必要な場合だけ、OK とその head で進めない理由を記録してから変更し、push/CI 後は Phase 5-4 で新 A を発行し新回答を待つ。
+base の取り込みが必要なら、この確認と harness-merge の試行後に以下を実行する（`<base>` は harness-config の baseBranch、既定 main に置き換える）:
+
+```bash
+git -C "$WT" fetch origin && git -C "$WT" merge origin/<base>
+```
+
+衝突の解消は Codex に依頼し（共通起動手順で別 Bash の harness-codex start）、push 後は CI green を待って承認依頼をやり直す（Phase 5-4）。
+
+失敗した tick 中に「Issue/PR・対象 head・回答 A（判明時）・具体的理由・次の確認/操作・確認時刻」を
+私有一時ファイルへ書き、`gh issue comment --body-file` で Issue に残す。理由の正本は Issue。通知のURLは現在の依頼先PRコメントURLを使い、現在のA や marker 全文は表示しない。
+認証 login 自身の同じ head/A/理由のコメントを再利用し、他者の同じキーでは抑制しない。
+記録できなければローカル handoff に理由と記録失敗を残し、成功扱いしない。
+
+### 承認回収の仕分けと共通通知
+
+Step 0、tick、即時配送は逐次処理する。`harness-inbox` の終了値が非0なら部分 JSONL を採用しない。
+- `merge-ng` は Phase 6 NG の既存処理。GitHub OK より台帳の非 OK 回答（resolvedAt）が新しければ `chat-not-approved` として共通通知へ回す。それ以外の `merge-ok` は GitHub の経路を優先し、台帳異常で新 A を作らない。
+- `chat-merge-ok` は同じ tick の Phase 6。open A は回答待ちで通知も再依頼もしない。
+- `missing-attention` は正常台帳と attentionSeq の確認後の実不在だけ。同じ WT で現在のレビュー・humanChecks・依頼本文を再構成して Phase 5-4 を実行する。
+  動画がある案件は現 head と合意範囲を照合し必要なら撮り直す。終了0、新完成marker、新 A を確認する。旧 OK の付け替えは禁止。
+- `attention-unavailable`（attention-seq-behind を含む）/`attention-mismatch` はその tick で再読取りし、home・設定・権限・scope を確認する。
+  自動解消できなければ `harness-phase {n} blocked --comment-file ...` で必要な対応を通知する。missing とみなした自動再依頼はしない。
+- pending＋復旧ファイルなしは異常で request-failed。pending＋復旧ファイルありは対象 phase の非0終了なら request-failed、終了0でも pending のまま、または終了値不明なら recovery-unconfirmed。
+- **完成 marker＋復旧ファイル＋対象 phase の終了値なし**も recovery-unconfirmed として Phase 5-4 の失敗仕分けへ送り、自動解消できなければ blocked。
+  確認済みの phase 非0終了・残留する復旧ファイル・通知失敗も同じ失敗仕分けへ進む。原因未解消のまま毎 tick 再依頼しない。
+
+Phase 5-4 はフォアグラウンドなので実行中の tick 処理はない。通知後・完成 PATCH 前に届いた OK も終了を待ってから処理する。
+対象 Issue/PR/WT の呼出しの終了値を `0 / nonzero / unknown` の明示引数で共通例へ渡す。再起動・clear 等で失ったら unknown とし、別 Issue や古い終了値を使わない。
+終了0・完成marker・復旧ファイル消失後は同じ A/head の OK を回収し、info 0回・merge 1回。プロセス台帳は作らない。
+
+`chat-not-approved`、実際に届いた chat の構造化拒否診断（stderr の kind=chat-rejection）、pending/復旧の失敗は以下の関数を使う。
+入力は project、Issue、PR、拒否 A（不明なら unknown）、reason、現在の依頼 URL（不明なら既知 PR URL）、タイトル、対象 phase 終了値、request 状態（pending/completed/open/other）、WT の10引数。
+番号/本文を eval やシェルコードへ変換せず、各引数で渡す。CLI の診断順だけで待機を決めず、復旧ファイルと終了値で仕分け直す。
+戻り値0は通知済みまたは通知不要、3は Phase 5-4 の失敗仕分け、1は記録/通知未確認なので handoff を残して停止する。
+同じキーの claimed/failed-or-unknown は自動再送せず、成否を確認して人に引き継ぐ。通知の再処理で merge を実行しない。
+実際の chat を受けていない unavailable/mismatch は info へ流さず、上記の再確認と blocked に進む。
+
+PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼む、の2つを出口として案内する。
+後者は worker が Phase 5-4 で新 A を発行する。resolved の古い A への再入力や台帳の直接編集は促さない。非 OK だけで毎 tick 新 A を自動発行しない。
+本文は trim 後、owners のリテラルな `<名前> が Discord で回答。` を先頭から1回だけ除き startsWith("OK") で判定する。
+前置きの名前は Discord の表示名で、owners（GitHub login）と完全に一致するときだけ除く。表示名を変えると前置き付き回答は非 OK になり、上記の出口へ回る。
+承認できる人は allowedUserIds で決まり、owners 限定はそれを絞らない。前置きなしの OK は表示名によらず本文判定を通る。
+
+```bash
+# CHAT_REJECTION_BEGIN
+chat_rejection() (
+  [ "$#" -eq 10 ] || exit 1
+  project="$1" issue="$2" pr="$3" attention="$4" reason="$5" url="$6" title="$7" phase_exit="$8" request_state="$9" wt="${10}"
+  [ -n "$project" ] && [ -n "$url" ] || exit 1
+  [[ "$issue" =~ ^[1-9][0-9]*$ && "$pr" =~ ^[1-9][0-9]*$ ]] || exit 1
+  case "$phase_exit" in 0|nonzero|unknown) ;; *) exit 1 ;; esac
+  recovery=0 route=0
+  for file in ".harness/merge-recovery-$issue.json" "$wt/.harness/merge-recovery-$issue.json"; do
+    if [ -e "$file" ] || [ -L "$file" ]; then recovery=1; fi
+  done
+  if [ "$request_state" = pending ]; then
+    route=3
+    if [ "$recovery" = 0 ] || [ "$phase_exit" = nonzero ]; then reason="request-failed"; else reason="recovery-unconfirmed"; fi
+  elif [ "$request_state" = completed ] && { [ "$recovery" = 1 ] || [ "$phase_exit" = nonzero ]; }; then
+    route=3
+    if [ "$phase_exit" = nonzero ]; then reason="request-failed"; else reason="recovery-unconfirmed"; fi
+  fi
+  [ "$request_state" != open ] || exit 0
+  case "$reason" in
+  ci-not-green|mergeable-unconfirmed|before-merge-failed) exit 0 ;;
+  attention-open) sentence="台帳ではこの A-番号がまだ回答待ちになっている" ;;
+  attention-missing) sentence="回答先の A-番号を確認できない" ;;
+  invalid-arguments) sentence="承認確認に必要な引数が正しくない" ;;
+  pr-unavailable) sentence="対象の PR を確認できない" ;;
+  approval-unavailable) sentence="GitHub の承認依頼を読み取れない" ;;
+  recovery-unconfirmed) sentence="承認依頼の復旧完了を確認できない" ;;
+  request-failed) sentence="承認依頼が失敗したか、未完了のまま復旧記録が失われている" ;;
+  github-ng) sentence="GitHub にマージへの NG がある" ;;
+  request-pending) exit 1 ;;
+  request-missing) sentence="有効な完成済みの承認依頼がない" ;;
+  request-stale) sentence="承認依頼の head と現在の head が一致しない" ;;
+  request-inactive) sentence="現在の Issue がマージ承認待ちではない" ;;
+  attention-none) sentence="この依頼は A-番号を持たず、チャット承認を利用できない" ;;
+  attention-stale) sentence="回答先の A-番号が現在の完成依頼と一致しない" ;;
+  attention-unavailable) sentence="台帳または照合に必要な設定を読み取れない" ;;
+  attention-seq-behind) sentence="読んでいる台帳の発行番号が承認依頼の A-番号に追い付いていない" ;;
+  attention-not-found) sentence="回答先の A-番号が台帳に見つからない" ;;
+  attention-scope-mismatch) sentence="回答の種類・プロジェクト・Issue・PR が対象の依頼と一致しない" ;;
+  attention-superseded) sentence="同じ対象に、より新しい承認依頼がある" ;;
+  answer-missing) sentence="台帳に回答本文が記録されていない" ;;
+  resolved-at-missing) sentence="台帳に回答時刻が記録されていない" ;;
+  invalid-time) sentence="台帳の依頼作成時刻または回答時刻が正しくない" ;;
+  answer-before-created) sentence="回答時刻が A-番号の作成時刻より前になっている" ;;
+  answer-not-ok) sentence="本文の先頭が OK ではない" ;;
+  approval-changed) sentence="マージ直前の再確認で依頼または回答が変わった" ;;
+  *) exit 1 ;;
+  esac
+  subject="unknown" display="A 不明"
+  if [[ "$attention" =~ ^A-[1-9][0-9]*$ ]]; then subject="$attention"; display="$attention"; fi
+  key="$(jq -nc --arg project "$project" --arg issue "$issue" --arg pr "$pr" --arg subject "$subject" --arg reason "$reason" '["chat-rejection-v1",$project,$issue,$pr,$subject,$reason]')" || exit 1
+  login="$(gh api user --jq .login)" || exit 1
+  [ -n "$login" ] || exit 1
+  repo="$(gh repo view --json nameWithOwner -q .nameWithOwner)" || exit 1
+  [[ "$repo" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || exit 1
+  temp="$(mktemp -d)" || exit 1
+  trap 'rm -rf "$temp"' EXIT
+  read_comments() {
+    gh api --paginate --slurp "repos/$repo/issues/$issue/comments" > "$temp/comments.json" || return 1
+    jq -e 'type == "array" and all(.[]; type == "array")' "$temp/comments.json" >/dev/null
+  }
+  read_comments || exit 1
+  existing="$(jq -r --arg login "$login" --arg key "$key" '
+    [.[][] | select(.user.login == $login) | .body | split("\n")[]
+     | capture("^<!-- harness:chat-rejection (?<record>.*) -->$")? | .record | fromjson?
+     | select(.key == $key) | .state] | first // empty' "$temp/comments.json")" || exit 1
+  if [ -n "$existing" ]; then
+    [ "$existing" = posted ] || exit 1
+    exit "$route"
+  fi
+  printf -v body '#%s / PR #%s: %s / %s: %s。現在の依頼: %s。現在の完成依頼を確認し、PR に GitHub で『OK』とコメントするか、窓口に『#%s の承認依頼を出し直して』と頼む。' "$issue" "$pr" "$display" "$reason" "$sentence" "$url" "$issue"
+  make_body() {
+    marker="$(jq -nc --arg key "$key" --arg state "$1" '{key:$key,state:$state}')" || return 1
+    jq -n --arg body "$body" --arg marker "$marker" '{body:($body+"\n\n<!-- harness:chat-rejection "+$marker+" -->")}' > "$temp/body.json"
+  }
+  make_body claimed || exit 1
+  claimed="$(gh api "repos/$repo/issues/$issue/comments" --method POST --input "$temp/body.json")" || exit 1
+  id="$(jq -er --arg login "$login" 'select(.user.login == $login and (.id | type == "number") and .id > 0 and .id == (.id | floor)) | .id' <<<"$claimed")" || exit 1
+  read_comments || exit 1
+  jq -e --arg login "$login" --argjson id "$id" --slurpfile expected "$temp/body.json"     'any(.[][]; .id == $id and .user.login == $login and .body == $expected[0].body)' "$temp/comments.json" >/dev/null || exit 1
+  state="failed-or-unknown"
+  if result="$(harness-notify --json --event info --title "$title" --project "$project" --issue "$issue" --pr "$pr" --url "$url" --body "$body")"; then
+    if jq -e '.status == "posted"' <<<"$result" >/dev/null; then state=posted; fi
+  fi
+  make_body "$state" || exit 1
+  updated="$(gh api "repos/$repo/issues/comments/$id" --method PATCH --input "$temp/body.json")" || exit 1
+  jq -e --arg login "$login" --argjson id "$id" --slurpfile expected "$temp/body.json"     '.id == $id and .user.login == $login and .body == $expected[0].body' <<<"$updated" >/dev/null || exit 1
+  [ "$state" = posted ] || exit 1
+  exit "$route"
+)
+# CHAT_REJECTION_END
+```
 
 **人間が GitHub の画面から直接マージした場合**: Issue は `closes #{n}` で閉じるが、ラベルと worktree が残る。
 Step 0 で「closed なのに `harness:*` ラベルが残っている Issue」を見つけたら、`harness-phase {n} done` と

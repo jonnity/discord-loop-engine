@@ -16,6 +16,7 @@ case "$*" in
 "api user --jq .login") echo bot; exit ;;
 "issue view 5 --json labels"|"issue view 6 --json labels") echo '{"labels":[{"name":"harness:awaiting-merge"}]}'; exit ;;
 "issue view 7 --json labels") echo '{"labels":[{"name":"harness:awaiting-merge"},{"name":"harness:merge-ok"}]}'; exit ;;
+"api --paginate --slurp repos/jonnity/r/issues/7/events") echo '[[{"event":"labeled","label":{"name":"harness:merge-ok"},"created_at":"2026-10-03T02:00:00Z"}]]'; exit ;;
 esac
 for pr in 15 16 17; do
  case "$*" in

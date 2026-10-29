@@ -42,10 +42,17 @@ done
 for n in $(gh issue list --state open --label harness:awaiting-merge --json number -q '.[].number'); do
 	pr="$(gh pr list --state open --head "${prefix}${n}" --json number -q '.[0].number // empty')"
 	[ -n "$pr" ] || continue
-	snapshot="$(node "$SCRIPT_DIR/../src/harness-approval.ts" "$n" "$pr")"
+	snapshot="$(node "$SCRIPT_DIR/../src/harness-approval.ts" "$n" "$pr" --with-attention)"
 	jq -c --argjson n "$n" --argjson pr "$pr" '
-		if .verdict.kind == "merge-ng" then {issue:$n,pr:$pr,kind:"merge-ng",url:.verdict.url,body:.verdict.body}
-		elif .status != "ready" then {issue:$n,pr:$pr,kind:.status,url:.url}
+		if .ownersUnavailable then {issue:$n,pr:$pr,kind:"attention-unavailable",reason:"attention-unavailable",url:.url}
+		elif .verdict.kind == "merge-ng" then {issue:$n,pr:$pr,kind:"merge-ng",url:.verdict.url,body:.verdict.body}
+		elif .status != "ready" then ({issue:$n,pr:$pr,kind:.status,url:.url} + (if .requestState then {requestState:.requestState} else {} end))
+		elif .githubApprovalBlocked then {issue:$n,pr:$pr,kind:"chat-not-approved",attention:.attentionCheck.attention,reason:.attentionCheck.reason,url:.url}
 		elif .verdict then {issue:$n,pr:$pr,kind:.verdict.kind,url:.verdict.url,body:.verdict.body}
+		elif .attentionCheck.state == "unavailable" then {issue:$n,pr:$pr,kind:"attention-unavailable",reason:.attentionCheck.reason,url:.url}
+		elif .attentionCheck.state == "missing" then {issue:$n,pr:$pr,kind:"missing-attention",attention:.attentionCheck.attention,url:.url}
+		elif .attentionCheck.state == "mismatch" then {issue:$n,pr:$pr,kind:"attention-mismatch",reason:.attentionCheck.reason,url:.url}
+		elif .attentionCheck.state == "approved" then {issue:$n,pr:$pr,kind:"chat-merge-ok",attention:.attentionCheck.attention,body:.attentionCheck.body,resolvedAt:.attentionCheck.resolvedAt,url:.url}
+		elif .attentionCheck.state == "not-approved" then {issue:$n,pr:$pr,kind:"chat-not-approved",attention:.attentionCheck.attention,reason:.attentionCheck.reason,url:.url}
 		else empty end' <<<"$snapshot"
 done

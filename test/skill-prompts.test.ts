@@ -792,3 +792,312 @@ test("T17c: 設定・依頼の欠損は案内を捏造せず、通知失敗も�
 	for (const missing of ["config", "prompt"] as const) await blocked17({ stage: "spec", missing });
 	await blocked17({ stage: "impl", phaseCode: 4 });
 });
+
+const loop15 = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+const readme15 = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+test("S1/S2/S3: 回収は同tick・head変更前、失敗は復旧仕分けとblockedに接続する", () => {
+	for (const text of [skill, loop15]) {
+		for (const word of [
+			"chat-merge-ok",
+			"Phase 6 NG",
+			"missing-attention",
+			"attention-unavailable",
+			"attention-mismatch",
+			"Phase 5-4",
+			"blocked",
+			"CHAT_REJECTION_BEGIN",
+			"allowedUserIds",
+			"表示名",
+			"非 OK",
+			"窓口に『#n の承認依頼を出し直して』と頼む",
+			"PR に GitHub で『OK』",
+			"完成 marker＋復旧ファイル＋対象 phase の終了値なし",
+		])
+			assert.ok(text.includes(word), word);
+	}
+	const phase6 = section(skill, "## Phase 6:", "### NG");
+	assert.ok(phase6.indexOf("harness-merge") < phase6.indexOf("main 取り込み"));
+	assert.ok(phase6.includes('git -C "$WT" fetch origin && git -C "$WT" merge origin/<base>'));
+	assert.ok(phase6.indexOf("harness-merge") < phase6.indexOf("fetch origin &&"));
+	assert.ok(phase6.includes("衝突の解消は Codex に依頼"));
+	assert.ok(phase6.includes("push 後は CI green を待って承認依頼をやり直す"));
+	const immediate = section(loop15, "`meta.kind=merge`", "`meta.kind=interview`");
+	assert.ok(immediate.includes("明示の NG・修正指示なら Phase 6 NG（issue-cycle の ### NG）"));
+	for (const word of [
+		"OK ではない",
+		"OK、ただし NG",
+		"OKです",
+		"OKじゃない",
+		"人が承知のうえで選んだ",
+		"allowedUserIds",
+		"Discord の表示名",
+	])
+		assert.ok(readme15.includes(word), word);
+});
+async function rejection15(
+	script: string,
+	dir: string,
+	a: string,
+	reason: string,
+	phase = "unknown",
+	state = "completed",
+	extra = "",
+) {
+	return bash(
+		`set -uo pipefail
+cd "$WT" || exit 1
+gh() { node "$WT/gh.cjs" "$@"; }
+harness-notify() { printf '%s\\n' "$*" >> "$WT/notifies"; printf '%s\\n' '{"status":"posted"}'; }
+${extra}
+${script}
+chat_rejection test 3 5 '${a}' '${reason}' https://github.com/example/project/pull/5#issuecomment-10 テスト '${phase}' '${state}' "$WT"
+`,
+		{ ...process.env, WT: dir },
+	);
+}
+test("S3: 共通シェル例は自分のclaimを正本にし、即時/tick/再開の重複通知を抑える", async () => {
+	const script = section(skill, "# CHAT_REJECTION_BEGIN", "# CHAT_REJECTION_END");
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-rejection-"));
+	try {
+		writeFileSync(path.join(dir, "comments.json"), "[]");
+		writeFileSync(
+			path.join(dir, "gh.cjs"),
+			`
+const fs=require('node:fs'),p=__dirname+'/comments.json',a=process.argv.slice(2),comments=JSON.parse(fs.readFileSync(p)),out=x=>fs.writeSync(1,JSON.stringify(x)+'\\n');
+if(a.join(' ')==='api user --jq .login') fs.writeSync(1,'bot\\n');
+else if(a[0]==='repo') fs.writeSync(1,'example/project\\n');
+else if(a.includes('--slurp')) out([comments]);
+else if(a.includes('--input')) {
+const body=JSON.parse(fs.readFileSync(a[a.indexOf('--input')+1])).body;
+if(a.includes('POST')){const c={id:comments.length+1,body,user:{login:'bot'},html_url:'https://github.com/example/project/issues/3#issuecomment-'+(comments.length+1)};comments.push(c);out(c);}
+else {const c=comments.find(c=>c.id===Number(a[1].split('/').at(-1)));c.body=body;out(c);}
+fs.writeFileSync(p,JSON.stringify(comments));
+} else process.exit(1);
+`,
+		);
+		const run = (a = "A-12", reason = "answer-not-ok", phase = "unknown", state = "completed", extra = "") =>
+			rejection15(script, dir, a, reason, phase, state, extra);
+		for (let i = 0; i < 3; i++) assert.equal((await run()).code, 0);
+		let notifications = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n");
+		assert.equal(notifications.length, 1);
+		assert.match(notifications[0] ?? "", /本文の先頭が OK ではない/);
+		assert.match(notifications[0] ?? "", /窓口に『#3 の承認依頼を出し直して』と頼む/);
+		assert.match(notifications[0] ?? "", /PR に GitHub で『OK』/);
+		assert.equal((await run("A-13")).code, 0);
+		assert.equal((await run("A-12", "invalid-time")).code, 0);
+		for (let i = 0; i < 2; i++) assert.equal((await run("unknown", "attention-missing")).code, 0);
+		const comments = JSON.parse(readFileSync(path.join(dir, "comments.json"), "utf8"));
+		const unknownMarker = /<!-- harness:chat-rejection (.*) -->/.exec(comments.at(-1).body);
+		assert.deepEqual(JSON.parse(JSON.parse(unknownMarker?.[1] ?? "{}").key), [
+			"chat-rejection-v1",
+			"test",
+			"3",
+			"5",
+			"unknown",
+			"attention-missing",
+		]);
+		assert.match(comments.at(-1).body, /unknown/);
+		comments[0].user.login = "stranger";
+		writeFileSync(path.join(dir, "comments.json"), JSON.stringify(comments));
+		assert.equal((await run()).code, 0);
+		notifications = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n");
+		assert.equal(notifications.length, 5);
+		const count = notifications.length;
+		assert.notEqual((await run("A-14", "answer-not-ok", "unknown", "completed", "gh() { return 1; }")).code, 0);
+		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, count);
+		assert.equal((await run("A-14", "ci-not-green")).code, 0);
+		assert.equal((await run("A-14", "attention-open", "unknown", "open")).code, 0);
+		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, count);
+		assert.equal((await run("A-14", "attention-open")).code, 0);
+		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, count + 1);
+		assert.equal((await run("A-14", "request-pending", "0", "pending")).code, 3);
+		mkdirSync(path.join(dir, ".harness"));
+		symlinkSync(path.join(dir, "missing"), path.join(dir, ".harness/merge-recovery-3.json"));
+		assert.equal((await run("A-15", "request-pending", "nonzero", "pending")).code, 3);
+		assert.equal((await run("A-16", "recovery-unconfirmed", "unknown", "completed")).code, 3);
+		assert.equal((await run("A-17", "request-pending", "unknown", "pending")).code, 3);
+		rmSync(path.join(dir, ".harness/merge-recovery-3.json"));
+		assert.equal(
+			(
+				await run(
+					"A-18",
+					"answer-not-ok",
+					"unknown",
+					"completed",
+					`harness-notify() { echo skip >> "$WT/notifies"; echo '{"status":"skipped"}'; }`,
+				)
+			).code,
+			1,
+		);
+		const failedCount = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length;
+		assert.equal((await run("A-18")).code, 1);
+		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, failedCount);
+		const sentences = [
+			["attention-missing", "回答先の A-番号を確認できない"],
+			["invalid-arguments", "承認確認に必要な引数が正しくない"],
+			["pr-unavailable", "対象の PR を確認できない"],
+			["approval-unavailable", "GitHub の承認依頼を読み取れない"],
+			["recovery-unconfirmed", "承認依頼の復旧完了を確認できない"],
+			["request-failed", "承認依頼が失敗したか、未完了のまま復旧記録が失われている"],
+			["github-ng", "GitHub にマージへの NG がある"],
+			["request-missing", "有効な完成済みの承認依頼がない"],
+			["request-stale", "承認依頼の head と現在の head が一致しない"],
+			["request-inactive", "現在の Issue がマージ承認待ちではない"],
+			["attention-none", "この依頼は A-番号を持たず、チャット承認を利用できない"],
+			["attention-stale", "回答先の A-番号が現在の完成依頼と一致しない"],
+			["attention-unavailable", "台帳または照合に必要な設定を読み取れない"],
+			["attention-seq-behind", "読んでいる台帳の発行番号が承認依頼の A-番号に追い付いていない"],
+			["attention-not-found", "回答先の A-番号が台帳に見つからない"],
+			["attention-open", "台帳ではこの A-番号がまだ回答待ちになっている"],
+			["attention-scope-mismatch", "回答の種類・プロジェクト・Issue・PR が対象の依頼と一致しない"],
+			["attention-superseded", "同じ対象に、より新しい承認依頼がある"],
+			["answer-missing", "台帳に回答本文が記録されていない"],
+			["resolved-at-missing", "台帳に回答時刻が記録されていない"],
+			["invalid-time", "台帳の依頼作成時刻または回答時刻が正しくない"],
+			["answer-before-created", "回答時刻が A-番号の作成時刻より前になっている"],
+			["answer-not-ok", "本文の先頭が OK ではない"],
+			["approval-changed", "マージ直前の再確認で依頼または回答が変わった"],
+		] as const;
+		for (const [reason, sentence] of sentences) {
+			assert.equal((await run("A-30", reason)).code, 0, reason);
+			const latest = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").at(-1) ?? "";
+			assert.ok(latest.includes(sentence), reason);
+			assert.ok(latest.includes("窓口に『#3 の承認依頼を出し直して』と頼む"), reason);
+		}
+		const config = path.join(dir, "profile.json");
+		writeFileSync(
+			config,
+			JSON.stringify({ project: "test", owners: ["owner"], worktreeRoot: path.join(dir, "worktrees"), hooks: {} }),
+		);
+		writeFileSync(path.join(dir, "state.json"), '{"attentionSeq":41}');
+		writeFileSync(
+			path.join(dir, "gh-state.json"),
+			JSON.stringify({
+				head: "a".repeat(40),
+				labels: ["harness:awaiting-merge"],
+				comments: [
+					{
+						id: 10,
+						user: { login: "bot" },
+						body: `<!-- harness:gate phase=awaiting-merge issue=3 sha=${"a".repeat(40)} attention=A-41 -->`,
+						created_at: "2026-10-27T00:00:00Z",
+						updated_at: "2026-10-27T00:00:10Z",
+						html_url: "https://github.com/example/project/pull/5#issuecomment-10",
+					},
+				],
+				reviews: [],
+				edits: 0,
+			}),
+		);
+		writeFileSync(path.join(dir, "gh-log"), "");
+		const actual = (bin: string, args: string[]) =>
+			new Promise<{ code: number; stdout: string; stderr: string }>((resolve) =>
+				execFile(
+					path.resolve("bin", bin),
+					args,
+					{
+						cwd: dir,
+						env: {
+							...process.env,
+							DLE_HOME: dir,
+							HARNESS_CONFIG: config,
+							CLAUDE_PROJECT_DIR: dir,
+							PHASE_STUB: "1",
+							MEDIA_LOG: path.join(dir, "gh-log"),
+							PATH: `${path.resolve("tests/harness/fixtures")}:${process.env.PATH}`,
+						},
+						timeout: 10000,
+					},
+					(err, stdout, stderr) => resolve({ code: err ? Number(err.code) : 0, stdout, stderr }),
+				),
+			);
+		for (const [answer, resolvedAt, expectedReason] of [
+			["NG", "2026-10-27T00:00:12Z", "answer-not-ok"],
+			["OK", "2026-10-26T00:00:00Z", "answer-before-created"],
+		]) {
+			const github = JSON.parse(readFileSync(path.join(dir, "gh-state.json"), "utf8"));
+			github.comments = github.comments.filter((c: { id: number }) => c.id !== 20);
+			if (expectedReason === "answer-not-ok")
+				github.comments.push({
+					id: 20,
+					user: { login: "owner" },
+					body: "OK",
+					created_at: "2026-10-27T00:00:11Z",
+				});
+			writeFileSync(path.join(dir, "gh-state.json"), JSON.stringify(github));
+			writeFileSync(
+				path.join(dir, "attention.json"),
+				JSON.stringify([
+					{
+						id: "A-41",
+						kind: "merge",
+						taskId: "test#3",
+						project: "test",
+						issue: "3",
+						pr: "5",
+						title: "承認",
+						url: "url",
+						summary: "概要",
+						status: "resolved",
+						createdAt: "2026-10-27T00:00:00Z",
+						resolvedAt,
+						answer,
+					},
+				]),
+			);
+			const immediate = await actual("harness-merge", ["3", "--chat-approval", "OK", "--attention", "A-41"]);
+			assert.equal(immediate.code, 1);
+			const rejection = JSON.parse(
+				immediate.stderr.split("\n").find((line) => line.startsWith('{"kind":"chat-rejection"')) ?? "{}",
+			);
+			assert.equal(rejection.reason, expectedReason);
+			assert.equal((await run(rejection.attention, rejection.reason)).code, 0);
+			const afterImmediate = readFileSync(path.join(dir, "notifies"), "utf8");
+			const notificationCount = afterImmediate.trim().split("\n").length;
+			if (expectedReason === "answer-not-ok")
+				assert.equal(
+					afterImmediate.split("\n").filter((line) => line.includes("A-41") && line.includes("answer-not-ok")).length,
+					1,
+				);
+			const githubMerge = await actual("harness-merge", ["3"]);
+			assert.equal(githubMerge.code, 1, githubMerge.stderr);
+			for (let tick = 0; tick < 2; tick++) {
+				const inbox = await actual("harness-inbox", []);
+				assert.equal(inbox.code, 0, inbox.stderr);
+				const event = JSON.parse(inbox.stdout);
+				assert.equal(event.kind, "chat-not-approved");
+				assert.equal((await run(event.attention, event.reason)).code, 0);
+				assert.equal(readFileSync(path.join(dir, "notifies"), "utf8"), afterImmediate);
+			}
+			assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, notificationCount);
+		}
+		assert.doesNotMatch(readFileSync(path.join(dir, "gh-log"), "utf8"), /^merge /m);
+
+		const own = JSON.parse(readFileSync(path.join(dir, "comments.json"), "utf8"));
+		const claimedComment = own.find(
+			(c: { body: string }) => c.body.includes("A-30") && c.body.includes("approval-changed"),
+		);
+		claimedComment.body = claimedComment.body.replace('"state":"posted"', '"state":"claimed"');
+		writeFileSync(path.join(dir, "comments.json"), JSON.stringify(own));
+		const beforeClaimed = readFileSync(path.join(dir, "notifies"), "utf8");
+		assert.equal((await run("A-30", "approval-changed")).code, 1);
+		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8"), beforeClaimed);
+		assert.equal(
+			(
+				await run(
+					"A-31",
+					"answer-not-ok",
+					"unknown",
+					"completed",
+					`gh() { if [[ "$*" == *PATCH* ]]; then return 1; fi; node "$WT/gh.cjs" "$@"; }`,
+				)
+			).code,
+			1,
+		);
+		const afterClaim = readFileSync(path.join(dir, "notifies"), "utf8");
+		assert.equal((await run("A-31")).code, 1);
+		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8"), afterClaim);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
