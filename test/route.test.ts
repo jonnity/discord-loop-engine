@@ -6,7 +6,7 @@
 // - 許可確認の返事は、待っている request_id にだけ結び付く
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chunkText, type DiscordMessage, parsePost, route } from "../src/route.ts";
+import { chunkText, type DiscordMessage, formatPostChunks, parsePost, route } from "../src/route.ts";
 
 const ME = "111";
 const CH = "900";
@@ -104,4 +104,65 @@ test("添付は URL として本文に付き、長文は 2000 文字以内に分
 	const chunks = chunkText(`${"a".repeat(1500)}\n${"b".repeat(1500)}`);
 	assert.equal(chunks.length, 2);
 	assert.ok(chunks.every((c) => c.length <= 2000));
+});
+
+const nonNewline = (t: string) => t.replace(/\n/g, "");
+
+test("投稿は見出しで始まり、区切り線は最後の1通にだけ付き、本文を欠落させず2000文字以内に収まる", () => {
+	const heading = { icon: "🟡", label: "要件確認", attention: "A-5", issue: "19" };
+	const fence = `\`\`\`\n${"x".repeat(1900)}\n${"y".repeat(1900)}\n\`\`\``;
+	const bodies = [
+		"短い本文",
+		"",
+		"a".repeat(5000),
+		`${"行\n".repeat(1500)}終わり`,
+		"😀".repeat(2500),
+		"b".repeat(1950),
+		"c".repeat(1960),
+		fence,
+	];
+	for (const body of bodies) {
+		const chunks = formatPostChunks("proj", body, heading);
+		assert.ok(chunks.length >= 1);
+		for (const [i, c] of chunks.entries()) {
+			assert.ok(c.length <= 2000, `${c.length}`);
+			const first = c.split("\n")[0];
+			assert.equal(first, i === 0 ? "🟡 **[proj]** 要件確認 A-5｜#19" : "🟡 **[proj]** 要件確認 A-5｜#19（続き）");
+			assert.equal(c.endsWith("\n───"), i === chunks.length - 1, "区切り線は最後だけ");
+			assert.equal(c.split("───").length - 1, i === chunks.length - 1 ? 1 : 0);
+		}
+		const rebuilt = chunks
+			.map((c) =>
+				c
+					.split("\n")
+					.slice(1)
+					.join("\n")
+					.replace(/\n───$/, ""),
+			)
+			.join("");
+		assert.equal(nonNewline(rebuilt).replace(/───$/, ""), nonNewline(body));
+	}
+	assert.deepEqual(formatPostChunks("p", "", { icon: "🔔", label: "お知らせ" }), ["🔔 **[p]** お知らせ\n───"]);
+	assert.throws(() => formatPostChunks("p".repeat(2000), "x", heading));
+});
+
+test("新しい見出しも旧形式も1行目から読み取り、窓口の返信は本文1行目の A-番号と issue を読む", () => {
+	const post = (content: string) => parsePost({ id: "1", channel_id: CH, content });
+	assert.deepEqual(post("🟡 **[k]** 要件確認 A-5｜#19\nタイトル"), {
+		project: "k",
+		headline: "要件確認 A-5｜#19",
+		attention: "A-5",
+		issue: "19",
+	});
+	assert.equal(post("⚙️ **[k]** 設定 A-6（続き）\n本文")?.attention, "A-6");
+	assert.equal(post("🔵 **[k]** マージ完了｜#7\n本文")?.issue, "7");
+	assert.equal(post("**[k]** 🟢 A-4 マージ承認｜#12 票")?.attention, "A-4");
+	assert.equal(post("前置き 🟡 **[k]** 要件確認 A-5"), null, "先頭以外は拾わない");
+	assert.equal(post("本文\n🟡 **[k]** 要件確認 A-5"), null, "1行目以外の偽見出しは拾わない");
+	const reply = post("💬 **[窓口]** 返信\nA-9 は OK です。#7 も");
+	assert.deepEqual([reply?.attention, reply?.issue], ["A-9", "7"]);
+	assert.equal(post("💬 **[窓口]** 返信（続き）\nA-9 の続き")?.attention, undefined, "返信の続きは1行目だけ");
+	assert.equal(post("🟡 **[k]** 要件確認 A-5\nA-99 と #7")?.attention, "A-5", "他種別の2行目は読まない");
+	assert.equal(post("🟢 **[k]** マージ承認 A-5\n#7")?.issue, undefined);
+	assert.equal(post("**[窓口]** 承知しました。A-3 です")?.attention, "A-3", "旧形式の返信は従来どおり");
 });

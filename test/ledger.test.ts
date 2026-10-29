@@ -42,8 +42,8 @@ test("あなた待ちは A-番号で採番され、同じタスクの同じ種�
 	const l = fresh();
 	const t = l.createTask({ project: "k", title: "x", issue: "1" });
 	const base = { taskId: t.id, project: "k", issue: "1", pr: "5", title: "x", url: "u", summary: "" };
-	const a1 = l.addAttention({ ...base, kind: "merge" });
-	const a2 = l.addAttention({ ...base, kind: "merge" });
+	const a1 = l.addAttention({ ...base, kind: "merge" }).attention;
+	const a2 = l.addAttention({ ...base, kind: "merge" }).attention;
 	assert.deepEqual([a1.id, a2.id], ["A-1", "A-2"]);
 	assert.deepEqual(
 		l.openAttention().map((a) => a.id),
@@ -96,4 +96,35 @@ test("ボードにあなた待ち・作業中・次に着手が出る", () => {
 	assert.match(b, /■ あなた待ち\n {2}A-1 \[k\] #12 マージ承認 → PR #34/);
 	assert.match(b, /■ AI 作業中\n {2}T-0002 \[o\] #80 お題/);
 	assert.match(b, /■ 次に着手\n {2}T-0001 \[k\] #12 票を破棄/);
+});
+
+test("依頼の置き換え・タスクでの解消は、今回閉じた依頼だけを返す", () => {
+	const l = fresh();
+	const t = l.createTask({ project: "k", title: "x", issue: "1" });
+	const other = l.createTask({ project: "k", title: "y", issue: "2" });
+	const base = { taskId: t.id, project: "k", issue: "1", pr: "", title: "x", url: "u", summary: "" };
+	const first = l.addAttention({ ...base, kind: "merge" });
+	assert.deepEqual(first.resolved, []);
+	l.addAttention({ ...base, kind: "interview" });
+	l.addAttention({ ...base, taskId: other.id, kind: "merge" });
+	const none1 = l.addAttention({ ...base, taskId: "", kind: "setup" });
+	const none2 = l.addAttention({ ...base, taskId: "", kind: "setup" });
+	assert.deepEqual(none1.resolved, [], "taskId が空なら置き換えない");
+	assert.deepEqual(none2.resolved, []);
+	const replaced = l.addAttention({ ...base, kind: "merge" });
+	assert.deepEqual(
+		replaced.resolved.map((a) => [a.id, a.status, a.answer]),
+		[[first.attention.id, "resolved", "（新しい依頼に置き換え）"]],
+	);
+	l.resolveAttention(l.openAttention().find((a) => a.kind === "interview")?.id ?? "", "回答");
+	const closed = l.resolveAttentionForTask(t.id, "（完了）");
+	assert.deepEqual(
+		closed.map((a) => a.id),
+		[replaced.attention.id],
+		"回答済みは含めない",
+	);
+	assert.deepEqual(l.resolveAttentionForTask(t.id, "（完了）"), []);
+	const saved = JSON.parse(readFileSync(path.join(l.dir, "attention.json"), "utf8"));
+	assert.ok(Array.isArray(saved));
+	assert.equal(saved.find((a: { id: string }) => a.id === first.attention.id).answer, "（新しい依頼に置き換え）");
 });

@@ -42,11 +42,18 @@ interface Call {
 
 function fakeRest() {
 	const calls: Call[] = [];
+	const hooks = {
+		react: null as null | ((messageId: string, emoji: string) => Promise<void>),
+		send: null as null | ((content: string) => Promise<void>),
+	};
 	let n = 0;
 	return {
 		calls,
+		// テストが印の付与を失敗させたり、完了を手動で止めたりするための差し込み口
+		hooks,
 		channel: async (id: string) => ({ id, guild_id: "800", type: 0 }),
 		sendMessage: async (channelId: string, m: { content: string; replyTo?: string; files?: string[] }) => {
+			await hooks.send?.(m.content);
 			calls.push({
 				kind: "send",
 				channelId,
@@ -75,13 +82,14 @@ function fakeRest() {
 			return {};
 		},
 		react: async (channelId: string, messageId: string, emoji: string) => {
+			await hooks.react?.(messageId, emoji);
 			calls.push({ kind: "react", channelId, messageId, emoji });
 			return {};
 		},
 	};
 }
 
-function setupEngine(retroEvery = 5, exec?: Run, existingHome?: string) {
+function setupEngine(retroEvery = 5, exec?: Run, existingHome?: string, log: (m: string) => void = () => {}) {
 	// Unix ソケットのパス長制限（約 104 文字）に収まるよう短い場所に作る
 	const home = existingHome ?? mkdtempSync(path.join(os.tmpdir(), "dle-"));
 	const raw = { channelIds: [CH], allowedUserIds: [ME], retro: { everyDoneTasks: retroEvery } };
@@ -123,7 +131,7 @@ function setupEngine(retroEvery = 5, exec?: Run, existingHome?: string) {
 	const engine = new Engine({
 		config,
 		rest,
-		log: () => {},
+		log,
 		boardDebounceMs: 10,
 		...(exec ? { exec } : {}),
 		gatewayFactory: (h) => {
@@ -250,7 +258,7 @@ test("窓口と worker で渡されるツールが違い、Discord の発言は�
 		const r = await c.tool("reply", { text: "承知しました。#12 として起票します", chat_id: CH, reply_to: "m1" });
 		assert.equal(r.isError, false);
 		const sent = rest.calls.find((x) => x.kind === "send" && x.replyTo === "m1");
-		assert.equal(sent?.content, "**[窓口]** 承知しました。#12 として起票します");
+		assert.equal(sent?.content, "💬 **[窓口]** 返信\n承知しました。#12 として起票します\n───");
 		const denied = await w.tool("reply", { text: "x" });
 		assert.equal(denied.isError, true);
 	} finally {
@@ -292,7 +300,7 @@ test("承認依頼は A-番号付きで投稿され、「A-1 OK」が窓口経�
 		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
 		assert.match(
 			post?.content ?? "",
-			/^\*\*\[kishimen-tool\]\*\* 🟢 A-1 マージ承認｜#12 票を破棄\n判定 ✅\n👉 よければ「A-1 OK」/,
+			/^🟢 \*\*\[kishimen-tool\]\*\* マージ承認 A-1｜#12\n票を破棄\n判定 ✅\n👉 よければ「A-1 OK」[\s\S]*\n───$/,
 		);
 		const notice = await c.event((p) => (p.meta as Record<string, string>).kind === "notice");
 		assert.match(notice.content, /A-1 マージ承認/);
@@ -448,7 +456,7 @@ test("harness-notify は engine が動いていれば webhook ではなく engin
 		assert.equal(r.code, 0, r.stderr);
 		assert.match(r.stderr, /engine 経由/);
 		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
-		assert.match(post?.content ?? "", /^\*\*\[kishimen-tool\]\*\* 🟡 A-1 要件確認｜#15 お題の並び替え/);
+		assert.match(post?.content ?? "", /^🟡 \*\*\[kishimen-tool\]\*\* 要件確認 A-1｜#15\nお題の並び替え/);
 	} finally {
 		await engine.stop();
 	}
@@ -487,7 +495,7 @@ test("調査した設定の案は A-番号で確認され、OK の回答を受�
 		const post = rest.calls.find((x) => x.kind === "send" && x.content?.includes("A-1"));
 		assert.match(
 			post?.content ?? "",
-			/⚙️ A-1 設定の確認｜kishimen-tool の設定\nnpm のプロジェクトです\nworktreeRoot（既定）: `[^\n]+`\n検査（PR 前に CI と同じ順で）:\n- test: `npm test`/,
+			/⚙️ \*\*\[kishimen-tool\]\*\* 設定の確認 A-1\nkishimen-tool の設定\nnpm のプロジェクトです\nworktreeRoot（既定）: `[^\n]+`\n検査（PR 前に CI と同じ順で）:\n- test: `npm test`/,
 		);
 		assert.equal(engine.ledger.tasks()[0]?.status, "waiting-human");
 
@@ -658,7 +666,10 @@ test("既定ブランチの CI の新しい失敗だけを知らせる（初回�
 	await engine.ciTick();
 	const sent = rest.calls.filter((x) => x.kind === "send");
 	assert.equal(sent.length, 1);
-	assert.match(sent[0]?.content ?? "", /^\*\*\[kishimen-tool\]\*\* 🟠 CI失敗｜CI @ main\nfix: 票\n<https:\/\/run\/3>/);
+	assert.match(
+		sent[0]?.content ?? "",
+		/^🟠 \*\*\[kishimen-tool\]\*\* CI失敗\nCI @ main\nfix: 票\n<https:\/\/run\/3>\n───$/,
+	);
 });
 
 test("マージ後のフェーズ done で、engine がマージ完了を知らせる", async () => {
@@ -693,7 +704,7 @@ test("マージ後のフェーズ done で、engine がマージ完了を知ら�
 		const sent = rest.calls.find((x) => x.kind === "send" && x.content?.includes("マージ完了"));
 		assert.equal(
 			sent?.content,
-			"**[kishimen-tool]** 🔵 マージ完了｜#12 票を破棄（PR #34）\n<https://github.com/jonnity/kishimen-tool/pull/34>",
+			"🔵 **[kishimen-tool]** マージ完了｜#12\n票を破棄（PR #34）\n<https://github.com/jonnity/kishimen-tool/pull/34>\n───",
 		);
 	} finally {
 		await engine.stop();
@@ -1155,7 +1166,7 @@ test("引数検査: MCP 実経路の拒否は保存・配信・投稿・台帳�
 	for (const name of ["live", "stopped"])
 		engine.ledger.upsertProject({ name, repo: "example/project", path: home, active: true, mode: "harness" });
 	const task = engine.ledger.createTask({ project: "live", title: "既存タスク", issue: "10" });
-	const attention = engine.ledger.addAttention({
+	const { attention } = engine.ledger.addAttention({
 		taskId: task.id,
 		project: "live",
 		issue: "10",
@@ -1353,7 +1364,7 @@ test("引数検査: CLI ソケットと実 dle notify はエラーを返し、�
 		]);
 		assert.equal(normal.code, 0, normal.stderr);
 		assert.match(normal.stderr, /記録しました/);
-		assert.ok(rest.calls.some((c) => c.content === "**[live]** ℹ️ 正常通知\n本文"));
+		assert.ok(rest.calls.some((c) => c.content === "ℹ️ **[live]** お知らせ\n正常通知\n本文\n───"));
 	} finally {
 		cli.socket.destroy();
 		c.stop();
@@ -1732,4 +1743,160 @@ test("M1/M2: engineは最後の添付receiptと先頭IDを区別し、guild欠�
 			rmSync(home, { recursive: true, force: true });
 		}
 	}
+});
+
+// --- Issue #19: 投稿の見出し・区切りと、依頼への ✅ / ☑️ ----------------------------------------
+const CLI = { role: "cli", name: "" } as const;
+const CONCIERGE = { role: "concierge", name: "concierge" } as const;
+const GATES = [
+	["interview", "🟡", "要件確認"],
+	["merge-request", "🟢", "マージ承認"],
+	["blocked", "🔴", "要対応"],
+	["setup", "⚙️", "設定の確認"],
+] as const;
+
+const openGate = async (engine: Engine, event: string, issue: string, extra: Record<string, string> = {}) =>
+	(await engine.call(CLI, "notify", { event, project: "proj", issue, title: `題${issue}`, ...extra })) as {
+		attention: string;
+		message_id: string;
+	};
+const sends = (rest: ReturnType<typeof fakeRest>) => rest.calls.filter((c) => c.kind === "send");
+const reacts = (rest: ReturnType<typeof fakeRest>) =>
+	rest.calls.filter((c) => c.kind === "react").map((c) => [c.messageId, c.emoji, c.channelId]);
+
+for (const [event, icon, label] of GATES) {
+	for (const answer of ["OK", "NG: 直して"]) {
+		test(`${label}の依頼は見出しと区切りで投稿され、回答（${answer}）の記録後に元メッセージへ ✅ が付く`, async () => {
+			const { engine, rest } = setupEngine();
+			const g = await openGate(engine, event, "1");
+			const other = await openGate(engine, event, "2");
+			const post = sends(rest).find((c) => c.content?.includes(g.attention));
+			assert.ok(post?.content?.startsWith(`${icon} **[proj]** ${label} ${g.attention}｜#1\n題1\n`), post?.content);
+			assert.ok(post?.content?.endsWith("\n───"));
+			assert.deepEqual(reacts(rest), [], "未回答には何も付けない");
+
+			const result = await engine.call(CONCIERGE, "attention_answer", { id: g.attention, answer });
+			assert.deepEqual(result, { attention: g.attention, delivery: "queued" });
+			assert.equal(engine.ledger.attention().find((a) => a.id === g.attention)?.answer, answer);
+			assert.deepEqual(reacts(rest), [[g.message_id, "✅", CH]]);
+			assert.ok(!rest.calls.some((c) => c.kind === "edit" && c.messageId === g.message_id), "本文は書き換えない");
+			assert.equal(engine.ledger.openAttention().map((a) => a.id)[0], other.attention);
+		});
+	}
+}
+
+test("回答なしで閉じた依頼（置き換え・作業再開・完了）には ☑️ が付き、回答済みと新しい依頼には付かない", async () => {
+	const { engine, rest } = setupEngine();
+	// 置き換え
+	const a1 = await openGate(engine, "interview", "1");
+	const a2 = await openGate(engine, "interview", "1");
+	assert.deepEqual(reacts(rest), [[a1.message_id, "☑️", CH]]);
+	// 作業再開（回答済みの別の依頼は対象外）
+	const m1 = await openGate(engine, "merge-request", "1");
+	await engine.call(CONCIERGE, "attention_answer", { id: m1.attention, answer: "OK" });
+	await engine.call(CLI, "notify", { event: "phase", project: "proj", issue: "1", phase: "designing" });
+	assert.deepEqual(reacts(rest).slice(1), [
+		[m1.message_id, "✅", CH],
+		[a2.message_id, "☑️", CH],
+	]);
+	// 完了: task_update / report / phase のどの入口でも付く
+	for (const via of ["task_update", "report", "phase"]) {
+		const issue = `1${via.length}`;
+		const g = await openGate(engine, "blocked", issue);
+		const task = engine.ledger.findTaskByIssue("proj", issue);
+		assert.ok(task);
+		const before = reacts(rest).length;
+		if (via === "task_update") await engine.call(CONCIERGE, "task_update", { id: task.id, status: "done" });
+		if (via === "report")
+			await engine.call({ role: "worker", name: "proj" }, "report", { task_id: task.id, status: "done" });
+		if (via === "phase") await engine.call(CLI, "notify", { event: "phase", project: "proj", issue, phase: "done" });
+		assert.deepEqual(reacts(rest).slice(before), [[g.message_id, "☑️", CH]], via);
+	}
+	assert.ok(!rest.calls.some((c) => c.kind === "edit" && c.content?.includes("A-")));
+});
+
+test("印の付与に失敗しても回答・完了は成立し、短いログだけ残して後続の付与を続ける", async () => {
+	const logs: string[] = [];
+	const { engine, rest } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	const a = await openGate(engine, "interview", "1");
+	const b = await openGate(engine, "merge-request", "1");
+	rest.hooks.react = async (messageId) => {
+		if (messageId === a.message_id) throw new Error(`403 Missing Permissions ${"x".repeat(500)}`);
+	};
+	const task = engine.ledger.findTaskByIssue("proj", "1");
+	assert.ok(task);
+	const t = (await engine.call(CONCIERGE, "task_update", { id: task.id, status: "done" })) as { status: string };
+	assert.equal(t.status, "done");
+	assert.deepEqual(reacts(rest), [[b.message_id, "☑️", CH]], "1件の失敗で後続を止めない");
+	assert.equal(engine.ledger.openAttention().length, 0);
+	const log = logs.find((l) => l.includes(a.attention));
+	assert.ok(log && log.length < 300, log);
+	assert.ok(!logs.some((l) => l.includes("fake") || l.includes("回答")));
+	await assert.rejects(engine.call(CONCIERGE, "attention_answer", { id: a.attention, answer: "x" }), /既に対応済み/);
+
+	// messageId が無い依頼は送信を試さずログだけ
+	const old = engine.ledger.addAttention({
+		taskId: "",
+		project: "proj",
+		issue: "",
+		pr: "",
+		kind: "setup",
+		title: "古い",
+		url: "",
+		summary: "",
+	}).attention;
+	await engine.call(CONCIERGE, "attention_answer", { id: old.id, answer: "OK" });
+	assert.ok(logs.some((l) => l.includes(old.id) && l.includes("元メッセージ ID がない")));
+	assert.equal(reacts(rest).length, 1);
+});
+
+test("依頼の投稿中に回答されても、messageId の保存後に ✅ が付く", async () => {
+	const { engine, rest } = setupEngine();
+	let release: () => void = () => {};
+	const gate = new Promise<void>((r) => {
+		release = r;
+	});
+	rest.hooks.send = () => gate;
+	const opened = openGate(engine, "interview", "7");
+	while (!engine.ledger.attention().some((a) => a.status === "open")) await new Promise((r) => setTimeout(r, 5));
+	const id = engine.ledger.attention()[0]?.id ?? "";
+	await engine.call(CONCIERGE, "attention_answer", { id, answer: "OK" });
+	assert.deepEqual(reacts(rest), [], "投稿が終わるまで付けられない");
+	release();
+	const g = await opened;
+	assert.deepEqual(reacts(rest), [[g.message_id, "✅", CH]]);
+	assert.equal(engine.ledger.attention()[0]?.messageId, g.message_id);
+});
+
+test("長文は見出し付きで分割され、返信先は先頭・添付は最後だけに付き、並行する投稿は混ざらない", async () => {
+	const { engine, rest, home } = setupEngine();
+	const file = path.join(home, "att.txt");
+	writeFileSync(file, "添付の中身");
+	rest.hooks.send = () => new Promise((r) => setTimeout(r, 5));
+	const long = `${"あ".repeat(1500)}\n${"い".repeat(1500)}`;
+	const [r1] = await Promise.all([
+		engine.call(CONCIERGE, "reply", { text: long, reply_to: "m9", files: [file], project: "窓口" }),
+		engine.call(CONCIERGE, "reply", { text: "短い別の投稿" }),
+		engine.call(CLI, "notify", { event: "info", project: "p2", title: "題", body: "本文" }),
+	]);
+	const s = sends(rest);
+	assert.equal(s.length, 4);
+	assert.equal(s[0]?.content?.split("\n")[0], "💬 **[窓口]** 返信");
+	assert.equal(s[1]?.content?.split("\n")[0], "💬 **[窓口]** 返信（続き）");
+	assert.ok(s[1]?.content?.endsWith("\n───") && !s[0]?.content?.endsWith("───"));
+	assert.deepEqual([s[0]?.replyTo, s[1]?.replyTo], ["m9", undefined]);
+	assert.deepEqual([s[0]?.files, s[1]?.files], [[], [file]]);
+	assert.deepEqual(s[1]?.fileContents, ["添付の中身"]);
+	assert.equal((r1 as { message_id: string }).message_id, "1", "返り値は先頭のメッセージ ID");
+	assert.equal(s[2]?.content?.split("\n")[0], "💬 **[窓口]** 返信");
+	assert.equal(s[3]?.content?.split("\n")[0], "ℹ️ **[p2]** お知らせ");
+
+	// 先行する投稿が失敗しても次を送れる
+	rest.hooks.send = async () => {
+		throw new Error("送信失敗");
+	};
+	await assert.rejects(engine.call(CONCIERGE, "reply", { text: "失敗" }), /送信失敗/);
+	rest.hooks.send = null;
+	await engine.call(CONCIERGE, "reply", { text: "次" });
+	assert.ok(sends(rest).at(-1)?.content?.includes("次"));
 });

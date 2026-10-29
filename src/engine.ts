@@ -20,7 +20,15 @@ import net, { type Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
-import { type AttentionKind, KIND_LABEL, Ledger, TASK_STATUSES, type Task, type TaskStatus } from "./ledger.ts";
+import {
+	type Attention,
+	type AttentionKind,
+	KIND_LABEL,
+	Ledger,
+	TASK_STATUSES,
+	type Task,
+	type TaskStatus,
+} from "./ledger.ts";
 import { normalizeReceipt, object } from "./notification-receipt.ts";
 import {
 	run as defaultRun,
@@ -32,7 +40,7 @@ import {
 } from "./projects.ts";
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
 import type { DiscordApi } from "./rest.ts";
-import { chunkText, type DiscordMessage, route, withProject } from "./route.ts";
+import { type DiscordMessage, formatPostChunks, type PostHeading, route } from "./route.ts";
 import type { RefreshResult, Supervisor } from "./supervisor.ts";
 import { validateToolArguments } from "./tool-validation.ts";
 import { resolveWorktreeRoot } from "./worktrees.ts";
@@ -42,6 +50,15 @@ export interface GatewayLike {
 	stop(): void;
 	connected: boolean;
 	user: { id: string; username?: string } | null;
+}
+
+type AttentionMark = "✅" | "☑️";
+
+interface PostOpts {
+	channelId?: string;
+	replyTo?: string;
+	files?: string[];
+	heading?: PostHeading;
 }
 
 interface Session {
@@ -123,6 +140,9 @@ export class Engine {
 	private exec: Run;
 	readonly sessions = new Map<string, Session>();
 	private pendingPermissions = new Map<string, string>(); // request_id → session name
+	private postQueue: Promise<unknown> = Promise.resolve(); // 論理投稿を直列にする
+	private postingAttentions = new Set<string>(); // 依頼を投稿中（messageId の保存前）の A-番号
+	private pendingAttentionMarks = new Map<string, AttentionMark>(); // 投稿中に閉じた依頼の印
 	private botUserId: string | null = null;
 	private server: net.Server | null = null;
 	private boardTimer: ReturnType<typeof setTimeout> | null = null;
@@ -386,9 +406,10 @@ export class Engine {
 			this.pendingPermissions.delete(r.request_id);
 			const s = this.sessions.get(r.target);
 			if (!send(s?.socket, { type: "permission", request_id: r.request_id, behavior: r.behavior })) {
-				await this.rest.sendMessage(d.channel_id, {
-					content: withProject(r.target, "セッションが切断されていて届けられませんでした。"),
+				await this.post(r.target, "セッションが切断されていて届けられませんでした。", {
+					channelId: d.channel_id,
 					replyTo: d.id,
+					heading: { icon: "⚠️", label: "お知らせ" },
 				});
 				return;
 			}
@@ -409,9 +430,10 @@ export class Engine {
 		// /clear の最中に届いたものは、この後そのまま渡すので直近のやり取りには入れない（二重になるため）
 		if (how !== "held") this.remember(`ユーザー: ${d.content}`);
 		if (how === "queued") {
-			await this.rest.sendMessage(d.channel_id, {
-				content: "窓口が起動していないため、起動したら渡します。",
+			await this.post("窓口", "窓口が起動していないため、起動したら渡します。", {
+				channelId: d.channel_id,
 				replyTo: d.id,
+				heading: { icon: "ℹ️", label: "受付" },
 			});
 			return;
 		}
@@ -423,7 +445,7 @@ export class Engine {
 		this.pendingPermissions.set(msg.request_id, s.name);
 		const preview = (msg.input_preview ?? "").slice(0, 800);
 		const text = [
-			withProject(s.name, `🔐 許可の確認 \`${msg.request_id}\``),
+			`ID: \`${msg.request_id}\``,
 			`ツール: \`${msg.tool_name}\``,
 			msg.description ? `内容: ${msg.description}` : null,
 			preview ? `\`\`\`\n${preview}\n\`\`\`` : null,
@@ -431,20 +453,23 @@ export class Engine {
 		]
 			.filter(Boolean)
 			.join("\n");
-		await this.rest.sendMessage(this.config.defaultChannelId, { content: text });
+		await this.post(s.name, text, { heading: { icon: "🔐", label: "許可の確認" } });
 	}
 
-	/** プロジェクト名を付けて送る。長文は分割し、返信先は先頭、添付は最後の1通に付ける。 */
-	async post(name: string, text: string, opts: { channelId?: string; replyTo?: string; files?: string[] } = {}) {
+	/** プロジェクト名と種類の見出し・末尾の区切り線を付けて送る。長文は分割し、返信先は先頭、添付は最後の1通に付ける。 */
+	async post(name: string, text: string, opts: PostOpts = {}) {
 		return (await this.postMessages(name, text, opts)).firstId;
 	}
 
-	private async postMessages(
-		name: string,
-		text: string,
-		opts: { channelId?: string; replyTo?: string; files?: string[] } = {},
-	) {
-		const chunks = chunkText(withProject(name, text), 2000);
+	private postMessages(name: string, text: string, opts: PostOpts = {}) {
+		// 別の投稿が長文の途中に割り込まないよう、論理投稿の単位で直列にする。前の失敗は次に持ち越さない
+		const run = this.postQueue.then(() => this.sendChunks(name, text, opts));
+		this.postQueue = run.catch(() => {});
+		return run;
+	}
+
+	private async sendChunks(name: string, text: string, opts: PostOpts) {
+		const chunks = formatPostChunks(name, text, opts.heading ?? { icon: "🔔", label: "お知らせ" });
 		let lastMessage: unknown;
 		let firstId: string | null = null;
 		for (const [i, content] of chunks.entries()) {
@@ -457,6 +482,29 @@ export class Engine {
 			lastMessage = res;
 		}
 		return { firstId, lastMessage };
+	}
+
+	/**
+	 * 依頼の元メッセージにリアクションを付ける。失敗しても台帳や worker の処理は止めない（ログだけ）。
+	 * 依頼の投稿中（messageId の保存前）に閉じたものは、保存直後に付けるため覚えておく。
+	 */
+	private async markAttention(a: Attention, emoji: AttentionMark) {
+		if (!a.messageId) {
+			if (this.postingAttentions.has(a.id)) {
+				if (!this.pendingAttentionMarks.has(a.id)) this.pendingAttentionMarks.set(a.id, emoji);
+			} else this.log(`engine: ${a.id} は元メッセージ ID がないため ${emoji} を付けません`);
+			return;
+		}
+		try {
+			await this.rest.react(this.config.defaultChannelId, a.messageId, emoji);
+		} catch (e) {
+			const reason = e instanceof Error ? e.message : String(e);
+			this.log(`engine: ${a.id} への ${emoji} 失敗 messageId=${a.messageId} ${reason.slice(0, 120)}`);
+		}
+	}
+
+	private async markAll(list: Attention[], emoji: AttentionMark) {
+		for (const a of list) await this.markAttention(a, emoji);
 	}
 
 	notifyOps(name: string, text: string) {
@@ -515,6 +563,7 @@ export class Engine {
 				conciergeOnly();
 				if (isConcierge) this.remember(`窓口: ${str(a.text)}`);
 				const id = await this.post(str(a.project) || "窓口", str(a.text), {
+					heading: { icon: "💬", label: "返信" },
 					channelId: str(a.chat_id) || undefined,
 					replyTo: str(a.reply_to) || undefined,
 					files: Array.isArray(a.files) ? (a.files as string[]) : [],
@@ -545,7 +594,7 @@ export class Engine {
 					patch.status = a.status as TaskStatus;
 				}
 				const t = this.ledger.updateTask(str(a.id), patch, str(a.note) || undefined);
-				if (patch.status === "done") this.onTaskDone(t);
+				if (patch.status === "done") await this.onTaskDone(t);
 				this.scheduleBoard();
 				return t;
 			}
@@ -722,7 +771,7 @@ export class Engine {
 			if (!stat.isFile() || stat.size === 0) throw new Error("承認添付は通常の非空ファイルが必要です");
 			accessSync(o.file, constants.R_OK);
 		}
-		const att = this.ledger.addAttention({
+		const added = this.ledger.addAttention({
 			taskId: task?.id ?? "",
 			project,
 			issue,
@@ -732,19 +781,38 @@ export class Engine {
 			url,
 			summary: body,
 		});
+		const att = added.attention;
+		// この後の投稿中に回答・解消されても印を取りこぼさないよう、投稿中の目印を同期的に付ける
+		this.postingAttentions.add(att.id);
+		try {
+			await this.markAll(added.resolved, "☑️");
+			return await this.postGate(project, gate, att, task, o);
+		} finally {
+			this.postingAttentions.delete(att.id);
+			this.pendingAttentionMarks.delete(att.id);
+		}
+	}
+
+	private async postGate(
+		project: string,
+		gate: (typeof GATE_EVENTS)[string],
+		att: Attention,
+		task: Task | null,
+		o: { issue: string; pr: string; title: string; url: string; body: string; file?: string },
+	) {
+		const { issue, pr, title, url, body } = o;
 		const label = KIND_LABEL[gate.kind];
-		const text = [
-			`${gate.icon} ${att.id} ${label}｜${issue ? `#${issue} ` : ""}${title}`,
-			body || null,
-			gate.how(att.id),
-			url ? `<${url}>` : null,
-		]
-			.filter(Boolean)
-			.join("\n");
+		const text = [title, body || null, gate.how(att.id), url ? `<${url}>` : null].filter(Boolean).join("\n");
 		const { firstId: messageId, lastMessage } = await this.postMessages(project, text, {
+			heading: { icon: gate.icon, label, attention: att.id, ...(issue ? { issue } : {}) },
 			files: o.file && (gate.kind === "merge" || existsSync(o.file)) ? [o.file] : [],
 		});
-		if (messageId) this.ledger.setAttentionMessage(att.id, messageId);
+		if (messageId) {
+			this.ledger.setAttentionMessage(att.id, messageId);
+			const pending = this.pendingAttentionMarks.get(att.id);
+			this.pendingAttentionMarks.delete(att.id);
+			if (pending) await this.markAttention({ ...att, messageId }, pending);
+		}
 		if (task) {
 			this.ledger.updateTask(
 				task.id,
@@ -888,16 +956,16 @@ export class Engine {
 					{ status, phase: phase === "done" ? "" : phase, ...(pr ? { pr } : {}) },
 					`フェーズ → ${phase}`,
 				);
-				if (status === "done") this.onTaskDone(t);
-				else if (status === "ai-working") this.ledger.resolveAttentionForTask(task.id, "（作業再開）");
+				if (status === "done") await this.onTaskDone(t);
+				else if (status === "ai-working")
+					await this.markAll(this.ledger.resolveAttentionForTask(task.id, "（作業再開）"), "☑️");
 			}
 			// マージ完了は CI の webhook ではなく engine が知らせる（リポジトリ側に通知の仕組みを置かないため）
 			if (phase === "done" && pr) {
 				const p = this.ledger.projects().find((x) => x.name === project);
-				await this.post(
-					project,
-					`🔵 マージ完了｜${issue ? `#${issue} ` : ""}${title}（PR #${pr}）${p ? `\n<https://github.com/${p.repo}/pull/${pr}>` : ""}`,
-				);
+				await this.post(project, `${title}（PR #${pr}）${p ? `\n<https://github.com/${p.repo}/pull/${pr}>` : ""}`, {
+					heading: { icon: "🔵", label: "マージ完了", ...(issue ? { issue } : {}) },
+				});
 			}
 			this.scheduleBoard();
 			return { task: task?.id ?? null };
@@ -905,13 +973,16 @@ export class Engine {
 
 		// それ以外（着手・お知らせ）は台帳にだけ残す。投稿はボードの更新で足りる
 		this.ledger.journal(`[${project}] ${event}: ${title}${issue ? ` (#${issue})` : ""}`);
-		if (event === "info" && body) await this.post(project, `ℹ️ ${title}\n${body}${url ? `\n<${url}>` : ""}`);
+		if (event === "info" && body)
+			await this.post(project, `${title}\n${body}${url ? `\n<${url}>` : ""}`, {
+				heading: { icon: "ℹ️", label: "お知らせ" },
+			});
 		this.scheduleBoard();
 		return { task: task?.id ?? null };
 	}
 
 	/** worker からの進み具合の報告（harness-phase を通らない作業の記録） */
-	private report(who: Pick<Session, "role" | "name">, a: Record<string, unknown>) {
+	private async report(who: Pick<Session, "role" | "name">, a: Record<string, unknown>) {
 		const project = who.role === "worker" ? who.name : str(a.project);
 		const taskId =
 			str(a.task_id) ||
@@ -925,12 +996,12 @@ export class Engine {
 		if (typeof a.pr === "string") patch.pr = a.pr;
 		if (typeof a.next === "string") patch.next = a.next;
 		const t = this.ledger.updateTask(taskId, patch, str(a.note) || undefined);
-		if (patch.status === "done") this.onTaskDone(t);
+		if (patch.status === "done") await this.onTaskDone(t);
 		this.scheduleBoard();
 		return t;
 	}
 
-	private answerAttention(id: string, answer: string) {
+	private async answerAttention(id: string, answer: string) {
 		const a = this.ledger.resolveAttention(id, answer);
 		const label = KIND_LABEL[a.kind];
 		let delivery: string = "none";
@@ -944,14 +1015,17 @@ export class Engine {
 		if (a.taskId)
 			this.ledger.updateTask(a.taskId, { status: "ai-working", waiting: "" }, `${a.id} 回答: ${answer.slice(0, 80)}`);
 		this.scheduleBoard();
+		// 保存・配信を終えてから印を付ける（印の失敗で回答は取り消さない）
+		await this.markAttention(a, "✅");
 		return { attention: a.id, delivery };
 	}
 
-	private onTaskDone(t: Task) {
-		this.ledger.resolveAttentionForTask(t.id, "（完了）");
+	private async onTaskDone(t: Task) {
+		const closed = this.ledger.resolveAttentionForTask(t.id, "（完了）");
 		const st = this.ledger.state();
 		this.ledger.saveState({ doneSinceRetro: st.doneSinceRetro + 1 });
 		this.maybeRequestRetro();
+		await this.markAll(closed, "☑️");
 	}
 
 	/** 完了件数か日数が閾値を超えたら、窓口に振り返りを頼む（1回だけ） */
@@ -1039,7 +1113,9 @@ export class Engine {
 				known.push(run.databaseId);
 				changed = true;
 				if (["failure", "timed_out", "startup_failure"].includes(run.conclusion)) {
-					await this.post(p.name, `🟠 CI失敗｜${run.workflowName} @ ${branch}\n${run.displayTitle}\n<${run.url}>`);
+					await this.post(p.name, `${run.workflowName} @ ${branch}\n${run.displayTitle}\n<${run.url}>`, {
+						heading: { icon: "🟠", label: "CI失敗" },
+					});
 					this.ledger.journal(`[${p.name}] CI 失敗: ${run.workflowName} @ ${branch}`);
 				}
 			}
