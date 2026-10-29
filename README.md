@@ -415,6 +415,7 @@ engine のログに残すだけで、あとから付け直しません。依頼�
 | `concierge.refresh` | 有効 / 100k / 40 件 / 残り15% | `enabled`・`maxTokens`・`maxEvents`・`contextPercent`。文脈量または件数が閾値に達したら engine が待機中に `/clear` し、`concierge refresh` で挨拶を出さず再開。`enabled: false` で無効。旧形式の `maxEvents: 0` だけでも全無効を維持。件数だけ無効にするには `enabled: true, maxEvents: 0` |
 | `worker.refresh` | 有効 / 100k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
+| `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
@@ -432,6 +433,13 @@ engine のログに残すだけで、あとから付け直しません。依頼�
 engine 起動直後も同じ秒数待ち、整理の成功・失敗後は30分（worker は設定可）冷却する。
 内部ファイルの形式変更などで待機を確認できない場合は見送る。
 `/clear` は sessionId の変化を最大15秒確認してから再開し、確認できない場合は再開プロンプトを送らない。
+
+idle の worker を engine が起こす。worker は idle だと次の心拍か人の入力まで Discord の回答や dispatch を読まないので、
+engine が A-番号の回答・dispatch・`harness:queued` の追加（60 秒ごとに `gh issue list`）・保留分の払い出し・再接続を検知したら、
+worker が idle（status idle・画面が静止して入力欄が空・直前の会話ログ更新から10秒以上）と確認できたときだけ、
+入力欄に `/discord-loop-engine:issue-loop` を送る。作業中・確認画面・入力途中・判定できないときは送らず、次の30秒 tick で再試行する。
+送る文字列はこの定数だけで、回答文や Issue の中身は入力しない。マージは従来どおり承認記録がなければ行われない。
+`worker.wake.enabled: false` で無効にできる。
 
 アップデート後は worker の自動整理が既定で有効になる。整理の理由・文脈量、失敗、文脈量不明による
 見送りは journal に残る。A-番号とタスクは台帳に保持し、整理中のメッセージは outbox に保留する。

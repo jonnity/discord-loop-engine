@@ -10,7 +10,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -1929,4 +1929,124 @@ test("T18-6: IssueなしPRのdone/closed/owner NGはそのmerge Aだけを整理
 			rmSync(home, { recursive: true, force: true });
 		}
 	}
+});
+
+// --- idle の worker を起こす（#32） ---------------------------------------------------------
+function wakeStub(engine: Engine) {
+	const log: string[] = [];
+	engine.supervisor = {
+		requestWake: (n: string, r: string) => log.push(`request ${n} ${r}`),
+		wakeTick: async () => {
+			log.push("wakeTick");
+		},
+		tick: async () => {
+			log.push("tick");
+		},
+		onRegistered: async () => {},
+	} as unknown as Supervisor;
+	return log;
+}
+
+test("dispatch と A-番号の回答は worker を起こし（tick ではなく wakeTick）、窓口宛には呼ばない", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	engine.ledger.upsertProject({ name: "k", repo: "x/k", path: home, active: true, mode: "harness" });
+	const log = wakeStub(engine);
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	try {
+		await until(() => engine.sessions.has("concierge"));
+		await c.tool("dispatch", { project: "k", text: "指示" });
+		assert.deepEqual(log, ["request k dispatch", "wakeTick"]);
+		log.length = 0;
+		const a = engine.ledger.addAttention({
+			project: "k",
+			kind: "merge",
+			title: "t",
+			url: "u",
+			issue: "1",
+			pr: "2",
+			taskId: "",
+			summary: "s",
+		});
+		await c.tool("attention_answer", { id: a.id, answer: "OK" });
+		assert.deepEqual(log, [`request k 回答 ${a.id}`, "wakeTick"]);
+		log.length = 0;
+		engine.deliver("concierge", "x", {});
+		assert.deepEqual(log, [], "窓口には呼ばない");
+	} finally {
+		c.stop();
+		await engine.stop();
+	}
+});
+
+test("outbox を 1 件以上払い出したときだけ worker を起こす", async () => {
+	const { engine, home } = setupEngine();
+	await engine.start();
+	engine.ledger.upsertProject({ name: "k", repo: "x/k", path: home, active: true, mode: "harness" });
+	const log = wakeStub(engine);
+	let w: ReturnType<typeof startChannel> | null = null;
+	try {
+		w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "k" });
+		await until(() => engine.sessions.has("k"));
+		assert.ok(!log.some((l) => l.includes("outbox")), "空の outbox では起こさない");
+		w.stop();
+		await until(() => !engine.sessions.has("k"));
+		engine.deliver("k", "溜める", { from: "concierge" });
+		log.length = 0;
+		w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "k" });
+		await until(() => log.includes("request k outbox"));
+		assert.ok(log.includes("wakeTick"));
+	} finally {
+		w?.stop();
+		await engine.stop();
+	}
+});
+
+test("queueTick: 初回は覚えるだけ・新しい番号で 1 回だけ起こし・失敗では更新しない・外れて再付与なら再度起こす", async () => {
+	let out: { ok: boolean; stdout: string } = { ok: true, stdout: "[]" };
+	const seenArgs: string[][] = [];
+	const exec: Run = async (cmd, args) => {
+		if (cmd === "gh") seenArgs.push(args);
+		return { ...out, stderr: "" };
+	};
+	const { engine, home } = setupEngine(5, exec);
+	mkdirSync(path.join(home, "r", ".claude"), { recursive: true });
+	writeFileSync(path.join(home, "r", ".claude", "harness.json"), "{}");
+	const ready = { repo: "x/r", path: path.join(home, "r"), active: true, mode: "harness" as const };
+	engine.ledger.upsertProject({ name: "ready", ...ready });
+	engine.ledger.upsertProject({ name: "notready", repo: "x/n", path: "/nonexistent", active: true, mode: "harness" });
+	engine.ledger.upsertProject({ name: "native", repo: "x/m", path: home, active: true, mode: "native" });
+	const log = wakeStub(engine);
+	const set = (nums: number[]) => {
+		out = { ok: true, stdout: JSON.stringify(nums.map((number) => ({ number }))) };
+	};
+	set([1]);
+	await engine.queueTick();
+	assert.deepEqual(log, [], "初回は起こさない");
+	assert.deepEqual(engine.ledger.state().queuedSeen, { ready: ["1"] });
+	assert.ok(
+		seenArgs.every((a) => a.includes("x/r")),
+		"ready な harness だけ見る",
+	);
+	await engine.queueTick();
+	assert.deepEqual(log, [], "同じ集合では起こさない");
+	set([1, 2]);
+	await engine.queueTick();
+	assert.deepEqual(log, ["request ready queued #2", "wakeTick"]);
+	for (const bad of [
+		{ ok: false, stdout: "" },
+		{ ok: true, stdout: "not json" },
+	]) {
+		log.length = 0;
+		out = bad;
+		await engine.queueTick();
+		assert.deepEqual(log, []);
+		assert.deepEqual(engine.ledger.state().queuedSeen, { ready: ["1", "2"] }, "観測できなければ更新しない");
+	}
+	set([1]);
+	await engine.queueTick();
+	log.length = 0;
+	set([1, 2]);
+	await engine.queueTick();
+	assert.deepEqual(log, ["request ready queued #2", "wakeTick"], "外れた後の再付与は新規扱い");
 });

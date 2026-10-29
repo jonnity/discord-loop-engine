@@ -42,7 +42,13 @@ export interface Config {
 		/** 件数または文脈量が閾値以上で、待機を確認したら /clear する */
 		refresh: { enabled: boolean; maxTokens: number; maxEvents: number; contextPercent: number };
 	};
-	worker: { model: string | null; extraArgs: string[]; initialPrompt: string; refresh: WorkerRefresh };
+	worker: {
+		model: string | null;
+		extraArgs: string[];
+		initialPrompt: string;
+		refresh: WorkerRefresh;
+		wake?: { enabled: boolean };
+	};
 	retro: { everyDoneTasks: number; everyDays: number; promoteAfter: number };
 	board: { enabled: boolean };
 	/** worker が git commit するときの作者。任意（型付きの Config リテラルを壊さない）。null は未設定 */
@@ -119,6 +125,7 @@ export function loadConfig(home = dleHome()): Config {
 	const cr = (c.refresh ?? {}) as Record<string, unknown>;
 	const w = (raw.worker ?? {}) as Record<string, unknown>;
 	const wr = (w.refresh ?? {}) as Record<string, unknown>;
+	const ww = (w.wake ?? {}) as Record<string, unknown>;
 	const r = (raw.retro ?? {}) as Record<string, unknown>;
 	const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
 	const nonnegative = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
@@ -149,6 +156,7 @@ export function loadConfig(home = dleHome()): Config {
 			model: typeof w.model === "string" ? w.model : null,
 			extraArgs: strList(w.extraArgs),
 			initialPrompt: typeof w.initialPrompt === "string" ? w.initialPrompt : "/discord-loop-engine:issue-loop",
+			wake: { enabled: typeof ww.enabled === "boolean" ? ww.enabled : true },
 			refresh: {
 				enabled: typeof wr.enabled === "boolean" ? wr.enabled : true,
 				maxTokens: nonnegative(wr.maxTokens, 100000),

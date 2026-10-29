@@ -130,6 +130,7 @@ async function cmdStart() {
 		activity: (n) => engine?.activity(n) ?? { events: 0, lastAt: 0 },
 		onRefresh: (n, phase, result) => engine?.onRefresh(n, phase, result),
 		onRefreshSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
+		onWakeSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
 		log,
 	});
 	engine = new Engine({ config, rest, ledger, supervisor, log, gatewayFactory: (h) => new Gateway({ token, ...h }) });
@@ -142,6 +143,9 @@ async function cmdStart() {
 	const ci = () => engine?.ciTick().catch((e: Error) => log(`ci: ${e.message}`));
 	setTimeout(ci, 20_000);
 	setInterval(ci, 5 * 60_000);
+	const queue = () => engine?.queueTick().catch((e: Error) => log(`queue: ${e.message}`));
+	setTimeout(queue, 25_000);
+	setInterval(queue, 60_000);
 	setInterval(() => {
 		engine?.writeStatus();
 		engine?.maybeRequestRetro();

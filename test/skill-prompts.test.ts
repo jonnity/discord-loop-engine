@@ -1127,3 +1127,15 @@ test("T18-8: PR監視・回答・枠・明示retry・承認操作の入口を定
 		assert.ok(text.includes("worker が直接 Approve したり、auto-merge を有効にしたりしない"));
 	assert.ok(concierge.includes("meta.issue が空で meta.pr"));
 });
+
+test("issue-loop: 心拍は空キューでも張り、engine 配下では削除せず緩めて保持する。承認記録なしのマージはしない", () => {
+	const loop = readFileSync(path.resolve(import.meta.dirname, "../skills/issue-loop/SKILL.md"), "utf8");
+	assert.match(loop, /早期終了せず必ず実行する/);
+	assert.match(loop, /`DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `\*\/60` に緩めて保持/);
+	assert.match(loop, /engine 無しの単体実行 → 心拍を `CronDelete`/);
+	assert.match(loop, /承認記録が無ければマージしない/);
+	assert.ok(
+		loop.includes('prompt: "/discord-loop-engine:issue-loop", recurring: true'),
+		"心拍のプロンプトは単体呼び出しのまま",
+	);
+});

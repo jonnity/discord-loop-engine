@@ -22,6 +22,23 @@ const WORKING_MARK = "esc to interrupt";
 // 旧版向けの表記も残す。画面だけで待機を決めず、内部ファイルの idle と併用する。
 const CONTEXT_LEFT = [/Context left until auto-compact: (\d+)%/i, /(\d+)% context left/i, /(\d+)% until auto-compact/i];
 
+/** idle の worker に送る文字列。定数のみを送り、Discord・Issue・target 由来の文字列は send-keys に入れない（入力注入を避けるため） */
+export const WAKE_PROMPT = "/discord-loop-engine:issue-loop";
+const WAKE_MAX_REASONS = 10;
+
+export interface WakeTarget {
+	enabled: true;
+}
+
+interface WakeState {
+	reasons: string[];
+	since: number | null;
+	lastSentAt: number | null;
+	sending: boolean;
+	enterOnly: boolean;
+	unknownNotified: boolean;
+}
+
 export interface RefreshResult {
 	success: boolean;
 	reason: string;
@@ -48,6 +65,50 @@ function emptyPrompt(pane: string): boolean {
 	const below = lines.slice(index + 1);
 	const divider = below.findIndex((line) => /^\s*[─━-]{3,}\s*$/.test(line));
 	return (divider < 0 ? below : below.slice(0, divider)).every((line) => !line.trim());
+}
+
+/** 入力欄（末尾 15 行の最後の ❯ 行）の文字。❯ 行が無い、または区切り線までの下に続きの入力があれば null */
+function inputText(pane: string): string | null {
+	const lines = pane.split("\n").slice(-15);
+	const index = lines.findLastIndex((line) => /^\s*❯/.test(line));
+	if (index < 0) return null;
+	const below = lines.slice(index + 1);
+	const divider = below.findIndex((line) => /^\s*[─━-]{3,}\s*$/.test(line));
+	if (!(divider < 0 ? below : below.slice(0, divider)).every((line) => !line.trim())) return null;
+	return (/^\s*❯\s?(.*)$/.exec(lines[index] ?? "")?.[1] ?? "").trim();
+}
+
+/**
+ * 起こしてよいかの判定（純関数）。肯定的な証拠が揃ったときだけ真にし、未知の画面は偽に倒す。
+ * why が "unknown" で始まるのは「判定できない」場合（journal に残す）。
+ * typed を渡すと「入力欄が空」の代わりに「入力欄が typed と一致」を求める（Enter だけの再送用）。
+ */
+export function wakeReadiness(input: {
+	panes: [string, string] | null;
+	session: ClaudeSession | null;
+	cwd: string;
+	transcript: TranscriptContext | null;
+	now: number;
+	quietMs: number;
+	typed?: string;
+}): { ready: boolean; why: string } {
+	const no = (why: string) => ({ ready: false, why });
+	if (!input.panes) return no("画面を取得できない");
+	const [a, b] = input.panes;
+	if (a !== b) return no("画面が動いている");
+	if (b.includes(WORKING_MARK)) return no("作業中");
+	if ([...PERMISSION_PROMPTS, DEV_CHANNEL_PROMPT].some((p) => b.includes(p))) return no("確認画面");
+	if (input.typed === undefined ? !emptyPrompt(b) : inputText(b) !== input.typed) return no("入力欄が空でない");
+	if (!input.session) return no("unknown: セッションを読めない");
+	if (input.session.status !== "idle") return no("status が idle でない");
+	if (path.resolve(input.session.cwd) !== path.resolve(input.cwd)) return no("cwd が違う");
+	if (!input.transcript) return no("unknown: 会話ログを読めない");
+	if (
+		input.now - input.transcript.mtimeMs < input.quietMs ||
+		input.now - input.transcript.subagentMtimeMs < input.quietMs
+	)
+		return no("直前まで動いていた");
+	return { ready: true, why: "" };
 }
 
 function screenContext(pane: string): { tokens: number | null; left: number | null } {
@@ -83,6 +144,8 @@ export interface SessionTarget {
 	refresh?: RefreshTarget;
 	/** 既定以外の tmux セッションで起動したいとき（そのリポジトリのスクリプトが特定のセッション名を前提にしている場合） */
 	tmuxSession?: string;
+	/** idle の worker を engine が起こす対象（harness・ready の worker のみ）。送る文字列は WAKE_PROMPT 固定 */
+	wake?: WakeTarget;
 }
 
 export function windowName(name: string) {
@@ -108,6 +171,9 @@ interface SlotState {
 	unknownSession: string | null;
 	codexSince: Map<string, number>;
 	refreshing: boolean;
+	wake: WakeState;
+	/** onRegistered が初期プロンプトを入れる間（5 秒待ち＋送信）だけ真 */
+	promptPending: boolean;
 }
 
 export interface SupervisorOptions {
@@ -128,6 +194,12 @@ export interface SupervisorOptions {
 	log?: (msg: string) => void;
 	now?: () => number;
 	promptDelayMs?: number;
+	/** 起こしを見送った・確かめられなかったときに呼ぶ（journal 用） */
+	onWakeSkipped?: (name: string, reason: string) => void;
+	wakeProbeMs?: number;
+	wakeQuietMs?: number;
+	wakeMinIntervalMs?: number;
+	wakeVerifyMs?: number;
 }
 
 export class Supervisor {
@@ -136,6 +208,7 @@ export class Supervisor {
 	private startedAt: number;
 	private startupErrors = new Map<string, string>();
 	private ticking = false;
+	private waking = false;
 
 	constructor(opts: SupervisorOptions) {
 		// channel の接続直後は入力欄がまだ準備できていないことがあるため、少し待ってから入力する
@@ -147,6 +220,11 @@ export class Supervisor {
 			log: () => {},
 			now: Date.now,
 			promptDelayMs: 5000,
+			onWakeSkipped: () => {},
+			wakeProbeMs: 1500,
+			wakeQuietMs: 10_000,
+			wakeMinIntervalMs: 60_000,
+			wakeVerifyMs: 3000,
 			activity: () => ({ events: 0, lastAt: 0 }),
 			onRefresh: () => {},
 			...opts,
@@ -171,6 +249,8 @@ export class Supervisor {
 				unknownSession: null,
 				codexSince: new Map(),
 				refreshing: false,
+				wake: { reasons: [], since: null, lastSentAt: null, sending: false, enterOnly: false, unknownNotified: false },
+				promptPending: false,
 			};
 			this.state.set(name, s);
 		}
@@ -224,6 +304,7 @@ export class Supervisor {
 				if (exists) {
 					await this.checkStuck(t.name, s);
 					await this.maybeRefresh(t);
+					await this.maybeWake(t, exists);
 				}
 				continue;
 			}
@@ -306,13 +387,151 @@ export class Supervisor {
 	/** channel が繋がったときに呼ぶ。engine が起動したセッションなら最初のプロンプトを入れる。 */
 	async onRegistered(name: string) {
 		const t = this.o.targets().find((x) => x.name === name);
-		const s = this.state.get(name);
-		if (!t || !s?.needsPrompt || !t.initialPrompt) return;
+		if (!t) return;
+		const s = this.st(name);
+		if (!s.needsPrompt || !t.initialPrompt) {
+			// engine 再起動後に生きている worker が戻った場合。/clear 後の再接続は maybeRefresh が自前で入れるので除く。
+			// 即 wakeTick はしない（再接続の直後は入力欄が落ち着いていないことがあるため、次の 30 秒 tick に任せる）
+			if (!s.needsPrompt && !s.refreshing) this.requestWake(name, "reconnect");
+			return;
+		}
 		s.needsPrompt = false;
-		await new Promise((r) => setTimeout(r, this.o.promptDelayMs));
-		await this.o.tmux(["send-keys", "-t", this.target(name), "-l", t.initialPrompt]);
-		await this.o.tmux(["send-keys", "-t", this.target(name), "Enter"]);
-		this.o.log(`supervisor: ${name} に「${t.initialPrompt}」を入力しました`);
+		// 初期プロンプトが issue-loop そのものなので、溜まっている起こしは不要。待っている間に走る wakeTick を止めるため先に立てる
+		s.promptPending = true;
+		s.wake.reasons = [];
+		s.wake.since = null;
+		s.wake.enterOnly = false;
+		try {
+			await new Promise((r) => setTimeout(r, this.o.promptDelayMs));
+			await this.o.tmux(["send-keys", "-t", this.target(name), "-l", t.initialPrompt]);
+			await this.o.tmux(["send-keys", "-t", this.target(name), "Enter"]);
+			this.o.log(`supervisor: ${name} に「${t.initialPrompt}」を入力しました`);
+		} finally {
+			s.promptPending = false;
+		}
+	}
+
+	/** 起こしの要求を積む（wake が付いていない target は無視）。送るのは maybeWake の判定が通ったときだけ。 */
+	requestWake(name: string, reason: string) {
+		if (!this.o.targets().some((x) => x.name === name && x.wake && !x.startupError)) return;
+		const w = this.st(name).wake;
+		if (!w.reasons.includes(reason)) w.reasons.push(reason);
+		if (w.reasons.length > WAKE_MAX_REASONS) w.reasons.splice(0, w.reasons.length - WAKE_MAX_REASONS);
+		w.since ??= this.o.now();
+	}
+
+	/**
+	 * 起こし専用の入口。spawn・checkStuck を通さないのは、初回 tick（15 秒遅延）より前に呼ばれても
+	 * 再接続前の worker を二重起動しないため。通常 tick の最中は何もしない（tick も maybeWake を呼ぶ）。
+	 */
+	async wakeTick() {
+		if (this.ticking || this.waking) return;
+		this.waking = true;
+		try {
+			const targets = this.o.targets().filter((t) => t.wake && !t.startupError);
+			const bySession = new Map<string, string[] | null>();
+			for (const session of new Set(targets.map((t) => this.sessionOf(t))))
+				bySession.set(session, await this.windows(session));
+			for (const t of targets) {
+				const exists = bySession.get(this.sessionOf(t))?.includes(windowName(t.name)) ?? false;
+				await this.maybeWake(t, exists);
+			}
+		} finally {
+			this.waking = false;
+		}
+	}
+
+	private async capture(name: string): Promise<string | null> {
+		const r = await this.o.tmux(["capture-pane", "-p", "-t", this.target(name)]);
+		return r.ok ? r.stdout : null;
+	}
+
+	/** 画面だけで見られる条件（作業中・確認画面・入力欄）。送信直前の再確認でも使う */
+	private screenOk(pane: string | null, typed: string | undefined): boolean {
+		return (
+			pane !== null &&
+			!pane.includes(WORKING_MARK) &&
+			![...PERMISSION_PROMPTS, DEV_CHANNEL_PROMPT].some((p) => pane.includes(p)) &&
+			(typed === undefined ? emptyPrompt(pane) : inputText(pane) === typed)
+		);
+	}
+
+	/** pending があり idle と確認できたときだけ WAKE_PROMPT を入力欄に送る。曖昧なら送らず次の機会へ。 */
+	private async maybeWake(t: SessionTarget, exists: boolean) {
+		if (!t.wake) return;
+		const s = this.st(t.name);
+		const w = s.wake;
+		// 最初の await より前に同期的に check-and-set する（判定中の await で別の maybeWake が割り込んでも二重に送らない）
+		if (w.sending || (w.reasons.length === 0 && !w.enterOnly)) return;
+		w.sending = true;
+		try {
+			const now = this.o.now();
+			// 最小間隔は成功した送信どうしだけに効かせる。失敗は lastSentAt を更新しないので再試行を止めない
+			if (!w.enterOnly && w.lastSentAt !== null && now - w.lastSentAt < this.o.wakeMinIntervalMs) return;
+			const blocked = () => !exists || !this.o.isLive(t.name) || s.refreshing || s.needsPrompt || s.promptPending;
+			if (blocked()) return;
+			const typed = w.enterOnly ? WAKE_PROMPT : undefined;
+			const first = await this.capture(t.name);
+			await this.o.wait(this.o.wakeProbeMs);
+			const second = await this.capture(t.name);
+			// Enter の再送で、入力欄が WAKE_PROMPT 以外なら人の入力とみなして諦める（送らない）
+			if (w.enterOnly && second !== null && inputText(second) !== WAKE_PROMPT) {
+				w.enterOnly = false;
+				return;
+			}
+			const current = await this.session(t.name);
+			const transcript = current ? await this.o.readTranscript(current.session) : null;
+			const verdict = wakeReadiness({
+				panes: first !== null && second !== null ? [first, second] : null,
+				session: current?.session ?? null,
+				cwd: t.cwd,
+				transcript,
+				now: this.o.now(),
+				quietMs: this.o.wakeQuietMs,
+				typed,
+			});
+			if (verdict.why.startsWith("unknown")) {
+				if (!w.unknownNotified) {
+					w.unknownNotified = true;
+					this.o.onWakeSkipped(t.name, "待機を判定できないため起こしを見送り中");
+				}
+			} else w.unknownNotified = false;
+			if (!verdict.ready) return;
+			// 判定と送信の間に人が入力・作業開始、または初期プロンプト・/clear が始まった場合に備えて撮り直す
+			const last = await this.capture(t.name);
+			if (!this.screenOk(last, typed)) return;
+			if (blocked() || (w.reasons.length === 0 && !w.enterOnly)) return;
+			if (!w.enterOnly) {
+				const typedOk = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", WAKE_PROMPT]);
+				if (!typedOk.ok) return;
+			}
+			const enter = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			if (!enter.ok) {
+				// 入力欄にコマンドが残っている。次は -l を送らず Enter だけ再送する
+				w.enterOnly = true;
+				return;
+			}
+			w.reasons = [];
+			w.since = null;
+			w.enterOnly = false;
+			w.lastSentAt = this.o.now();
+			this.o.log(`supervisor: ${t.name} を起こしました`);
+			await this.verifyWake(t);
+		} finally {
+			w.sending = false;
+		}
+	}
+
+	/** 送信後、入力欄に残ったままなら Enter を 1 回だけ足す。それでも残れば人が見るべき状態として journal に残す */
+	private async verifyWake(t: SessionTarget) {
+		const stuck = (pane: string | null) =>
+			pane !== null && !pane.includes(WORKING_MARK) && inputText(pane) === WAKE_PROMPT;
+		await this.o.wait(this.o.wakeVerifyMs);
+		if (!stuck(await this.capture(t.name))) return;
+		await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+		await this.o.wait(this.o.wakeVerifyMs);
+		if (stuck(await this.capture(t.name)))
+			this.o.onWakeSkipped(t.name, "起こしのコマンドが入力欄に残っています（確認してください）");
 	}
 
 	private async session(name: string): Promise<{ pid: string; session: ClaudeSession } | null> {
@@ -388,6 +607,7 @@ export class Supervisor {
 		const idleMs = r.idleSeconds * 1000;
 		if (
 			s.refreshing ||
+			s.wake.sending ||
 			now - this.startedAt < idleMs ||
 			(s.lastRefreshAt !== null && now - s.lastRefreshAt < r.cooldownMinutes * 60000)
 		)
@@ -434,6 +654,8 @@ export class Supervisor {
 		if (!reason) return;
 		// ファイルや tmux を読む間に入力が届いていたら、古い待機判定では clear しない。
 		if (this.o.now() - this.o.activity(t.name).lastAt < idleMs) return;
+		// 上の await の間に wakeTick が送信を始めていたら見送る。ここから refreshing を立てるまでは同期（check-and-set）。
+		if (s.wake.sending) return;
 		s.refreshing = true;
 		let result: RefreshResult = { success: false, reason: "clear の成功を確認できませんでした" };
 		this.o.onRefresh(t.name, "start");
