@@ -14,7 +14,7 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 1. **状態の真実は GitHub**。フェーズは Issue の `harness:*` ラベル、要件の決定・設計書・承認依頼は
    Issue/PR のコメントに残す。ローカルの `.harness/`（gitignore）はキャッシュに過ぎず、消えても
    ラベルと worktree から復元できる。どのマシン・どのセッションから再開しても同じ状態が見える。
-2. **人間ゲートは `harness-phase` だけが入口**。`interview` / `awaiting-merge` / `blocked` へは
+2. **Issue の人間ゲートは `harness-phase` だけが入口**。`interview` / `awaiting-merge` / `blocked` へは
    `harness-phase` で遷移させる（GitHub にコメント → Discord 通知 → 成功時のみラベル付与）。
    ラベルの直接操作・`gh pr merge`・Discord への直接 curl は `harness-guard` hook が止める。
    **「通知したつもり」を構造的に起こさない**ための設計なので、迂回策を探さない。
@@ -25,6 +25,11 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 4. **主セッションを薄く保つ**。設計書・diff・CI ログ・tmux ログ全文は主セッションに読み込まず、
    サブエージェントに読ませて結論だけ受け取る。
 5. **マージは人間が決める**。どれだけ green でも `harness-merge` は人間の承認記録なしには通らない。
+
+Issue のない Dependabot PR は `harness-pr request --pr N` で A/head を固定し、人の実回答の OK 後に
+`harness-merge --pr N` を使う。Issue 番号を偽造せず、既存の Issue の Phase 手順を維持する。
+Approve と auto-merge の操作は `harness-merge --pr` の中だけで行う。worker が直接 Approve したり、auto-merge を有効にしたりしない。
+PR 本文を A.summary・通知・scan/inbox へ入れない。人は PR リンクから確認する。
 
 ## コマンド
 
@@ -42,6 +47,9 @@ oogiri-doc の `parallel-cycle` をプロジェクト非依存にし、状態の
 | `harness-codex start <window> <worktree> <prompt-file>` | Codex を tmux で起動する（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**） |
 | `harness-merge <n> [--chat-approval "<引用>" --attention <回答先A-id>]` | 承認・CI・mergeable を確認してマージ → done |
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
+| `harness-pr scan` / `harness-pr inbox` | Dependabot PR の検出・台帳の承認回収・後始末の確認（Issue なし） |
+| `harness-pr request --pr N [--retry]` | 古い順・同時1件で新 A/head の依頼。retry は窓口経由の人の再依頼だけ |
+| `harness-merge --pr N` | PR 用 A の実 OK・head・CI・hook を検証し、必要時に Approve、マージと後始末 |
 | `harness-status` | 読み取り専用の状況一覧 |
 
 ## 設定（engine 側の `projects/<名前>/harness.json`、またはリポジトリの `.claude/harness.json`）

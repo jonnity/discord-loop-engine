@@ -1900,3 +1900,33 @@ test("長文は見出し付きで分割され、返信先は先頭・添付は�
 	await engine.call(CONCIERGE, "reply", { text: "次" });
 	assert.ok(sends(rest).at(-1)?.content?.includes("次"));
 });
+
+test("T18-6: IssueなしPRのdone/closed/owner NGはそのmerge Aだけを整理する", async () => {
+	for (const [phase, body, expected] of [
+		["done", "", "（PR merged）"],
+		["blocked", "", "（PR closed）"],
+		["blocked", "（GitHub の NG で停止）", "（GitHub の NG で停止）"],
+	]) {
+		const { engine, rest, home } = setupEngine();
+		try {
+			const base = {
+				project: "quality",
+				event: "merge-request",
+				issue: "",
+				title: "PR #25",
+				url: "https://github.com/example/project/pull/25",
+				body: `承認対象 head: ${"a".repeat(40)}`,
+			};
+			await engine.call({ role: "cli", name: "" }, "notify", { ...base, pr: "25" });
+			await engine.call({ role: "cli", name: "" }, "notify", { ...base, pr: "26" });
+			assert.equal(engine.ledger.tasks().length, 0);
+			await engine.call({ role: "cli", name: "" }, "notify", { ...base, event: "phase", phase, body, pr: "25" });
+			assert.equal(engine.ledger.attention().find((a) => a.pr === "25")?.answer, expected);
+			assert.equal(engine.ledger.openAttention().find((a) => a.pr === "26")?.status, "open");
+			assert.equal(rest.calls.filter((c) => c.content?.includes("マージ完了")).length, phase === "done" ? 1 : 0);
+		} finally {
+			await engine.stop();
+			rmSync(home, { recursive: true, force: true });
+		}
+	}
+});

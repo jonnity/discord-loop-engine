@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# PR 専用の読取りと承認依頼。マージの公開入口は harness-merge だけ。
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+case "${1:-}" in scan|request|inbox) ;; *) exit 2 ;; esac
+exec node "$SCRIPT_DIR/../src/harness-pr.ts" "$@"

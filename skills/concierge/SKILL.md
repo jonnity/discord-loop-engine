@@ -71,6 +71,9 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 
 ### A-番号への返事
 
+meta.issue が空で meta.pr がある PR 用の A は worker が `harness-merge --pr` の経路で扱う。窓口はマージしない。
+
+
 A-番号は engine が worker の「人の判断が要る」報告に付けたもの（要件確認・マージ承認・要対応）。
 
 1. 返事の中身を読み、その A-番号への回答として成り立っているか確かめる（`meta.attention_status` が
@@ -78,7 +81,7 @@ A-番号は engine が worker の「人の判断が要る」報告に付けた�
 2. `attention_answer`（id・answer）で回答を渡す。answer には本文をそのまま入れ、末尾に
    「（Discord: <meta.user>）」を付ける。worker が止まっていても起動後に届く
 3. マージ承認の「OK」は、engine が配送した meta.attention を worker が
-   `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` に渡す。
+   Issue の A なら `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` に渡す。
    meta.attention 欠落は推測せず、旧 A 拒否後に最新 A へ付け替えない。あなたはマージせず A も補完しない
 4. 「A-4 は保留」「あとで」のような返事は、`task_update` で next に残し、回答にはしない
 5. reply で「A-4 を worker に渡しました」と返す

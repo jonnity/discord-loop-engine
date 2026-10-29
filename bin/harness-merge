@@ -14,6 +14,9 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${1:-}" = --pr ]; then
+	exec node "$SCRIPT_DIR/../src/harness-pr.ts" merge "$@"
+fi
 cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
 
 CHAT="" ATTENTION="" seen_chat=0 seen_attention=0
