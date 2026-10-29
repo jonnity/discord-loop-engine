@@ -367,7 +367,7 @@ export class Ledger {
 			? open
 					.map(
 						(a) =>
-							`- **${a.id}** [${a.project}] ${KIND_LABEL[a.kind]}${a.issue ? ` #${a.issue}` : ""} ${a.title} — ${a.url}`,
+							`- **${a.id}** [${a.project}] ${KIND_LABEL[a.kind]}${a.issue ? ` #${a.issue}` : a.pr ? ` PR #${a.pr}` : ""} ${a.title} — ${a.url}`,
 					)
 					.join("\n")
 			: "（なし）";
@@ -382,7 +382,16 @@ export class Ledger {
 		const list = this.attention();
 		// 同じタスクの同じ種類は1つだけ開いておく（承認依頼の出し直しは古い方を置き換える）
 		for (const a of list) {
-			if (a.status === "open" && a.taskId === input.taskId && a.kind === input.kind && input.taskId) {
+			const samePr =
+				!input.issue &&
+				!input.taskId &&
+				input.kind === "merge" &&
+				input.pr &&
+				!a.issue &&
+				!a.taskId &&
+				a.project === input.project &&
+				a.pr === input.pr;
+			if (a.status === "open" && a.kind === input.kind && ((a.taskId === input.taskId && input.taskId) || samePr)) {
 				a.status = "resolved";
 				a.resolvedAt = this.iso();
 				a.answer = "（新しい依頼に置き換え）";
@@ -393,7 +402,9 @@ export class Ledger {
 		const a: Attention = { ...input, id: `A-${seq}`, status: "open", createdAt: this.iso() };
 		list.push(a);
 		this.saveAttention(list);
-		this.journal(`${a.id} [${a.project}] ${KIND_LABEL[a.kind]}${a.issue ? ` #${a.issue}` : ""}: ${a.title}`);
+		this.journal(
+			`${a.id} [${a.project}] ${KIND_LABEL[a.kind]}${a.issue ? ` #${a.issue}` : a.pr ? ` PR #${a.pr}` : ""}: ${a.title}`,
+		);
 		return a;
 	}
 
@@ -431,6 +442,14 @@ export class Ledger {
 			}
 		}
 		if (changed) this.saveAttention(list);
+	}
+
+	resolveAttentionForPr(project: string, pr: string, answer: string) {
+		// Issue・setup 等の空 taskId は巻き込まない。
+		for (const a of this.openAttention()) {
+			if (a.project === project && a.pr === pr && a.kind === "merge" && !a.issue && !a.taskId)
+				this.resolveAttention(a.id, answer);
+		}
 	}
 
 	// --- outbox（worker が起動していない間の指示） -------------------------------------

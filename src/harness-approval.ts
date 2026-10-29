@@ -319,10 +319,11 @@ function structuralAttention(
 	);
 }
 export function evaluateAttention(p: {
-	gate?: CompletedGate;
+	gate?: Pick<CompletedGate, "attention">;
 	project: string;
 	issue: string;
 	pr: string;
+	scope?: "pr";
 	owners: readonly string[];
 	snapshot: unknown;
 	sequence: number;
@@ -341,14 +342,20 @@ export function evaluateAttention(p: {
 			item.project === p.project &&
 			item.issue === p.issue &&
 			item.pr === p.pr &&
-			/^[1-9][0-9]*$/.test(p.issue) &&
+			(p.scope === "pr" ? p.issue === "" && item.taskId === "" : /^[1-9][0-9]*$/.test(p.issue)) &&
 			/^[1-9][0-9]*$/.test(p.pr);
 		if (!sameScope(target)) return { state: "mismatch", reason: "attention-scope-mismatch" };
 		if (!structuralAttention(target)) return unavailable;
-		const newer = snapshot.items.filter((item) => BigInt(item.id.slice(2)) > BigInt(id.slice(2)) && sameScope(item));
+		// PR の新しい候補は issue が不審でも除外せず、構造不正として止める。
+		const newer = snapshot.items.filter(
+			(item) =>
+				BigInt(item.id.slice(2)) > BigInt(id.slice(2)) &&
+				(p.scope === "pr" ? item.project === p.project && item.pr === p.pr && item.kind === "merge" : sameScope(item)),
+		);
 		if (
 			newer.some(
 				(item) =>
+					!sameScope(item) ||
 					!structuralAttention(item) ||
 					!validTime(item.createdAt) ||
 					(item.status === "resolved" &&

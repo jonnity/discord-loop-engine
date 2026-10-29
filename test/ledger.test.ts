@@ -97,3 +97,21 @@ test("ボードにあなた待ち・作業中・次に着手が出る", () => {
 	assert.match(b, /■ AI 作業中\n {2}T-0002 \[o\] #80 お題/);
 	assert.match(b, /■ 次に着手\n {2}T-0001 \[k\] #12 票を破棄/);
 });
+
+test("T18-6: IssueなしPRのmerge Aだけを置換・完了解決し、PRを表示する", () => {
+	const l = fresh();
+	const base = { taskId: "", project: "k", issue: "", pr: "25", title: "x", url: "u", summary: "" };
+	const old = l.addAttention({ ...base, kind: "merge" });
+	const other = l.addAttention({ ...base, pr: "26", kind: "merge" });
+	const setup = l.addAttention({ ...base, kind: "setup" });
+	const issue = l.addAttention({ ...base, issue: "1", taskId: "T-1", kind: "merge" });
+	const next = l.addAttention({ ...base, kind: "merge" });
+	assert.equal(l.attention().find((a) => a.id === old.id)?.status, "resolved");
+	assert.match(readFileSync(path.join(l.dir, "attention.md"), "utf8"), /PR #25/);
+	l.resolveAttentionForPr("k", "25", "（GitHub の NG で停止）");
+	assert.equal(l.attention().find((a) => a.id === next.id)?.status, "resolved");
+	assert.deepEqual(
+		l.openAttention().map((a) => a.id),
+		[other.id, setup.id, issue.id],
+	);
+});

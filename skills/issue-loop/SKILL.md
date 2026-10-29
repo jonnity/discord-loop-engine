@@ -140,6 +140,29 @@ pending＋復旧ファイルなしは request-failed。pending＋復旧ファイ
 理由の正本は Issue。通知のURLは現在の依頼先PRコメントURLを使い、現在のA や marker 全文は表示しない。認証済み login 自身の claimed/posted/failed-or-unknown を照合し、他者の同じキーでは抑制しない。
 通知/記録未確認なら自動再送せず handoff に残して停止する。
 
+### 2a. Dependabot PR（Issue なし）
+
+起動・復帰時と各 tick で、Issue のフェーズ進行・キュー補充の前に `harness-pr inbox` を実行する。
+全 JSONL と終了値を確認し、非0の部分出力は採用しない。`merge-ok` は `harness-merge --pr N`、
+`merge-wait` / `cleanup-pending` も同じ入口で結果確認・後始末を再開する。PR 本文は scan/inbox に含まれない。
+`incomplete` は自動 retry せず復旧確認、`merge-ng` は人へ返す。NG をコード修正タスクへ自動変換しない。
+
+main に `.github/dependabot.yml` が存在するか、読み取り専用の全ページ PR 一覧に
+作成者 `dependabot[bot]` かつ head `dependabot/*` の open PR がある harness プロジェクトだけを監視する。
+`harness-pr scan` を毎 tick 実行し、一覧の読取り失敗は「対象なし」とせず次 tick で再確認する。
+CI green の未依頼/新 head は `harness-pr request --pr N` へ進める。behind/dirty は request に rebase を任せる。
+request 自身が古い順（created_at→PR 番号）とプロジェクトごとに同時1件を排他下で再検査する。
+rebase を頼むのは枠に入る最も古い候補と OK 後のマージ段階だけ。rebase 待ちも枠に数える。
+Dependabot PR は Issue の maxParallel 枠外。pending・未完了・OK 後・キュー待ちも PR の枠を保持する。
+非 OK/owner NG、120分 head 不変の rebase 期限切れ、auto-merge 有効/Approve 後の停止/保護不足は
+info 後に枠を解放する。同じ head の停止中は自動再依頼/マージしない。owner NG/非 OK 後は新 head でも自動再依頼しない。
+
+`--retry` は meta.from=concierge の人の「PR #N の承認依頼を出し直して」と原因解消を確認した場合だけ、
+`harness-pr request --pr N --retry` とする。指定の PR にしか発行せず、枠使用中/より古い候補などで
+非0なら理由を窓口へ返し「枠が空いてから再依頼してください」と伝える。tick では付けない。
+新しい A に旧 OK/NG を付け替えない。PR の GitHub OK/Approve/merge-ok ラベルは人の A の OK の代用にならない。
+Approve と auto-merge の操作は `harness-merge --pr` の中だけで行う。worker が直接 Approve したり、auto-merge を有効にしたりしない。
+
 ### 3. フェーズ進行
 
 `issue-cycle` の Phase 1〜6 を、アクティブな各 Issue について1段階ずつ進める。
@@ -207,7 +230,10 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
   フェーズの変化も `harness-phase` が台帳に報告する
 - `<channel source="dle">` で届くもの:
   - `meta.attention`（A-番号への回答）:
-    - `meta.kind=merge` → 明示の NG・修正指示なら Phase 6 NG（issue-cycle の ### NG）へ進む。
+    - `meta.kind=merge` で meta.issue が空かつ meta.pr が正整数なら PR 経路:
+      `harness-merge --pr N --chat-approval "<本文>" --attention "{meta.attention}"` を使う。
+      A は推測せず、非0なら PR inbox と待ち理由を窓口へ返す。Issue の NG 手順へ流さない。
+    - `meta.kind=merge` で meta.issue が非空 → 明示の NG・修正指示なら Phase 6 NG（issue-cycle の ### NG）へ進む。
       それ以外は対象 WT で `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` を試す即時経路を維持する。
       台帳の保存済み回答・最新完成marker・現 head・scope を再検証し、引数の引用だけでは承認しない。meta.attention 欠落は推測しない。
       非0なら stderr の構造化診断を issue-cycle の CHAT_REJECTION_BEGIN〜CHAT_REJECTION_END の共通手順へ渡す。
@@ -272,6 +298,9 @@ clear 後は「起動時」の状態把握からやり直し、`CronList` で心
 
 ## 終了条件
 
-- キューが空で、アクティブも全部終わった → 心拍を `CronDelete` し、`harness-notify --event info` で
+- Dependabot の監視対象なら、Issue キューが空でも心拍を60分、無変化2時間後120分で保持する。
+  キュー完了通知は「Issue キュー完了・Dependabot PR の監視は継続」と1回だけ補足する。
+  両方の監視条件が無くなれば PR 監視用心拍を削除する。読取り失敗では削除しない。
+- キューが空で、アクティブも全部終わり、Dependabot の監視対象でもない → 心拍を `CronDelete` し、`harness-notify --event info` で
   「キュー完了」を1回だけ通知して終える
 - ユーザーが止めるよう言った → 心拍・one-shot を全部消す
