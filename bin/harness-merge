@@ -9,7 +9,15 @@
 # mergeable であること、profile の hooks.beforeMerge（例: SonarCloud の New issues が 0）が通ることを確認する。
 # どれかが崩れていたらマージしない。
 #
-# 使い方: harness-merge <issue> [--chat-approval "<引用>" --attention <回答元A-id>]
+# 使い方: harness-merge <issue> [--pr <PR番号>] [--chat-approval "<引用>" --attention <回答元A-id>]
+#   --pr: head が branchPrefix+<issue> でない既存 PR（feat/ ブランチ等）を対象にする。
+#         PR は自リポジトリの open PR（fork の head は不可）で、その PR に付いた承認依頼コメント・人の OK で
+#         証明する（番号は呼び出し側の申告を信用しない）。Issue 全体に効く harness:merge-ok ラベルは
+#         別の PR への承認・新しい GitHub の NG と区別できないため、--pr ではラベルが付いている限り GitHub 経路
+#         でもチャット経路でも拒否する（ラベルを外し、OK コメント / Approve / PR に一致するチャット回答を使う）。
+#         PR 上の OK / Approve だけの場合は tick に出ないため、窓口の明示の指示で worker が harness-merge <issue> --pr <番号> を実行する。
+#         それ以外の安全柵は --pr なしと同じコードを通る。
+#   第1引数が --pr の形（harness-merge --pr <番号>）は Dependabot 用で、別経路（harness-pr.ts）。
 
 set -euo pipefail
 
@@ -19,7 +27,7 @@ if [ "${1:-}" = --pr ]; then
 fi
 cfg() { "$SCRIPT_DIR/harness-config" "$@" 2>/dev/null || true; }
 
-CHAT="" ATTENTION="" seen_chat=0 seen_attention=0
+CHAT="" ATTENTION="" PR_ARG="" seen_chat=0 seen_attention=0
 PR="" current_url=""
 # 拒否した入力の A だけを返し、現在の A や台帳全文を診断へ載せない。
 reject() {
@@ -42,6 +50,7 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--chat-approval) seen_chat=1; [ -z "$CHAT" ] && [ $# -ge 2 ] && [ -n "$2" ] && [[ "$2" != --* ]] || invalid; CHAT="$2"; seen_chat=1; shift 2 ;;
 	--attention) [ "$seen_attention" = 0 ] && [ $# -ge 2 ] || invalid; ATTENTION="$2"; seen_attention=1; shift 2 ;;
+	--pr) [ -z "$PR_ARG" ] && [ $# -ge 2 ] && [[ "$2" =~ ^[1-9][0-9]*$ ]] || invalid; PR_ARG="$2"; shift 2 ;;
 	*) invalid ;;
 	esac
 done
@@ -51,7 +60,14 @@ if [ "$seen_attention" = 1 ] && [[ ! "$ATTENTION" =~ ^A-[1-9][0-9]*$ ]]; then in
 prefix="$(cfg '.branchPrefix' 'fix/issue-')"
 method="$(cfg '.mergeMethod' 'merge')"
 case "$method" in merge|squash|rebase) ;; *) exit 1 ;; esac
-PR="$(gh pr list --state open --head "${prefix}${ISSUE}" --json number -q '.[0].number // empty')" || { reject pr-unavailable || true; exit 1; }
+if [ -n "$PR_ARG" ]; then
+	# fork の head は branchPrefix 経路には無かった追加の拒否条件（安全側）。closed / merged も対象外。
+	pr_meta="$(gh pr view "$PR_ARG" --json state,isCrossRepository)" || { reject pr-unavailable || true; exit 1; }
+	[ "$(jq -r '[.state, (.isCrossRepository | tostring)] | join(" ")' <<<"$pr_meta" 2>/dev/null)" = "OPEN false" ] || { reject pr-unavailable || true; exit 1; }
+	PR="$PR_ARG"
+else
+	PR="$(gh pr list --state open --head "${prefix}${ISSUE}" --json number -q '.[0].number // empty')" || { reject pr-unavailable || true; exit 1; }
+fi
 [ -n "$PR" ] || { reject pr-unavailable || true; exit 1; }
 validate() {
 	local worktree recovery reason
@@ -65,7 +81,7 @@ validate() {
 			return 1
 		fi
 	done
-	reason="$(jq -r --arg attention "$ATTENTION" --arg chat "$CHAT" '
+	reason="$(jq -r --arg attention "$ATTENTION" --arg chat "$CHAT" --arg pr_arg "$PR_ARG" '
 		if .ownersUnavailable then "attention-unavailable"
 		elif .verdict.kind == "merge-ng" then "github-ng"
 		elif .requestState == "pending" then "request-failed"
@@ -73,7 +89,11 @@ validate() {
 		elif .status == "stale-notify" then "request-stale"
 		elif .status != "ready" or .gate == null then "request-missing"
 		elif .githubApprovalBlocked then .attentionCheck.reason
-		elif $chat == "" then (if .verdict.kind == "merge-ok" then "" else "request-inactive" end)
+		# --pr のラベル承認は Issue 単位で別 PR への承認・新しい GitHub の NG と区別できないため、GitHub 経路でも
+		# チャット経路でも認めない（fail closed）。ラベル由来の判定だけが本文が空で URL が PR 本体（コメント・
+		# レビューは # 付き）。同じ1回の snapshot で判定し、別読取りを挟まない。
+		elif $pr_arg != "" and .verdict.kind == "merge-ok" and .verdict.body == "" and ((.verdict.url // "") | test("#") | not) then "request-inactive"
+		elif $chat == "" then (if .verdict.kind != "merge-ok" then "request-inactive" else "" end)
 		elif .gate.attention == null then "attention-none"
 		elif .gate.attention != $attention then "attention-stale"
 		elif .attentionCheck.state == "approved" then ""

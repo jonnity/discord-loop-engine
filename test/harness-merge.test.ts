@@ -980,3 +980,270 @@ for (const change of [
 			rmSync(s.dir, { recursive: true, force: true });
 		}
 	});
+
+// ---- harness-merge <issue> --pr <番号>（head が branchPrefix+番号でない既存 PR）----
+const A40 = "a".repeat(40);
+const ownerOk = {
+	id: 20,
+	user: { login: "owner" },
+	body: "OK",
+	created_at: "2026-10-27T00:00:11Z",
+	updated_at: "2026-10-27T00:00:11Z",
+	html_url: "approved",
+};
+// 承認依頼コメントを PR 5 に付けたあと、PR 9 へ移す（PR 5 は承認依頼のない別 PR になる）。
+async function featFixture(opts: { ok?: boolean; attention?: boolean; pr9?: Record<string, unknown> } = {}) {
+	const s = setup();
+	assert.equal((await s.call("harness-phase", args)).code, 0);
+	const state = s.state();
+	const gate = state.comments[0];
+	if (opts.attention) gate.body = gate.body.replace("attention=none", "attention=A-12");
+	state.prs = {
+		"9": { head: A40, comments: [gate, ...(opts.ok === false ? [] : [ownerOk])], reviews: [], ...opts.pr9 },
+	};
+	state.comments = [];
+	writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+	return s;
+}
+const log = (s: { env: NodeJS.ProcessEnv }) => readFileSync(String(s.env.MEDIA_LOG), "utf8");
+const noMerge = (s: { env: NodeJS.ProcessEnv }) => assert.doesNotMatch(log(s), /^merge/m);
+
+test("27: --pr N は PR N をマージする（gh pr list を呼ばず、--match-head-commit 付き、done になる）", async () => {
+	const s = await featFixture();
+	try {
+		const r = await s.call("harness-merge", ["3", "--pr", "9"]);
+		assert.equal(r.code, 0, r.stderr);
+		assert.match(log(s), /^merge --merge --match-head-commit a{40}$/m);
+		assert.match(log(s), /^merge-target 9$/m);
+		assert.doesNotMatch(log(s), /^merge-target (?!9$)/m);
+		assert.doesNotMatch(log(s), /pr-list/);
+		assert.deepEqual(s.state().labels, []);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: --pr なしは従来どおり gh pr list で探す", async () => {
+	const s = setup();
+	try {
+		assert.equal((await s.call("harness-phase", args)).code, 0);
+		const state = s.state();
+		state.comments.push(ownerOk);
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		assert.equal((await s.call("harness-merge", ["3"])).code, 0);
+		assert.match(log(s), /^pr-list pr list --state open --head fix\/issue-3 /m);
+		assert.match(log(s), /^merge-target 5$/m);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: 承認依頼の付いていない PR・別 Issue 用の承認依頼の PR は request-missing で拒否する", async () => {
+	const s = await featFixture();
+	try {
+		const wrong = await s.call("harness-merge", ["3", "--pr", "5"]);
+		assert.equal(wrong.code, 1);
+		assert.match(wrong.stderr, /harness-merge: request-missing。/);
+		const state = s.state();
+		state.prs["9"].comments[0].body = state.prs["9"].comments[0].body.replace("issue=3", "issue=4");
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		const other = await s.call("harness-merge", ["3", "--pr", "9"]);
+		assert.equal(other.code, 1);
+		assert.match(other.stderr, /harness-merge: request-missing。/);
+		noMerge(s);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: 承認依頼後に head が進んだら request-stale、人の OK がなければ request-inactive で拒否する", async () => {
+	const s = await featFixture({ pr9: { head: "b".repeat(40) } });
+	const t = await featFixture({ ok: false });
+	try {
+		const stale = await s.call("harness-merge", ["3", "--pr", "9"]);
+		assert.equal(stale.code, 1);
+		assert.match(stale.stderr, /harness-merge: request-stale。/);
+		noMerge(s);
+		const none = await t.call("harness-merge", ["3", "--pr", "9"]);
+		assert.equal(none.code, 1);
+		assert.match(none.stderr, /harness-merge: request-inactive。/);
+		noMerge(t);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+		rmSync(t.dir, { recursive: true, force: true });
+	}
+});
+test("27: NG は --pr でも github-ng で拒否する", async () => {
+	const s = await featFixture();
+	try {
+		const state = s.state();
+		state.prs["9"].comments.push({ ...ownerOk, id: 21, body: "NG", html_url: "ng" });
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		const r = await s.call("harness-merge", ["3", "--pr", "9"]);
+		assert.equal(r.code, 1);
+		assert.match(r.stderr, /harness-merge: github-ng。/);
+		noMerge(s);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+for (const [name, pr9, number] of [
+	["closed", { state: "CLOSED" }, "9"],
+	["merged", { state: "MERGED" }, "9"],
+	["fork", { isCrossRepository: true }, "9"],
+	["存在しない番号", {}, "77"],
+] as const) {
+	test(`27: --pr の対象が ${name} なら pr-unavailable で拒否する`, async () => {
+		const s = await featFixture({ pr9 });
+		try {
+			const r = await s.call("harness-merge", ["3", "--pr", number]);
+			assert.equal(r.code, 1);
+			assert.match(r.stderr, /harness-merge: pr-unavailable。/);
+			noMerge(s);
+		} finally {
+			rmSync(s.dir, { recursive: true, force: true });
+		}
+	});
+}
+test("27: --pr の不正な引数は終了2で副作用なし", async () => {
+	const s = await featFixture();
+	try {
+		for (const a of [
+			["--pr"],
+			["--pr", "x"],
+			["--pr", "0"],
+			["--pr", "--chat-approval"],
+			["--pr", "9", "--pr", "9"],
+			["--pr", "09"],
+		]) {
+			const r = await s.call("harness-merge", ["3", ...a]);
+			assert.equal(r.code, 2, a.join(" "));
+		}
+		assert.doesNotMatch(log(s), /^(merge|pr-list)/m);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: Issue の merge-ok ラベルは --pr の承認として認めない（別 PR への承認で通らない）", async () => {
+	for (const ok of [true, false]) {
+		const s = await featFixture({ ok });
+		try {
+			const state = s.state();
+			state.labels.push("harness:merge-ok");
+			// 同じ Issue の別 PR 11 にも承認依頼がある状態。オーナーのラベルは 11 向けとして付いた想定。
+			state.prs["11"] = { head: A40, comments: [state.prs["9"].comments[0]], reviews: [] };
+			writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+			const r = await s.call("harness-merge", ["3", "--pr", "9"]);
+			assert.equal(r.code, 1);
+			assert.match(r.stderr, /harness-merge: request-inactive。/);
+			noMerge(s);
+		} finally {
+			rmSync(s.dir, { recursive: true, force: true });
+		}
+	}
+});
+test("27: ラベルが残っていると --pr の有効なチャット承認でもマージしない（fail closed）", async () => {
+	const s = await featFixture({ ok: false, attention: true });
+	try {
+		savedAnswer(s.dir, "A-12", "OK", { pr: "9" });
+		const state = s.state();
+		state.labels.push("harness:merge-ok");
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		const r = await s.call("harness-merge", ["3", "--pr", "9", "--chat-approval", "x", "--attention", "A-12"]);
+		assert.equal(r.code, 1);
+		assert.equal(diagnostics(r.stderr)[0]?.reason, "request-inactive");
+		noMerge(s);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: --pr のチャット承認で、ラベルと新しい GitHub の NG があってもマージしない", async () => {
+	const s = await featFixture({ ok: false, attention: true });
+	try {
+		savedAnswer(s.dir, "A-12", "OK", { pr: "9" });
+		const state = s.state();
+		state.labels.push("harness:merge-ok");
+		state.prs["9"].comments.push({
+			...ownerOk,
+			id: 31,
+			body: "NG: stop",
+			created_at: "2026-10-27T00:00:30Z",
+			updated_at: "2026-10-27T00:00:30Z",
+			html_url: "https://x/pull/9#issuecomment-31",
+		});
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		const r = await s.call("harness-merge", ["3", "--pr", "9", "--chat-approval", "x", "--attention", "A-12"]);
+		assert.equal(r.code, 1);
+		noMerge(s);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: 本文なしの Approve（レビュー由来の verdict）は --pr でマージできる", async () => {
+	const s = await featFixture({ ok: false });
+	try {
+		const state = s.state();
+		state.prs["9"].reviews.push({
+			user: { login: "owner" },
+			state: "APPROVED",
+			body: "",
+			html_url: "https://x/pull/9#pullrequestreview-1",
+			commit_id: A40,
+			submitted_at: "2026-10-27T00:00:20Z",
+		});
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		const r = await s.call("harness-merge", ["3", "--pr", "9"]);
+		assert.equal(r.code, 0, r.stderr);
+		assert.match(log(s), /^merge-target 9$/m);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: ラベルが残っていて A の PR が不一致なら --pr のチャット承認は通らない", async () => {
+	const s = await featFixture({ ok: false, attention: true });
+	try {
+		savedAnswer(s.dir); // PR 5 向け
+		const state = s.state();
+		state.labels.push("harness:merge-ok");
+		writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+		const r = await s.call("harness-merge", ["3", "--pr", "9", "--chat-approval", "x", "--attention", "A-12"]);
+		assert.equal(r.code, 1);
+		noMerge(s);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("27: --pr と --chat-approval は台帳の A の PR が一致するときだけ通る", async () => {
+	const s = await featFixture({ ok: false, attention: true });
+	try {
+		savedAnswer(s.dir); // A-12 は PR 5 向け
+		const bad = await s.call("harness-merge", ["3", "--pr", "9", "--chat-approval", "x", "--attention", "A-12"]);
+		assert.equal(bad.code, 1);
+		assert.equal(diagnostics(bad.stderr)[0]?.reason, "attention-scope-mismatch");
+		noMerge(s);
+		savedAnswer(s.dir, "A-12", "OK", { pr: "9" });
+		const good = await s.call("harness-merge", ["3", "--attention", "A-12", "--pr", "9", "--chat-approval", "x"]);
+		assert.equal(good.code, 0, good.stderr);
+		assert.match(log(s), /^merge-target 9$/m);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+for (const [name, env, config] of [
+	["CI 赤", { CI_BAD: "1" }, undefined],
+	["mergeable でない", { MERGEABLE: "CONFLICTING" }, undefined],
+	["beforeMerge 失敗", {}, ["false"]],
+] as const) {
+	test(`27: ${name}は --pr でも拒否する`, async () => {
+		const s = await featFixture();
+		try {
+			if (config) {
+				const c = JSON.parse(readFileSync(s.env.HARNESS_CONFIG, "utf8"));
+				c.hooks.beforeMerge = config;
+				writeFileSync(s.env.HARNESS_CONFIG, JSON.stringify(c));
+			}
+			const r = await s.call("harness-merge", ["3", "--pr", "9"], env);
+			assert.equal(r.code, 1);
+			noMerge(s);
+		} finally {
+			rmSync(s.dir, { recursive: true, force: true });
+		}
+	});
+}

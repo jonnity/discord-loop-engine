@@ -1269,3 +1269,40 @@ test("issue-loop: 遅れて届いた blocked の attention は台帳確認で二
 	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
 	assert.match(loop, /meta\.kind=blocked`? → 書かれた指示に従って再開する（遅れて届いたとき.*二重に実行しない）/);
 });
+
+test("#27: head が branchPrefix+n でない PR だけ --pr 付きの harness-merge を使い、tick が --pr の PR を拾わないことを書く", () => {
+	const root = path.resolve(import.meta.dirname, "..");
+	const loop = readFileSync(path.join(root, "skills/issue-loop/SKILL.md"), "utf8");
+	const cycle = readFileSync(path.join(root, "skills/issue-cycle/SKILL.md"), "utf8");
+	const concierge = readFileSync(path.join(root, "skills/concierge/SKILL.md"), "utf8");
+	const form = 'harness-merge {meta.issue} --pr {meta.pr} --chat-approval "<本文>" --attention "{meta.attention}"';
+	assert.ok(loop.includes(form));
+	assert.ok(concierge.includes(form));
+	assert.ok(cycle.includes('harness-merge {n} --pr {meta.pr} --chat-approval "$BODY" --attention "$ATTENTION"'));
+	// branchPrefix+n の PR は --pr なし。--pr は head がそれ以外のときだけ（残ったラベルが通常の承認を止めないため）
+	for (const t of [loop, cycle, concierge]) assert.ok(t.includes("headRefName"), "headRefName で head を確かめる");
+	assert.ok(cycle.includes("head が branchPrefix+{n} でない PR のときだけ `--pr {meta.pr}` を付ける"));
+	assert.ok(cycle.includes("`harness-config '.branchPrefix' fix/issue-` で得る"));
+	assert.ok(loop.includes("branchPrefix+{meta.issue}（`harness-config '.branchPrefix' fix/issue-` で得る"));
+	assert.ok(concierge.includes("branchPrefix+{meta.issue}（既定 `fix/issue-{meta.issue}`"));
+	for (const t of [loop, cycle, concierge])
+		assert.ok(!t.includes("`fix/issue-{meta.issue}` でない") && !t.includes("`fix/issue-{n}` でない"));
+	// F3: PR 上の OK/Approve だけの --pr 形を worker が実行できる
+	assert.ok(
+		cycle.includes('(cd "$WT" && harness-merge {n} --pr <PR番号>) || exit 1  # head が branchPrefix+{n} でない PR で'),
+	);
+	assert.ok(loop.includes("`harness-merge {meta.issue} --pr <PR番号>` を実行する（承認の検証はマージ側が行い"));
+	assert.ok(cycle.includes("`--pr` ではラベルが付いている限りすべての経路で拒否される（ラベルを外す。"));
+	assert.ok(cycle.includes("ラベルは使えない。OK コメント / Approve で"));
+	assert.ok(loop.includes("ラベルが付いている限りすべての経路で拒否される"));
+	assert.ok(loop.includes("ラベルは `--pr` なしの経路で新しい GitHub の NG を隠しうる"));
+	assert.ok(!loop.includes("マージ自体は NG を再確認して止まる"));
+	assert.ok(!loop.includes("ラベルの影響を受けない"));
+	assert.ok(!cycle.includes("ラベルの影響を受けない"));
+	assert.ok(cycle.includes("[--pr <PR番号>]"));
+	assert.ok(loop.includes("`--pr` なしでは見つからない（pr-unavailable 等）"));
+	assert.ok(cycle.includes("該当する1つだけを実行する"));
+	assert.ok(!cycle.includes("正整数のとき（feat/"));
+	assert.ok(loop.includes("tick の `harness-inbox` は branchPrefix+番号の PR しか見ない"));
+	assert.ok(cycle.includes("`harness-inbox` の tick は `--pr` で扱う PR を拾わない"));
+});

@@ -45,7 +45,7 @@ PR 本文を A.summary・通知・scan/inbox へ入れない。人は PR リン�
 | `harness-issue-md <n>` | Issue 本文＋コメントを設計の入力用 Markdown にして出力する |
 | `harness-codex-status check` / `status <window>` | Codex が使えるか・ウィンドウの状態（読み取り専用。確認なしで通る） |
 | `harness-codex start <window> <worktree> <prompt-file>` | Codex を tmux で起動する（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**） |
-| `harness-merge <n> [--chat-approval "<引用>" --attention <回答先A-id>]` | 承認・CI・mergeable を確認してマージ → done |
+| `harness-merge <n> [--pr <PR番号>] [--chat-approval "<引用>" --attention <回答先A-id>]` | 承認・CI・mergeable を確認してマージ → done（`--pr` は head が branchPrefix+{n}（既定 fix/issue-{n}）でない既存 PR のときだけ付ける。ラベルが付いていると `--pr` は全経路で拒否） |
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
 | `harness-pr scan` / `harness-pr inbox` | Dependabot PR の検出・台帳の承認回収・後始末の確認（Issue なし） |
 | `harness-pr request --pr N [--retry]` | 古い順・同時1件で新 A/head の依頼。retry は窓口経由の人の再依頼だけ |
@@ -591,7 +591,7 @@ blocked 通知失敗も成功にしない。原因解消後は動画準備から
 - 人間に確認してほしいこと（humanChecks）: …（普通の箇条書きで結果/未確認を記す）
 - 変更概要: …
 
-マージしてよければこの PR に「OK」とコメント（または Approve / Issue に harness:merge-ok ラベル）、
+マージしてよければこの PR に「OK」とコメント（または Approve / Issue に harness:merge-ok ラベル。feat/ 等の既存 PR を --pr で扱う場合、ラベルは使えない。OK コメント / Approve で。ラベルが付いていたら置き換えでなく外してから OK する。PR 上の OK / Approve は tick に出ないため、窓口経由で worker に伝える）、
 直してほしい点があれば「NG: 〜」とコメントしてください。
 完成コメントを編集すると、それより前の OK/Approve は数えないため、編集後に再回答してください。
 ```
@@ -613,9 +613,16 @@ attention 属性のない旧 gate は全承認経路で再依頼が必要。依�
 ```bash
 (cd "$WT" && harness-merge {n}) || exit 1              # PR 上の承認だけの場合
 (cd "$WT" && harness-merge {n} --chat-approval "$BODY" --attention "$ATTENTION") || exit 1  # 保存済み回答を再照合
+(cd "$WT" && harness-merge {n} --pr {meta.pr} --chat-approval "$BODY" --attention "$ATTENTION") || exit 1  # PR の head が branchPrefix+{n} でないときだけ（feat/ 等の既存 PR）
+(cd "$WT" && harness-merge {n} --pr <PR番号>) || exit 1  # head が branchPrefix+{n} でない PR で、PR 上の OK/Approve だけの場合（tick に出ないため、窓口からの明示の指示で実行）
 ```
 
-どちらか該当する一方だけを実行する。成功時だけ従来の done・`harness-codex stop`・worktree の片付けへ進む。
+A の meta.pr があっても、まず `gh pr view {meta.pr} --json headRefName -q .headRefName` で head を確かめる。branchPrefix は `harness-config '.branchPrefix' fix/issue-` で得る。head が branchPrefix+{n}（既定 `fix/issue-{n}`）なら `--pr` なしの形を使う（従来どおり）。
+head が branchPrefix+{n} でない PR のときだけ `--pr {meta.pr}` を付ける（`harness-phase` は notify に常に `--pr` を渡し、ラベルも done 以外では残すため、すべてに付けると残ったラベルが通常の承認を止める）。
+承認依頼コメントが付いた自リポジトリの open PR だけが対象。`--pr` ではラベルが付いている限りすべての経路で拒否される（ラベルを外す。OK コメント / Approve、または PR に一致するチャット回答を使う）。
+ラベルは `--pr` なしの経路で新しい GitHub の NG を隠しうる（既存の限界）。`--pr` で扱う PR は、マージ前に worker が PR 上の NG を目で確かめる。`harness-inbox` の tick は `--pr` で扱う PR を拾わない。
+
+該当する1つだけを実行する。成功時だけ従来の done・`harness-codex stop`・worktree の片付けへ進む。
 `harness-merge` が承認・head の一致・CI・mergeable を確認し、マージ後に `done`（ラベル除去）まで行う。
 実 PR が MERGED かも確認し、merge queue への投入だけなら done/片付けを完了扱いしない。
 確認できた成功時の片付けは従来どおり:
