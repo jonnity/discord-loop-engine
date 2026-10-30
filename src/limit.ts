@@ -9,6 +9,10 @@ export interface WorkerLimit {
 	resetPatterns: string[];
 	/** 探す範囲（末尾の空行を除いた最後の N 行） */
 	tailLines: number;
+	/** 上限中の worker を起こし直す最初の間隔（分）。送信成功ごとに倍。画面の復帰時刻は使わない固定間隔 */
+	wakeIntervalMinutes: number;
+	/** 起こす最大回数。0 は自動で起こさない */
+	wakeMaxAttempts: number;
 }
 
 // 暫定。実機で上限画面を採取するまで確定しない（spec §6-1）。単語だけの `usage limit` は会話文と区別できないので入れない
@@ -21,6 +25,8 @@ export const DEFAULT_WORKER_LIMIT: WorkerLimit = {
 	],
 	resetPatterns: ["resets? (?:at )?([0-9: ]+(?:am|pm)?)"],
 	tailLines: 12,
+	wakeIntervalMinutes: 30,
+	wakeMaxAttempts: 5,
 };
 
 export interface LimitHit {

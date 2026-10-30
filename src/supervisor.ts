@@ -20,6 +20,8 @@ const DEV_CHANNEL_PROMPT = "I am using this for local development";
 const PERMISSION_PROMPTS = ["Do you want to proceed?", "Do you want to make this edit", "Do you want to create"];
 // 応答の途中に出る目印（この間は /clear を入れない）
 const WORKING_MARK = "esc to interrupt";
+/** 上限中の自動の起こしを要求するときの理由（`limited` の間はこの理由でしか送らない） */
+const LIMIT_REASON = "limit";
 // 旧版向けの表記も残す。画面だけで待機を決めず、内部ファイルの idle と併用する。
 const CONTEXT_LEFT = [/Context left until auto-compact: (\d+)%/i, /(\d+)% context left/i, /(\d+)% until auto-compact/i];
 
@@ -180,6 +182,11 @@ interface SlotState {
 	limitMisses: number;
 	limitSince: number | null;
 	limitResetText: string | null;
+	/** 起こしを送れた回数・次に要求してよい時刻・最後に送った時刻・あきらめ済み（このエピソード内。clearLimit で戻す） */
+	limitAttempts: number;
+	limitNextAt: number | null;
+	limitLastWakeAt: number | null;
+	limitGaveUp: boolean;
 }
 
 export interface LimitedEntry {
@@ -187,6 +194,9 @@ export interface LimitedEntry {
 	since: number;
 	resetText: string | null;
 }
+
+// 最後の起こしを送ってから、その結果が画面に出るのを待つ猶予（約 3 tick）。この後もまだ上限ならあきらめる
+const LIMIT_GIVE_UP_GRACE_MS = 90_000;
 
 // 2 回連続（約 1 分）で上限表示が消えたら解除する。一瞬の描画の揺れで通知の回数管理を壊さないため
 const LIMIT_CLEAR_MISSES = 2;
@@ -219,6 +229,8 @@ export interface SupervisorOptions {
 	limit?: WorkerLimit;
 	/** 上限エピソードの開始時に1回だけ呼ぶ（その時点で上限中の全 worker） */
 	onLimit?: (entries: LimitedEntry[]) => void;
+	/** 自動の起こしをあきらめたとき。上限エピソードにつき1回だけ（その tick で新たにあきらめた全 worker の名前） */
+	onLimitGaveUp?: (e: { names: string[]; attempts: number }) => void;
 }
 
 export class Supervisor {
@@ -230,6 +242,10 @@ export class Supervisor {
 	private waking = false;
 	/** 現在の上限エピソードで通知済みか。全員が解除されたら戻す */
 	private limitNotified = false;
+	/** 現在の上限エピソードであきらめ通知を出したか。limitNotified と同じ所で戻す */
+	private limitGaveUpNotified = false;
+	/** 今の tick で新たにあきらめた slot（finishLimitTick で通知にまとめる） */
+	private limitGaveUpNow: string[] = [];
 
 	constructor(opts: SupervisorOptions) {
 		// channel の接続直後は入力欄がまだ準備できていないことがあるため、少し待ってから入力する
@@ -249,6 +265,7 @@ export class Supervisor {
 			activity: () => ({ events: 0, lastAt: 0 }),
 			onRefresh: () => {},
 			onLimit: () => {},
+			onLimitGaveUp: () => {},
 			...opts,
 			// ...opts に limit: undefined が入っていても既定値になるよう、後ろに置く
 			limit: opts.limit ?? DEFAULT_WORKER_LIMIT,
@@ -279,6 +296,10 @@ export class Supervisor {
 				limitMisses: 0,
 				limitSince: null,
 				limitResetText: null,
+				limitAttempts: 0,
+				limitNextAt: null,
+				limitLastWakeAt: null,
+				limitGaveUp: false,
 			};
 			this.state.set(name, s);
 		}
@@ -333,7 +354,7 @@ export class Supervisor {
 				s.waitingNotified = false;
 				if (exists) {
 					await this.checkStuck(t.name, s);
-					await this.checkLimit(t.name, s);
+					await this.checkLimit(t, s);
 					await this.maybeRefresh(t);
 					await this.maybeWake(t, exists);
 				}
@@ -381,13 +402,20 @@ export class Supervisor {
 		s.limitMisses = 0;
 		s.limitSince = null;
 		s.limitResetText = null;
+		s.limitAttempts = 0;
+		s.limitNextAt = null;
+		s.limitLastWakeAt = null;
+		s.limitGaveUp = false;
+		// 復帰後に古い要求が残って余計な起こしを送らない
+		s.wake.reasons = s.wake.reasons.filter((r) => r !== LIMIT_REASON);
 	}
 
 	/**
 	 * 上限表示を読む。read-only（send-keys をしない）なので wake / refresh と衝突せず、それらの判定にも使わない。
 	 * capture に失敗したら状態を変えない。
 	 */
-	private async checkLimit(name: string, s: SlotState) {
+	private async checkLimit(t: SessionTarget, s: SlotState) {
+		const name = t.name;
 		const cfg = this.o.limit;
 		if (!cfg.enabled) return;
 		const pane = await this.capture(name);
@@ -398,14 +426,50 @@ export class Supervisor {
 			if (!s.limited) {
 				s.limited = true;
 				s.limitSince = this.o.now();
+				s.limitAttempts = 0;
+				s.limitNextAt = this.o.now() + this.limitIntervalMs(0);
+				s.limitLastWakeAt = null;
+				s.limitGaveUp = false;
 			}
 			// 後から取れた復帰時刻で更新するだけで、再通知はしない
 			if (hit.resetText !== null) s.limitResetText = hit.resetText;
+			this.limitRetry(t, s);
 			return;
 		}
 		if (!s.limited) return;
+		// 起こした後は、入力のエコー（>）や応答（⎿）で上限の行が除外・範囲外になり得る。作業中の印が無いなら復帰とは数えない。
+		// 数えると解除→古い行の再検出で新しいエピソードになり、通知と起こしが繰り返される
+		// limitMisses は触らない（上限行が検出された tick だけが 0 に戻す）。ここで戻すと、短く動いて idle に戻った復帰済みの worker が解除されない
+		// 次の起こし・あきらめの判断は上限行が見えない間も続ける（limitRetry を通さないと再試行もあきらめ通知も止まる）
+		// 作業中の印は detectLimit と同じ末尾だけで見る（上のほうに残った古い表示で数え違えない）
+		const tail = pane.split("\n").slice(-cfg.tailLines).join("\n");
+		if (this.o.limit.wakeMaxAttempts > 0 && s.limitAttempts > 0 && !tail.includes(WORKING_MARK)) {
+			this.limitRetry(t, s);
+			return;
+		}
 		s.limitMisses += 1;
 		if (s.limitMisses >= LIMIT_CLEAR_MISSES) this.clearLimit(s);
+	}
+
+	/** 次の起こしまでの待ち。attempts 回送った後は 2^attempts 倍（復帰時刻は使わない固定間隔の倍々） */
+	private limitIntervalMs(attempts: number): number {
+		return this.o.limit.wakeIntervalMinutes * 60_000 * 2 ** attempts;
+	}
+
+	/** 上限が続いている tick で、起こしの要求かあきらめを判断する。送信は maybeWake の判定を通ったときだけ */
+	private limitRetry(t: SessionTarget, s: SlotState) {
+		const max = this.o.limit.wakeMaxAttempts;
+		if (!t.wake || max <= 0 || s.limitGaveUp) return;
+		const now = this.o.now();
+		if (s.limitAttempts >= max) {
+			if (s.limitLastWakeAt !== null && now >= s.limitLastWakeAt + LIMIT_GIVE_UP_GRACE_MS) {
+				s.limitGaveUp = true;
+				// 通知は上限エピソードにつき1回。後からあきらめた slot は通知しない（dle restart --limited が全員を対象にする）
+				if (!this.limitGaveUpNotified) this.limitGaveUpNow.push(t.name);
+			}
+			return;
+		}
+		if (s.limitNextAt !== null && now >= s.limitNextAt) this.requestWake(t.name, LIMIT_REASON);
 	}
 
 	/** 現在の targets() にあり startupError の無い名前（上限の数え方はこの集合だけを見る） */
@@ -436,7 +500,17 @@ export class Supervisor {
 		const entries = this.limitedEntries(current);
 		if (entries.length === 0) {
 			this.limitNotified = false;
+			this.limitGaveUpNotified = false;
+			this.limitGaveUpNow = [];
 			return;
+		}
+		if (this.limitGaveUpNow.length > 0) {
+			const names = this.limitGaveUpNow;
+			this.limitGaveUpNow = [];
+			if (!this.limitGaveUpNotified) {
+				this.limitGaveUpNotified = true;
+				this.o.onLimitGaveUp({ names, attempts: this.o.limit.wakeMaxAttempts });
+			}
 		}
 		if (this.limitNotified) return;
 		this.limitNotified = true;
@@ -603,6 +677,9 @@ export class Supervisor {
 		const w = s.wake;
 		// 最初の await より前に同期的に check-and-set する（判定中の await で別の maybeWake が割り込んでも二重に送らない）
 		if (w.sending || (w.reasons.length === 0 && !w.enterOnly)) return;
+		// 上限中は limit の起こし以外では送らない（他の理由が再試行の回数を食わず、あきらめ後は何も送らない）。理由は積んだまま。
+		// 同期の早期 return で、sending を立てる前なので finally の解放には影響しない
+		if (this.o.limit.wakeMaxAttempts > 0 && s.limited && !w.enterOnly && !w.reasons.includes(LIMIT_REASON)) return;
 		w.sending = true;
 		try {
 			const now = this.o.now();
@@ -655,6 +732,12 @@ export class Supervisor {
 			w.since = null;
 			w.enterOnly = false;
 			w.lastSentAt = this.o.now();
+			if (this.o.limit.wakeMaxAttempts > 0 && s.limited) {
+				// 実際に上限中の worker に入力した1回。次の待ちは倍
+				s.limitAttempts += 1;
+				s.limitLastWakeAt = w.lastSentAt;
+				s.limitNextAt = w.lastSentAt + this.limitIntervalMs(s.limitAttempts);
+			}
 			this.o.log(`supervisor: ${t.name} を起こしました`);
 			await this.verifyWake(t);
 		} finally {
@@ -748,6 +831,8 @@ export class Supervisor {
 		if (
 			s.refreshing ||
 			s.wake.sending ||
+			// 上限中に /clear すると上限の行が画面から消え、解除と誤認して通知が増える。上限中は整理しても進まない
+			(this.o.limit.wakeMaxAttempts > 0 && s.limited) ||
 			now - this.startedAt < idleMs ||
 			(s.lastRefreshAt !== null && now - s.lastRefreshAt < r.cooldownMinutes * 60000)
 		)

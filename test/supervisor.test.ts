@@ -9,7 +9,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import type { WorkerLimit } from "../src/limit.ts";
+import { DEFAULT_WORKER_LIMIT, type WorkerLimit } from "../src/limit.ts";
 import { type LimitedEntry, type RefreshResult, type SessionTarget, Supervisor, shq } from "../src/supervisor.ts";
 
 function setup(opts: { windows?: string[] | null; live?: Set<string>; pane?: string } = {}) {
@@ -589,10 +589,13 @@ function wakeSetup(
 		logAge?: number;
 		failFlags?: Set<string>; // "-l" / "Enter" を失敗させる
 		onWait?: () => void;
+		limit?: Partial<WorkerLimit>;
 	} = {},
 ) {
 	const calls: string[][] = [];
 	const skipped: string[] = [];
+	const limits: LimitedEntry[][] = [];
+	const gaveUps: { names: string[]; attempts: number }[] = [];
 	const state = {
 		panes: o.panes ?? [IDLE],
 		i: 0,
@@ -639,12 +642,17 @@ function wakeSetup(
 		now: () => state.now,
 		promptDelayMs: 0,
 		wait: async () => o.onWait?.(),
+		limit: { ...DEFAULT_WORKER_LIMIT, ...o.limit },
+		onLimit: (e) => limits.push(e),
+		onLimitGaveUp: (e) => gaveUps.push(e),
 	});
 	const keys = () => calls.filter((c) => c[0] === "send-keys").map((c) => c.slice(3).join(" "));
 	return {
 		sup,
 		calls,
 		skipped,
+		limits,
+		gaveUps,
 		state,
 		keys,
 		advance: (ms: number) => {
@@ -913,16 +921,18 @@ test("起こし: 送る文字列は定数のみで、reason や initialPrompt �
 // --- 使用量の上限（検出・エピソード・一括再起動） ---
 const LIMIT_PANE = "作業\n\nClaude usage limit reached. Your limit will reset at 3pm\n";
 
-function limitSetup(names: string[], extra: { limit?: WorkerLimit } = {}) {
+function limitSetup(names: string[], extra: { limit?: WorkerLimit; wake?: boolean } = {}) {
 	const panes = new Map<string, string>(names.map((n) => [n, ""]));
 	const calls: string[][] = [];
 	const limits: LimitedEntry[][] = [];
+	const gaveUps: { names: string[]; attempts: number }[] = [];
 	const live = new Set(names);
 	let targets: SessionTarget[] = names.map((name) => ({
 		name,
 		cwd: `/w/${name}`,
 		command: "claude",
 		initialPrompt: "",
+		...(extra.wake ? { wake: { enabled: true as const } } : {}),
 	}));
 	const captureFails = new Set<string>();
 	const sup = new Supervisor({
@@ -940,13 +950,15 @@ function limitSetup(names: string[], extra: { limit?: WorkerLimit } = {}) {
 		notify: () => {},
 		now: () => 0,
 		onLimit: (e) => limits.push(e),
-		...extra,
+		onLimitGaveUp: (e) => gaveUps.push(e),
+		limit: extra.limit,
 	});
 	return {
 		sup,
 		panes,
 		calls,
 		limits,
+		gaveUps,
 		live,
 		captureFails,
 		setTargets: (f: (t: SessionTarget[]) => SessionTarget[]) => {
@@ -1031,7 +1043,7 @@ test("limit を渡さなくても検出が動き、undefined の明示も既定�
 	a.panes.set("a", LIMIT_PANE);
 	await a.sup.tick();
 	assert.equal(a.limits.length, 1);
-	const b = limitSetup(["a"], { limit: { enabled: true, patterns: ["^上限です"], resetPatterns: [], tailLines: 12 } });
+	const b = limitSetup(["a"], { limit: { ...DEFAULT_WORKER_LIMIT, patterns: ["^上限です"], resetPatterns: [] } });
 	b.panes.set("a", LIMIT_PANE);
 	await b.sup.tick();
 	assert.equal(b.limits.length, 0);
@@ -1041,7 +1053,9 @@ test("limit を渡さなくても検出が動き、undefined の明示も既定�
 });
 
 test("limit.enabled=false なら capture も通知もしない", async () => {
-	const h = limitSetup(["a"], { limit: { enabled: false, patterns: ["^x"], resetPatterns: [], tailLines: 12 } });
+	const h = limitSetup(["a"], {
+		limit: { ...DEFAULT_WORKER_LIMIT, enabled: false, patterns: ["^x"], resetPatterns: [] },
+	});
 	h.panes.set("a", LIMIT_PANE);
 	await h.sup.tick();
 	// checkStuck の capture は従来どおり1回。上限用の追加の capture はしない
@@ -1049,12 +1063,12 @@ test("limit.enabled=false なら capture も通知もしない", async () => {
 	assert.equal(h.limits.length, 0);
 });
 
-test("limited の worker でも wake の send-keys は上限なしのときと同じように送られる", async () => {
-	const h = wakeSetup({ panes: ["Claude usage limit reached. Your limit will reset at 3pm\n❯ "] });
+test("limited の worker でも、limit の要求なら wake の send-keys は上限なしのときと同じように送られる", async () => {
+	const h = wakeSetup({ panes: [`${LIMIT_WAKE}`] });
 	await h.sup.tick();
 	assert.deepEqual(h.sup.limitedNames(), ["w"]); // 実際に上限として検出されている
-	h.sup.requestWake("w", "dispatch");
-	await h.sup.wakeTick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
 	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
 });
 
@@ -1116,4 +1130,358 @@ test("--limited で対象が0件でも正常に終わる", async () => {
 	const h = limitSetup(["a"]);
 	await h.sup.tick();
 	assert.deepEqual(await h.sup.restartMany("limited", []), { restarted: [], skipped: [] });
+});
+
+// --- 上限中の自動の起こし（#36） ---
+const MIN = 60_000;
+const LIMIT_WAKE = "Claude usage limit reached. Your limit will reset at 3pm\n❯ ";
+// 起こした後の画面: 入力のエコーと応答が除外され、上限の行が検出されない（作業中でもない）
+const AFTER_WAKE = "> /discord-loop-engine:issue-loop\n  ⎿ Claude usage limit reached\n❯ ";
+
+type WakeHarness = ReturnType<typeof wakeSetup>;
+interface LimitSlot {
+	limitAttempts: number;
+	limitGaveUp: boolean;
+	refreshing: boolean;
+	promptPending: boolean;
+	wake: { reasons: string[]; enterOnly: boolean; sending: boolean };
+}
+const wakeState = (h: WakeHarness) =>
+	(h.sup as unknown as { state: Map<string, LimitSlot> }).state.get("w") as LimitSlot;
+
+test("上限の起こし: 検出から 29 分では送らず、30 分で WAKE_PROMPT と Enter を 1 回送る", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.advance(29 * MIN);
+	await h.sup.tick();
+	assert.deepEqual(h.keys(), []);
+	h.advance(1 * MIN);
+	await h.sup.tick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+	await h.sup.tick();
+	assert.equal(h.keys().length, 2);
+});
+
+test("上限の起こし: 30→60→120→240→480 分の倍々で 5 回送り、あきらめ通知は 1 回、その後は送らない。onLimit は増えない", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	const sentAt: number[] = [];
+	let sent = 0;
+	for (let m = 1; m <= 1100; m++) {
+		h.advance(MIN);
+		await h.sup.tick();
+		if (h.keys().length / 2 > sent) {
+			sent = h.keys().length / 2;
+			sentAt.push(m);
+		}
+	}
+	assert.deepEqual(sentAt, [30, 90, 210, 450, 930]);
+	assert.equal(h.gaveUps.length, 1);
+	assert.deepEqual(h.gaveUps[0], { names: ["w"], attempts: 5 });
+	assert.equal(h.limits.length, 1);
+});
+
+test("上限の起こし: 最後の送信から 90 秒未満ではあきらめない", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE], limit: { wakeMaxAttempts: 1 } });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	assert.equal(h.keys().length, 2);
+	h.advance(60_000);
+	await h.sup.tick();
+	assert.equal(h.gaveUps.length, 0);
+	h.advance(30_000);
+	await h.sup.tick();
+	assert.equal(h.gaveUps.length, 1);
+});
+
+test("上限の起こし: wakeMaxAttempts=0 では起こしもあきらめ通知も無い。wake 未設定の target も同様", async () => {
+	for (const o of [{ limit: { wakeMaxAttempts: 0 } }, { wake: false }]) {
+		const h = wakeSetup({ panes: [LIMIT_WAKE], ...o });
+		await h.sup.tick();
+		for (let m = 0; m < 20; m++) {
+			h.advance(60 * MIN);
+			await h.sup.tick();
+		}
+		assert.deepEqual(h.keys(), []);
+		assert.equal(h.gaveUps.length, 0);
+		assert.deepEqual(h.sup.limitedNames(), ["w"]);
+	}
+});
+
+test("上限の起こし(F1): 起こし後に上限行が見えず作業中でもない画面は不一致と数えず、attempts を保つ", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	assert.equal(wakeState(h).limitAttempts, 1);
+	h.state.panes = [AFTER_WAKE];
+	h.state.i = 0;
+	for (let i = 0; i < 6; i++) {
+		h.advance(10_000);
+		await h.sup.tick();
+	}
+	assert.deepEqual(h.sup.limitedNames(), ["w"]);
+	assert.equal(wakeState(h).limitAttempts, 1);
+	assert.equal(h.limits.length, 1);
+	// 上限行が見えない間も 2 回目の起こしは来る（30→60 分）
+	h.advance(60 * MIN);
+	await h.sup.tick();
+	assert.equal(wakeState(h).limitAttempts, 2);
+	assert.equal(h.keys().length, 4);
+});
+
+test("上限の起こし(F1): 上限行が見えない画面でも、回数を使い切ればあきらめ通知が 1 回出る", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE], limit: { wakeMaxAttempts: 1 } });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	h.state.panes = [AFTER_WAKE];
+	h.state.i = 0;
+	for (let i = 0; i < 12; i++) {
+		h.advance(10_000);
+		await h.sup.tick();
+	}
+	assert.equal(h.gaveUps.length, 1);
+	assert.deepEqual(h.sup.limitedNames(), ["w"]);
+});
+
+test("上限の起こし(F1): 不一致の連続は idle の tick で巻き戻されず、作業中の画面 2 回で解除される", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	const work = "✻ 作業中 (esc to interrupt)\n";
+	for (const p of [work, AFTER_WAKE, work]) {
+		h.state.panes = [p];
+		h.state.i = 0;
+		h.advance(10_000);
+		await h.sup.tick();
+	}
+	assert.deepEqual(h.sup.limitedNames(), []);
+});
+
+test("上限の起こし(F1): 作業中の印は末尾だけで見る。上のほうの古い表示は数えない", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	const old = `✻ (esc to interrupt)\n${"\n行\n".repeat(20)}${AFTER_WAKE}`;
+	h.state.panes = [old];
+	h.state.i = 0;
+	for (let i = 0; i < 6; i++) {
+		h.advance(10_000);
+		await h.sup.tick();
+	}
+	assert.deepEqual(h.sup.limitedNames(), ["w"]);
+});
+
+test("上限の起こし: wakeMaxAttempts=0 なら limited でも dispatch の起こしは従来どおり送る", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE], limit: { wakeMaxAttempts: 0 } });
+	await h.sup.tick();
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+});
+
+test("上限の起こし: wakeMaxAttempts=0 では dispatch の起こしの後も、上限でない画面 2 回で解除される", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE], limit: { wakeMaxAttempts: 0 } });
+	await h.sup.tick();
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	h.state.panes = [IDLE];
+	h.state.i = 0;
+	for (let i = 0; i < 2; i++) {
+		h.advance(10_000);
+		await h.sup.tick();
+	}
+	assert.deepEqual(h.sup.limitedNames(), []);
+});
+
+test("上限の起こし(F1): 作業中の画面で不一致が 2 連続すると解除され、次の上限は新しいエピソードになる", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	h.state.panes = ["✻ 作業中 (esc to interrupt)\n"];
+	h.state.i = 0;
+	h.advance(10_000);
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), ["w"]); // 1 回目
+	h.advance(10_000);
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+	h.state.panes = [LIMIT_WAKE];
+	h.state.i = 0;
+	h.advance(10_000);
+	await h.sup.tick();
+	assert.equal(h.limits.length, 2);
+	assert.equal(wakeState(h).limitAttempts, 0);
+});
+
+test("上限の起こし(F1): attempts=0 の間は作業中でなくても 2 連続不一致で解除される", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.state.panes = ["何もない画面\n"];
+	h.state.i = 0;
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), ["w"]);
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+});
+
+test("上限の起こし(F2): limited の間は limit 以外の理由では送らず積んだまま、limit の起こしで 1 回にまとまる", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	await h.sup.tick();
+	assert.deepEqual(h.keys(), []);
+	assert.deepEqual(wakeState(h).wake.reasons, ["dispatch"]);
+	assert.equal(wakeState(h).wake.sending, false);
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+	assert.deepEqual(wakeState(h).wake.reasons, []);
+	assert.equal(wakeState(h).limitAttempts, 1);
+});
+
+test("上限の起こし(F2): あきらめた後は dispatch が来ても送らない。上限でなければ従来どおり送る", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE], limit: { wakeMaxAttempts: 1 } });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	await h.sup.tick();
+	h.advance(2 * MIN);
+	await h.sup.tick();
+	assert.equal(wakeState(h).limitGaveUp, true);
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	h.advance(5 * MIN);
+	await h.sup.tick();
+	assert.equal(h.keys().length, 2);
+	const g = wakeSetup();
+	g.sup.requestWake("w", "dispatch");
+	await g.sup.wakeTick();
+	assert.equal(g.keys().length, 2);
+});
+
+test("上限の起こし(F2): enterOnly の Enter 再送は limited でも通る", async () => {
+	const h = wakeSetup({ panes: [`Claude usage limit reached\n❯ ${WAKE}`] });
+	await h.sup.tick();
+	wakeState(h).wake.enterOnly = true;
+	await h.sup.wakeTick();
+	assert.equal(h.keys()[0], "Enter"); // limited でも -l なしの Enter が通る（verifyWake が足す分は後続）
+	assert.ok(!h.keys().some((k) => k.startsWith("-l")));
+});
+
+test("上限の起こし: clearLimit で積んだ limit の要求が消える", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE] });
+	await h.sup.tick();
+	h.advance(30 * MIN);
+	wakeState(h).refreshing = true; // 送れないので limit の要求が積まれたまま残る
+	await h.sup.tick();
+	assert.deepEqual(wakeState(h).wake.reasons, ["limit"]);
+	h.state.live = false; // channel 切断で解除
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+	assert.deepEqual(wakeState(h).wake.reasons, []);
+});
+
+test("上限の起こし: refreshing / promptPending の間は送らず回数も進まず、解消後に 1 回送る", async () => {
+	for (const key of ["refreshing", "promptPending"] as const) {
+		const h = wakeSetup({ panes: [LIMIT_WAKE] });
+		await h.sup.tick();
+		h.advance(30 * MIN);
+		wakeState(h)[key] = true;
+		await h.sup.tick();
+		await h.sup.tick();
+		assert.deepEqual(h.keys(), [], key);
+		assert.equal(wakeState(h).limitAttempts, 0);
+		wakeState(h)[key] = false;
+		h.advance(MIN);
+		await h.sup.tick();
+		assert.equal(h.keys().length, 2, key);
+		assert.equal(wakeState(h).limitAttempts, 1);
+	}
+});
+
+test("上限の起こし: idle でない・入力欄が空でないときは送らず回数も進まない", async () => {
+	const typing = wakeSetup({ panes: [LIMIT_WAKE] });
+	await typing.sup.tick();
+	typing.state.panes = ["Claude usage limit reached\n❯ 入力途中"];
+	typing.state.i = 0;
+	typing.advance(30 * MIN);
+	await typing.sup.tick();
+	assert.deepEqual(typing.keys(), []);
+	assert.equal(wakeState(typing).limitAttempts, 0);
+	const busy = wakeSetup({ panes: [LIMIT_WAKE], status: "busy" });
+	await busy.sup.tick();
+	busy.advance(30 * MIN);
+	await busy.sup.tick();
+	assert.deepEqual(busy.keys(), []);
+	assert.equal(wakeState(busy).limitAttempts, 0);
+});
+
+test("上限の起こし: wakeMinIntervalMs（60 秒）内の連続した送信は間引かれる", async () => {
+	const h = wakeSetup({ panes: [LIMIT_WAKE], limit: { wakeIntervalMinutes: 0.5 } }); // 30 秒
+	await h.sup.tick();
+	h.advance(30_000);
+	await h.sup.tick();
+	assert.equal(h.keys().length, 2);
+	h.advance(59_000); // 次の待ちは 60 秒なので 89 秒後まで要求されない
+	await h.sup.tick();
+	assert.equal(h.keys().length, 2);
+});
+
+test("上限の起こし: 上限中は maybeRefresh が /clear を送らず、解除後は従来どおり送る", async () => {
+	const base = refreshSetup({ worker: true });
+	await base.sup.tick();
+	base.advance();
+	await base.sup.tick();
+	assert.deepEqual(base.typed()[0], "/clear");
+	const h = refreshSetup({ worker: true, pane: LIMIT_WAKE });
+	await h.sup.tick();
+	h.advance();
+	await h.sup.tick();
+	assert.deepEqual(h.typed(), []);
+});
+
+test("上限の起こし: N worker が同じ tick であきらめても通知は 1 回。遅れてあきらめても増えず、新しいエピソードでは再び 1 回", async () => {
+	const h = limitSetup(["a", "b", "c"], { wake: true });
+	const slots = h.sup as unknown as {
+		state: Map<string, { limitAttempts: number; limitLastWakeAt: number | null }>;
+	};
+	const giveUp = (n: string) => {
+		const s = slots.state.get(n);
+		if (s) {
+			s.limitAttempts = 5;
+			s.limitLastWakeAt = -1_000_000;
+		}
+	};
+	h.panes.set("a", LIMIT_PANE);
+	h.panes.set("b", LIMIT_PANE);
+	await h.sup.tick();
+	giveUp("a");
+	giveUp("b");
+	await h.sup.tick();
+	await h.sup.tick();
+	assert.equal(h.gaveUps.length, 1);
+	assert.deepEqual(h.gaveUps[0]?.names.sort(), ["a", "b"]);
+	h.panes.set("c", LIMIT_PANE);
+	await h.sup.tick();
+	giveUp("c");
+	await h.sup.tick();
+	assert.equal(h.gaveUps.length, 1);
+	assert.equal(h.limits.length, 1);
+	// 起こした後（attempts>0）は作業中の画面でだけ不一致と数える
+	for (const n of ["a", "b", "c"]) h.panes.set(n, "✻ 作業中 (esc to interrupt)\n");
+	await h.sup.tick();
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	giveUp("a");
+	await h.sup.tick();
+	assert.equal(h.gaveUps.length, 2);
+	assert.equal(h.limits.length, 2);
 });

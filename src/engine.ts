@@ -133,6 +133,11 @@ export function limitNoticeText(entries: { name: string; resetText: string | nul
 	return `⚠️ 使用量の上限で止まっている worker があります\n${list}\n手順: 別アカウントに切り替えたら、\`dle restart --limited\`（上限中のみ）か \`dle restart --all [--except 名前]\` で起動し直してください。`;
 }
 
+/** 上限が続いて自動の起こしをあきらめたことを窓口に知らせる文面。復帰時刻は載せない */
+export function limitGaveUpText(e: { names: string[]; attempts: number }): string {
+	return `⚠️ 使用量の上限が続いているため、worker ${e.names.join(", ")} の自動の起こしを ${e.attempts} 回で止めました。\n手順: 別アカウントに切り替えたら、\`dle restart --limited\`（上限中のみ）か \`dle restart --all [--except 名前]\` で起動し直してください。`;
+}
+
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
 
 export interface EngineOptions {
@@ -548,6 +553,11 @@ export class Engine {
 	/** 上限エピソードの開始時に1通だけ窓口へ。A-番号は付けない（台帳の attention を増やさない） */
 	limitNotice(entries: { name: string; resetText: string | null }[]) {
 		this.notifyOps("窓口", limitNoticeText(entries));
+	}
+
+	/** 自動の起こしをあきらめた通知。エピソードにつき1回（supervisor が保証する） */
+	limitGaveUpNotice(e: { names: string[]; attempts: number }) {
+		this.notifyOps("窓口", limitGaveUpText(e));
 	}
 
 	// --- ツール（窓口・worker・CLI から） -----------------------------------------------------

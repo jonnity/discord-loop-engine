@@ -100,3 +100,19 @@ test("worker.limit の不正な正規表現は設定エラーにする", () => {
 	assert.throws(() => load({ worker: { limit: { patterns: ["("] } } }), /worker\.limit\.patterns/);
 	assert.throws(() => load({ worker: { limit: { resetPatterns: "x" } } }), /resetPatterns/);
 });
+
+test("worker.limit.wakeIntervalMinutes / wakeMaxAttempts は既定 30・5、上書きでき、不正値は既定に戻り、0 回は許可する", () => {
+	const d = load({}).worker.limit;
+	assert.equal(d?.wakeIntervalMinutes, 30);
+	assert.equal(d?.wakeMaxAttempts, 5);
+	const o = load({ worker: { limit: { wakeIntervalMinutes: 10.5, wakeMaxAttempts: 3 } } }).worker.limit;
+	assert.equal(o?.wakeIntervalMinutes, 10.5);
+	assert.equal(o?.wakeMaxAttempts, 3);
+	assert.equal(load({ worker: { limit: { wakeMaxAttempts: 0 } } }).worker.limit?.wakeMaxAttempts, 0);
+	for (const bad of [0, -1, "x", null, Number.NaN]) {
+		assert.equal(load({ worker: { limit: { wakeIntervalMinutes: bad } } }).worker.limit?.wakeIntervalMinutes, 30);
+	}
+	for (const bad of [-1, 1.5, "x", null]) {
+		assert.equal(load({ worker: { limit: { wakeMaxAttempts: bad } } }).worker.limit?.wakeMaxAttempts, 5);
+	}
+});

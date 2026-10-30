@@ -135,6 +135,7 @@ async function cmdStart() {
 		onWakeSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
 		limit: config.worker.limit,
 		onLimit: (entries) => engine?.limitNotice(entries),
+		onLimitGaveUp: (e) => engine?.limitGaveUpNotice(e),
 		log,
 	});
 	engine = new Engine({ config, rest, ledger, supervisor, log, gatewayFactory: (h) => new Gateway({ token, ...h }) });
