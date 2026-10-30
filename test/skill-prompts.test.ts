@@ -1226,3 +1226,46 @@ test("#31 照合文は新項目を列挙せず、実装依頼と各差し戻し�
 	const implementer = readFileSync(new URL("../agents/harness-implementer.md", import.meta.url), "utf8");
 	assert.match(implementer, /prompt-impl-\{n\}\.md[\s\S]*prompt-spec-\{n\}\.md[\s\S]*実装依頼の項目/);
 });
+
+test("#28: 待ち A-番号の台帳確認は attention_list の includeResolved を読み、merge は既存手順に任せる", () => {
+	const loop = section(loop15, "待ち A-番号の台帳確認", "### 2a.");
+	for (const word of [
+		"attention_list",
+		"includeResolved: true",
+		"project:",
+		"issue:",
+		"resolvedAt",
+		"answer",
+		"UTC",
+		"harness:gate phase=interview",
+		"<!-- harness:note",
+		"あなた待ち",
+		"`harness-inbox` と Phase 6",
+	])
+		assert.ok(loop.includes(word), word);
+	for (const gone of ["task_get", "tasks_list", "80文字", "聞き直", "harness-phase {n} interview", "回答:"])
+		assert.ok(!loop.includes(gone), gone);
+	assert.ok(!loop.includes("`harness-merge`") || loop.includes("`harness-merge` は呼ばない"));
+	assert.ok(loop.indexOf("処理済みの確認が先") < loop.indexOf("未処理なら"));
+	assert.ok(loop15.includes("台帳確認で処理済みなので二重に作らない"));
+	const pre = section(skill, "変更前の必須確認", "## Phase 1:");
+	for (const word of [
+		"待っているときだけ",
+		"includeResolved: true",
+		"resolvedAt",
+		"push",
+		"harness-phase",
+		"Phase 6",
+		"Phase 5-4",
+		"stale-notify",
+		"missing-notify",
+		"`harness-merge` は呼ばない",
+	])
+		assert.ok(pre.includes(word), word);
+	for (const gone of ["task_get", "80文字", "聞き直"]) assert.ok(!pre.includes(gone), gone);
+});
+
+test("issue-loop: 遅れて届いた blocked の attention は台帳確認で二重実行しない", () => {
+	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+	assert.match(loop, /meta\.kind=blocked`? → 書かれた指示に従って再開する（遅れて届いたとき.*二重に実行しない）/);
+});

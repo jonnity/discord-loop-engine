@@ -110,8 +110,17 @@ export const TOOLS: ToolDef[] = [
 	},
 	{
 		name: "attention_list",
-		description: "あなた待ち（A-番号）の一覧",
-		inputSchema: { additionalProperties: false, type: "object", properties: {} },
+		description:
+			"あなた待ち（A-番号）の一覧。project・issue で絞れる。includeResolved を true にすると回答済みの A も返し、回答の全文（answer）と回答時刻（resolvedAt）が付く",
+		inputSchema: {
+			additionalProperties: false,
+			type: "object",
+			properties: {
+				project: s("このプロジェクトの A だけ"),
+				issue: s("この Issue 番号の A だけ（#なしの数字）"),
+				includeResolved: { type: "boolean", description: "回答済みの A も含める（既定は開いているものだけ）" },
+			},
+		},
 		roles: ["concierge", "worker"],
 	},
 	{
