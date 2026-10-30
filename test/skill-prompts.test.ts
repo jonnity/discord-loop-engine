@@ -1147,3 +1147,82 @@ test("issue-loop の起動手順は tasks_list の next から続きを再開す
 	assert.match(boot, /次にやること/);
 	assert.match(boot, /GitHub を優先/);
 });
+
+test("#31 設計: 冒頭に追跡ファイル不変更の1行、該当時の項目に D3〜D7 が「実装依頼の項目」より前にある", async () => {
+	const r = await designRequest({ stub: true, profile: { gate: sampleGate } });
+	assert.equal(r.code, 0, r.stderr);
+	const head = section(r.prompt, ".harness/issue-3.md", "設計品質チェックリスト");
+	assert.match(head, /リポジトリの追跡ファイルは変更しない[\s\S]*必ず/);
+	assert.ok(
+		head.indexOf("リポジトリの追跡ファイルは変更しない") < head.indexOf("先に"),
+		"追跡ファイル不変更の行は「先に」より前（冒頭）にある",
+	);
+	const conditional = section(r.prompt, "該当するときだけの項目", "実装依頼の項目（");
+	for (const pattern of [
+		/読みが割れる[\s\S]*決定せず[\s\S]*未確定事項/,
+		/A-番号[\s\S]*回答待ち[\s\S]*\.harness\/[\s\S]*リンク/,
+		/scripts[\s\S]*import[\s\S]*devDependencies/,
+		/変更前の取得[\s\S]*変更後の比較[\s\S]*掃除[\s\S]*追跡外/,
+		/丸め規則[\s\S]*OS 固有/,
+	])
+		assert.match(conditional, pattern);
+	assert.equal(r.prompt.split("\n").filter((l) => l.includes("解釈を含む具体化")).length, 1);
+});
+
+test("#31 実装・差し戻しの節は固定の見出しで、項目と上限行数を持つ", async () => {
+	const r = await designRequest({ stub: true, profile: { gate: sampleGate } });
+	const impl = section(
+		r.prompt,
+		"実装依頼の項目（該当するときだけ。非該当なら理由を実装完了サマリに書く）:",
+		"差し戻し時の項目（",
+	);
+	for (const pattern of [
+		/OFF の全経路[\s\S]*origin\/main/,
+		/ID[\s\S]*列挙[\s\S]*fixture[\s\S]*結合テスト/,
+		/重なりを実測[\s\S]*ready 以外/,
+		/Sonar[\s\S]*await のない async[\s\S]*三項演算子/,
+		/既存コメントを消さない[\s\S]*英語[\s\S]*フォーマッタ/,
+	])
+		assert.match(impl, pattern);
+	const back = section(r.prompt, "差し戻し時の項目（再依頼の指示に含める）:", "プロジェクトの gate");
+	assert.match(back, /同じ節の要求全体[\s\S]*横展開/);
+	assert.match(back, /未確定[\s\S]*設計書の該当節を引用/);
+	for (const s of [impl, back]) assert.ok(s.trim().split("\n").length <= 15);
+});
+
+test("#31 照合文は新項目を列挙せず、実装依頼と各差し戻し箇所と代打が参照する", async () => {
+	const review = `${section(skill, "## Phase 3", "## Phase 4")}${section(skill, "### 5-1", "### 5-2")}`;
+	for (const w of ["丸め規則", "OFF の全経路", "横展開", "時点依存"]) assert.ok(!review.includes(w), w);
+	assert.match(review, /prompt-spec-\{n\}\.md[\s\S]*全項目/);
+	const ref = /prompt-spec-\{n\}\.md`? の「差し戻し時の項目」/;
+	for (const [b, e] of [
+		["## Phase 3", "## Phase 4"],
+		["### 5-1", "### 5-2"],
+		["### 5-2", "### 5-3"],
+		["gate の終了1は", "PR を作ったら CI"],
+		["### NG（`merge-ng`", "## Codex 起動を blocked"],
+	] as const)
+		assert.match(section(skill, b, e), ref, b);
+	assert.match(section(loopSkill, "3. `REAL` →", "4. **同じ PR"), ref);
+
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-prompt31-"));
+	mkdirSync(path.join(dir, ".harness"));
+	try {
+		const request = section(skill, "# IMPLEMENTATION_REQUEST_BEGIN", "# IMPLEMENTATION_REQUEST_END");
+		const r = await bash(`harness-config() { echo demo; }\n${request.replaceAll("{n}", "3")}`, {
+			...process.env,
+			WT: dir,
+		});
+		assert.equal(r.code, 0, r.stderr);
+		assert.equal(r.stderr, "");
+		const prompt = readFileSync(path.join(dir, ".harness/prompt-impl-3.md"), "utf8");
+		assert.match(prompt, /\.harness\/prompt-spec-3\.md の「実装依頼の項目」/);
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+
+	const fallback = section(skill, "## フォールバック: Codex が使えない", "## やらないこと");
+	assert.ok(fallback.split("\n").some((l) => l.includes("prompt-impl-{n}.md") && l.includes("prompt-spec-{n}.md")));
+	const implementer = readFileSync(new URL("../agents/harness-implementer.md", import.meta.url), "utf8");
+	assert.match(implementer, /prompt-impl-\{n\}\.md[\s\S]*prompt-spec-\{n\}\.md[\s\S]*実装依頼の項目/);
+});

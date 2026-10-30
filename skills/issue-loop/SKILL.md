@@ -214,7 +214,7 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 2. `INFRA` → `gh run rerun <run-id>` を **1回だけ**。2回目も落ちたら REAL として扱う。
    **再トリガー目的の空コミットは積まない**（harness-guard が止める）
 3. `REAL` → サブエージェントに「根本原因と、Codex に渡す修正指示を1段落で」まとめさせ、
-   `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する
+   `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する（指示には `.harness/prompt-spec-{n}.md` の「差し戻し時の項目」を含める）
    （Claude はコードを直さない。再依頼も共通起動手順で起動を単独の Bash に分け、拒否されたら直ちに blocked）。直ったら `harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
    0なら push、1ならコード検査失敗として差し戻し、2なら設定を修正する。
    3なら環境不備なので push を止め、Codex へ再差し戻しせず、この失敗は REAL の回数に加算しない。

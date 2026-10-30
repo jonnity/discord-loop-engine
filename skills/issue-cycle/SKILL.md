@@ -230,6 +230,7 @@ harness-phase {n} designing --notify || exit 1
 
 cat > "$WT/.harness/prompt-spec-{n}.md" <<EOF
 .harness/issue-{n}.md の Issue と要件メモを読み、詳細設計書を .harness/spec/{n}.md に書いてください。
+リポジトリの追跡ファイルは変更しないこと（設計書は必ず保存する）。
 先に $(harness-config '.context | join(", ")' AGENTS.md) と .harness/notes.md を読むこと。
 含めるもの: 受け入れ条件の対応表・変更ファイル一覧・実装方針・型/データ構造・テスト方針・
 自動では確認できない点（humanChecks に該当するもの）・未確定事項。
@@ -277,6 +278,24 @@ cat >> "$WT/.harness/prompt-spec-{n}.md" <<'CHECKLIST'
   〔例: pnpm〕・パイプ）での異常系を設計する。子を直接終了する試験だけで代用しない。
 - はみ出し・表示崩れの修正では、対象のボタン名・要素を列挙し、各状態での viewport（幅・高さ）と
   確認方法・期待結果を対応付ける。
+- 仕様の読みが割れる点は決定せず、未確定事項に挙げる（解釈の明記だけで済ませない）。
+- docs に、A-番号・「回答待ち」などの時点依存の文言と、gitignore 対象（.harness/）へのリンクを書かない。
+- 依存の用途を書くときは、package.json の scripts と scripts/ 配下の import も確かめる（devDependencies だけで判断しない）。
+- 手順は、出力先と順序（変更前の取得→変更→変更後の比較→掃除）を一本の手順として書き、通しで実行可能かを見直す。
+  追跡外ファイル（基準画像・生成物）も差分の確認に含める。
+- 同じ値を2か所で数える設計は、丸め規則を揃えるテストを入れる。OS 固有の意味論に依る処理は、方式の選択肢と前提を書く。
+
+実装依頼の項目（該当するときだけ。非該当なら理由を実装完了サマリに書く）:
+- 設定フラグで挙動を分ける機能は、OFF の全経路が origin/main と同じことのテストを入れる。
+- ID を削除・無効化する機能は、参照する全ての場所を列挙して掃除する。TS と Rust など二重に検証する値は、
+  共通の fixture で揃える。両側で状態を持つ処理は、結合テストを必須にする。
+- 新しい UI は、近くの固定・浮動 UI との重なりを実測し、ready 以外の状態も描画テストする。
+- Sonar の代表ルール（await のない async・入れ子の三項演算子）を避ける。
+- 既存コメントを消さない・英語にしない・フォーマッタの整形を巻き込まない。
+
+差し戻し時の項目（再依頼の指示に含める）:
+- 指摘の行だけでなく、同じ節の要求全体と、同種の箇所の横展開を指示に含める。
+- 「未確定」と書く前に、設計書の該当節を引用させる。
 CHECKLIST
 cat >> "$WT/.harness/prompt-spec-{n}.md" <<'GATE_NOTE'
 
@@ -402,6 +421,7 @@ gate と同じ列・順序の検査、新規テストの探索/除外/呼び出�
   `harness-phase {n} implementing` → Phase 4
 - **NG** → `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストと gate を残した同じファイルを渡して
   `codex-spec-{n}` を共通起動手順（準備で `harness-codex stop` → 別 Bash で `harness-codex start`）で再起動し、spec を書き直させる（Claude は直さない）。
+  指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
   フォールバックにもこの同じ依頼ファイルのパスを渡す
 
 ## Phase 4: 実装（Codex）
@@ -420,6 +440,7 @@ cat > "$WT/.harness/prompt-impl-{n}.md" <<EOF
 $(harness-config '.demo.run') で pass させ、動画が $(harness-config '.demo.output') に 0 バイトでなく
 出ていることを確認してください。動画利用時は要件メモの開始状態・操作順・終了状態・含めないものを
 録画シナリオへ全て対応させ、独断で短縮しない。設計不足なら差し戻してください。
+.harness/prompt-spec-{n}.md の「実装依頼の項目」を読み、該当するものを満たすこと。非該当は理由を完了サマリに書くこと。
 合意項目・録画時headのfull SHA・動画パス・未実装制限の対応をサマリに書いてください。
 Issue と無関係な差分は元の内容に戻し、戻せなければサマリで worker へ報告してください。
 Codex は git add/commit/push/checkout/stash 等の git 操作をしないこと。
@@ -460,13 +481,13 @@ gate の列・順序と終了値、新規テストの探索/除外/呼び出し�
 停止計画が impl サマリへ引き継がれたかも確認する。未実施は未確認として残す。
 この時点では実 CI ログ・修正回数を要求せず、その判定は PR 作成後の 5-3 に置く。
 
-- **NG** → 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動（軽微でも Claude は直さない）
+- **NG** → 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動（軽微でも Claude は直さない）。指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
 
 ### 5-2. 実動作の確認（UI 変更のとき）
 
 `demo.output` の動画・スクショが存在し 0 バイトでないことを確認し、**サブエージェントに**受け入れ条件および要件メモの開始状態・操作順・終了状態・含めないものと
 突き合わせさせて ✅/❌ を判定する。送る動画は**実アプリを実際に操作した録画**に限る（DOM 差し込み・
-モック・加工で「それらしい」証跡を作らない）。途中操作欠落・範囲外の無断追加も ❌ とし、Codex に差し戻して修正/再録画を依頼する。
+モック・加工で「それらしい」証跡を作らない）。途中操作欠落・範囲外の無断追加も ❌ とし、Codex に差し戻して修正/再録画を依頼する。指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
 サマリの録画時 full SHA と PR の現 head を照合し、**動画を撮ったhead＝現head** を確かめる。
 違う/撮影head不明なら撮り直す。5-3 のコミット後、5-4 直前と完成後にも完成markerの full SHA と照合する。
 ファイルの SHA-256 一致だけでは撮影headを証明できない（README の H3）。
@@ -492,7 +513,7 @@ gh pr create --base "$(harness-config '.baseBranch' main)" --head "$(harness-con
   --title "<種別>: <要約> (#{n})" --body-file /tmp/harness-pr-{n}.md   # 本文に必ず "closes #{n}"
 ```
 
-gate の終了1は Codex にコード修正を差し戻し、終了2は設定を修正する。終了3は環境不備として
+gate の終了1は Codex にコード修正を差し戻し（指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。）、終了2は設定を修正する。終了3は環境不備として
 push/PR 作成を止める。ランナー停止・権限不足をコード修正へ差し戻さず、REAL の回数にも数えない。
 自動解消できなければ `harness-phase {n} blocked --comment-file ...` で項目名・失敗理由・必要な対応を通知し、
 解消後に gate 全体を再実行する。
@@ -752,7 +773,8 @@ worktree・tmux ウィンドウの片付けだけを行う。
 1. PR は閉じない。worktree も残す
 2. `learning_add`（tag: `user-ng`）で記録する（自己改善の材料）。engine が無い環境では `.harness/failure-log.jsonl` に1行追記:
    `jq -nc --arg ts "$(date -u +%FT%TZ)" --argjson issue {n} --arg tag user-ng --arg summary "..." --arg detail "..." '{ts:$ts,issue:$issue,tag:$tag,summary:$summary,detail:$detail,promoted:false}' >> "$(harness-config --root)/.harness/failure-log.jsonl"`
-3. 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動し、`harness-phase {n} impl-review` で Phase 5 へ戻す
+3. 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動し、`harness-phase {n} impl-review` で Phase 5 へ戻す。
+   指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
 
 ## Codex 起動を blocked にする
 
@@ -854,7 +876,8 @@ exit 10 一律ではなく reason と監視結果で、次の場合だけ「Code
    `harness-implementer` に「続きから」と渡す
 3. 設計・実装を `harness-implementer` サブエージェント（このプラグインの agent）に委譲する。
    渡すのは Issue 番号・`$WT`・入出力ファイルのパスだけ。
-   設計時は生成済みの `$WT/.harness/prompt-spec-{n}.md` も必ず渡し、同じ依頼とチェックリストに従わせる
+   設計時は生成済みの `$WT/.harness/prompt-spec-{n}.md` も必ず渡し、同じ依頼とチェックリストに従わせる。
+   実装時は `$WT/.harness/prompt-impl-{n}.md` と `$WT/.harness/prompt-spec-{n}.md` の両方を渡す
 4. レビューは引き続き別のサブエージェントで行う（書いた agent に自己採点させない）
 5. 確認ゲート・承認依頼・マージ条件は一切緩めない。`git add / commit / push` は implementer にも任せない
 6. 次の Phase を始める前に `harness-codex-status check` を見て、0 ならその Phase から Codex に戻す
