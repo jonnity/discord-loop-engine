@@ -82,6 +82,7 @@ A-番号は engine が worker の「人の判断が要る」報告に付けた�
    「（Discord: <meta.user>）」を付ける。worker が止まっていても起動後に届く
 3. マージ承認の「OK」は、engine が配送した meta.attention を worker が
    Issue の A なら `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` に渡す。
+   A の meta.pr が正整数で、その PR の head が branchPrefix+{meta.issue}（既定 `fix/issue-{meta.issue}`。prefix は `harness-config '.branchPrefix' fix/issue-`）でない（`gh pr view {meta.pr} --json headRefName -q .headRefName` で確認）ときだけ `harness-merge {meta.issue} --pr {meta.pr} --chat-approval "<本文>" --attention "{meta.attention}"` を使う。
    meta.attention 欠落は推測せず、旧 A 拒否後に最新 A へ付け替えない。あなたはマージせず A も補完しない
 4. 「A-4 は保留」「あとで」のような返事は、`task_update` で next に残し、回答にはしない
 5. reply で「A-4 を worker に渡しました」と返す

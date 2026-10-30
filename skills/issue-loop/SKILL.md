@@ -261,6 +261,14 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
       A は推測せず、非0なら PR inbox と待ち理由を窓口へ返す。Issue の NG 手順へ流さない。
     - `meta.kind=merge` で meta.issue が非空 → 明示の NG・修正指示なら Phase 6 NG（issue-cycle の ### NG）へ進む。
       それ以外は対象 WT で `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` を試す即時経路を維持する。
+      ただし A の meta.pr が正整数で、`gh pr view {meta.pr} --json headRefName -q .headRefName` が branchPrefix+{meta.issue}（`harness-config '.branchPrefix' fix/issue-` で得る。既定 `fix/issue-{meta.issue}`）でないときだけ
+      `harness-merge {meta.issue} --pr {meta.pr} --chat-approval "<本文>" --attention "{meta.attention}"` を使う
+      （head が branchPrefix+番号でない既存 PR は `--pr` なしでは見つからない（pr-unavailable 等））。head が branchPrefix+{meta.issue} の PR は従来どおり `--pr` なし
+      （`harness-phase` は notify に常に `--pr` を渡し、ラベルも done 以外では残すため、すべてに付けると残ったラベルが通常の承認を止める）。
+      `--pr` ではラベルが付いている限りすべての経路で拒否される（request-inactive。ラベルを外し、OK コメント / Approve、または PR に一致するチャット回答を使う）。
+      ラベルは `--pr` なしの経路で新しい GitHub の NG を隠しうる（既存の限界）ため、`--pr` で扱う PR は worker が PR 上の NG を目で確かめてからマージする。
+      tick の `harness-inbox` は branchPrefix+番号の PR しか見ないため、`--pr` で扱う PR の merge-ok・NG・stale は tick に出ない。チャットの即時経路か明示の指示で扱う。
+      窓口が「PR が GitHub 上で承認された」と明示して伝えてきたときは、対象 WT で `harness-merge {meta.issue} --pr <PR番号>` を実行する（承認の検証はマージ側が行い、worker は承認を判断しない）。
       台帳の保存済み回答・最新完成marker・現 head・scope を再検証し、引数の引用だけでは承認しない。meta.attention 欠落は推測しない。
       非0なら stderr の構造化診断を issue-cycle の CHAT_REJECTION_BEGIN〜CHAT_REJECTION_END の共通手順へ渡す。
       pending/復旧は対象 phase の終了値で再分類し、同じ A・reason の通知は1回。CI/mergeable/hook は Issue の待ち理由だけを残す。
