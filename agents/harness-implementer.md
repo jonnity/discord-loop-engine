@@ -24,6 +24,7 @@ model: sonnet
 
 ## 実装を頼まれたとき
 
+- 渡された `.harness/prompt-impl-{n}.md` と `.harness/prompt-spec-{n}.md` があれば読み、「実装依頼の項目」のうち該当するものを満たす（非該当は理由をサマリに書く）
 - `.harness/spec/{n}.md` に従う。新しい振る舞いはテストを先に書く（RED → GREEN → REFACTOR）
 - `harness.json` の `gate` のコマンドを全部通してから終える（赤のまま返さない）
 - Issue と無関係なファイルの差分（フォーマッタの巻き込み等）は `git checkout HEAD -- <file>` で戻す
