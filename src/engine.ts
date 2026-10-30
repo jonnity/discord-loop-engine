@@ -112,6 +112,27 @@ function validateHooks(hooks: unknown) {
 	}
 }
 
+/** restart の引数解釈。name / limited / all はちょうど1つ、except は limited / all のときだけ */
+export function restartMode(
+	a: Record<string, unknown>,
+): { kind: "one"; name: string } | { kind: "limited" | "all"; except: string[] } {
+	const name = str(a.name);
+	const chosen = [name !== "", a.limited === true, a.all === true].filter(Boolean).length;
+	if (chosen !== 1) throw new Error("restart: name / limited / all のどれか1つを指定してください");
+	const except = Array.isArray(a.except) ? (a.except as string[]) : [];
+	if (name) {
+		if (a.except !== undefined) throw new Error("restart: except は limited / all のときだけ使えます");
+		return { kind: "one", name };
+	}
+	return { kind: a.all === true ? "all" : "limited", except };
+}
+
+/** 上限で止まった worker を窓口に知らせる文面。表示専用で、send-keys には使わない */
+export function limitNoticeText(entries: { name: string; resetText: string | null }[]): string {
+	const list = entries.map((e) => `- ${e.name}（復帰: ${e.resetText ?? "画面で確認"}）`).join("\n");
+	return `⚠️ 使用量の上限で止まっている worker があります\n${list}\n手順: 別アカウントに切り替えたら、\`dle restart --limited\`（上限中のみ）か \`dle restart --all [--except 名前]\` で起動し直してください。`;
+}
+
 const str = (v: unknown): string => (typeof v === "string" ? v : typeof v === "number" ? String(v) : "");
 
 export interface EngineOptions {
@@ -524,6 +545,11 @@ export class Engine {
 		this.ledger.journal(`[${name}] ${text}`);
 	}
 
+	/** 上限エピソードの開始時に1通だけ窓口へ。A-番号は付けない（台帳の attention を増やさない） */
+	limitNotice(entries: { name: string; resetText: string | null }[]) {
+		this.notifyOps("窓口", limitNoticeText(entries));
+	}
+
 	// --- ツール（窓口・worker・CLI から） -----------------------------------------------------
 	async call(who: Pick<Session, "role" | "name">, name: string, raw?: unknown): Promise<unknown> {
 		const a = validateToolArguments(name, raw);
@@ -764,8 +790,13 @@ export class Engine {
 				return this.notify(who, a);
 			case "restart": {
 				if (!isCli) throw new Error("restart は dle CLI から使います");
-				await this.supervisor?.restart(str(a.name));
-				return { ok: true };
+				const mode = restartMode(a);
+				if (mode.kind === "one") {
+					await this.supervisor?.restart(mode.name);
+					return { ok: true };
+				}
+				if (!this.supervisor) throw new Error("supervisor が動いていません");
+				return { ok: true, ...(await this.supervisor.restartMany(mode.kind, mode.except)) };
 			}
 			default:
 				throw new Error(`unknown tool: ${name}`);

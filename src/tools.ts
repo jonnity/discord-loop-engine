@@ -351,8 +351,18 @@ export const TOOLS: ToolDef[] = [
 	},
 	{
 		name: "restart",
-		description: "CLI からセッションを再起動する",
-		inputSchema: { type: "object", additionalProperties: false, properties: { name: s("セッション名") } },
+		description:
+			"CLI からセッションを再起動する。name / limited / all のどれか1つ。except は limited / all のときだけ（除外する名前）",
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				name: s("セッション名"),
+				limited: { type: "boolean", description: "使用量の上限で止まっている worker だけ" },
+				all: { type: "boolean", description: "窓口と全 worker" },
+				except: { type: "array", items: { type: "string" }, description: "除外するセッション名" },
+			},
+		},
 		roles: ["cli"],
 	},
 ];

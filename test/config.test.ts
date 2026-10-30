@@ -83,3 +83,20 @@ test("worker.wake.enabled は既定で true、false で上書きできる", () =
 	assert.equal(load({ worker: { wake: { enabled: false } } }).worker.wake?.enabled, false);
 	assert.equal(load({ worker: { wake: { enabled: "no" } } }).worker.wake?.enabled, true);
 });
+
+test("worker.limit は既定で有効・tailLines 12、項目単位で上書きでき、旧設定も読める", () => {
+	const d = load({}).worker.limit;
+	assert.equal(d?.enabled, true);
+	assert.equal(d?.tailLines, 12);
+	assert.ok(d && d.patterns.length > 0);
+	const o = load({ worker: { limit: { enabled: false, tailLines: 5, patterns: ["^x"] } } }).worker.limit;
+	assert.equal(o?.enabled, false);
+	assert.equal(o?.tailLines, 5);
+	assert.deepEqual(o?.patterns, ["^x"]);
+	assert.deepEqual(o?.resetPatterns, d?.resetPatterns);
+});
+
+test("worker.limit の不正な正規表現は設定エラーにする", () => {
+	assert.throws(() => load({ worker: { limit: { patterns: ["("] } } }), /worker\.limit\.patterns/);
+	assert.throws(() => load({ worker: { limit: { resetPatterns: "x" } } }), /resetPatterns/);
+});

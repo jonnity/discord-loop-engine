@@ -41,7 +41,7 @@ const cases: Record<string, Record<string, string>> = {
 	rules_set: { content: "S!" },
 	retro_done: { summary: "S!" },
 	notify: { project: "S", event: "S", title: "S", url: "S", issue: "S", pr: "S", body: "S", file: "S", phase: "S" },
-	restart: { name: "S" },
+	restart: { name: "S", limited: "B", all: "B", except: "S[]" },
 };
 const valid: Record<string, unknown> = { S: "値", B: false, "O|S": { gate: [] }, "S[]": [], "N[]": [] };
 const invalid: Record<string, unknown[]> = {

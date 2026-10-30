@@ -1140,6 +1140,14 @@ test("issue-loop: 心拍は空キューでも張り、engine 配下では削除�
 	);
 });
 
+test("issue-loop の起動手順は tasks_list の next から続きを再開する指示を含む", () => {
+	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+	const boot = section(loop, "## 起動時", "## 毎 tick");
+	assert.match(boot, /tasks_list/);
+	assert.match(boot, /次にやること/);
+	assert.match(boot, /GitHub を優先/);
+});
+
 test("#31 設計: 冒頭に追跡ファイル不変更の1行、該当時の項目に D3〜D7 が「実装依頼の項目」より前にある", async () => {
 	const r = await designRequest({ stub: true, profile: { gate: sampleGate } });
 	assert.equal(r.code, 0, r.stderr);

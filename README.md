@@ -402,6 +402,7 @@ engine のログに残すだけで、あとから付け直しません。依頼�
 | `dle projects [--json]` | 登録済みのリポジトリ（モード・接続中か・設定の確認待ちか） |
 | `dle tasks [--all]` / `dle attention` / `dle board` | 台帳を見る |
 | `dle restart <concierge またはプロジェクト名>` | セッションを起動し直す |
+| `dle restart --limited` / `dle restart --all [--except 名前]...` | 使用量の上限で止まった worker だけ／窓口を含む全員を起動し直す（`--except` は複数指定可。作業の入力中の worker は見送って一覧に出す） |
 | `dle mode <名前> harness\|native [--command <コマンド>]` | 進め方を切り替える |
 | `dle doctor` | 必要なものが揃っているか |
 
@@ -416,6 +417,7 @@ engine のログに残すだけで、あとから付け直しません。依頼�
 | `worker.refresh` | 有効 / 100k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
+| `worker.limit` | `enabled: true` / `tailLines: 12` | `enabled`・`patterns`・`resetPatterns`・`tailLines`。使用量の上限の表示を画面から探す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
@@ -440,6 +442,24 @@ worker が idle（status idle・画面が静止して入力欄が空・直前の
 入力欄に `/discord-loop-engine:issue-loop` を送る。作業中・確認画面・入力途中・判定できないときは送らず、次の30秒 tick で再試行する。
 送る文字列はこの定数だけで、回答文や Issue の中身は入力しない。マージは従来どおり承認記録がなければ行われない。
 `worker.wake.enabled: false` で無効にできる。
+
+### 使用量の上限で止まったとき
+
+engine は30秒ごとに各 worker の画面の末尾（`worker.limit.tailLines` 行）を読み、`worker.limit.patterns` に合う行があれば
+「上限で止まっている」とみなして、窓口に1通だけ知らせる（一覧・画面から読めた復帰時刻・手順）。通知は上限の
+エピソードごとに1回で、誰かが上限中のうちに別の worker が加わっても再通知しない。全員が解除されるとエピソードが終わる。
+復帰時刻の表示は画面の文字列のままで、自動で起こし直したり再起動したりはしない（wake / refresh の挙動も変えない）。
+
+1. 別のアカウントに切り替える
+2. `dle restart --limited`（上限中の worker だけ）か `dle restart --all [--except 名前]`（窓口を含む全員。除外できる）
+3. 再起動した harness の worker は、`issue-loop` が `tasks_list` の `次にやること` を読んで続きから再開する
+
+> **未確認（実機で確かめて、この欄を結果に書き換える）**
+> - 上限時の実際の画面の文言。既定の `patterns` / `resetPatterns` は暫定で、文言が違うだけなら設定で差し替える（下の字下げ・`⎿` の場合は除く）
+>   （採取: `tmux capture-pane -p -t <セッション>:dle-<名前> | tail -30`。アカウント名などは伏せる）
+> - 上限の行が `⎿` の下や字下げされた位置に出る場合は、`patterns` を変えても検出されない（`src/limit.ts` の除外規則を直す必要がある）
+> - `dle restart` した新しい窓が、切り替えた新アカウントを拾うか／`/login` が要るか。tmux サーバーが最初の
+>   セッションの環境を保持するため、古い環境のままになる可能性もある。切り替え後に新しい窓で `/status` を確認する
 
 アップデート後は worker の自動整理が既定で有効になる。整理の理由・文脈量、失敗、文脈量不明による
 見送りは journal に残る。A-番号とタスクは台帳に保持し、整理中のメッセージは outbox に保留する。

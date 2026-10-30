@@ -9,7 +9,8 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { type RefreshResult, type SessionTarget, Supervisor, shq } from "../src/supervisor.ts";
+import type { WorkerLimit } from "../src/limit.ts";
+import { type LimitedEntry, type RefreshResult, type SessionTarget, Supervisor, shq } from "../src/supervisor.ts";
 
 function setup(opts: { windows?: string[] | null; live?: Set<string>; pane?: string } = {}) {
 	let now = 0;
@@ -907,4 +908,212 @@ test("起こし: 送る文字列は定数のみで、reason や initialPrompt �
 	await h.sup.wakeTick();
 	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
 	assert.ok(!h.calls.flat().some((a) => a.includes("evil") || a.includes("other-prompt")));
+});
+
+// --- 使用量の上限（検出・エピソード・一括再起動） ---
+const LIMIT_PANE = "作業\n\nClaude usage limit reached. Your limit will reset at 3pm\n";
+
+function limitSetup(names: string[], extra: { limit?: WorkerLimit } = {}) {
+	const panes = new Map<string, string>(names.map((n) => [n, ""]));
+	const calls: string[][] = [];
+	const limits: LimitedEntry[][] = [];
+	const live = new Set(names);
+	let targets: SessionTarget[] = names.map((name) => ({
+		name,
+		cwd: `/w/${name}`,
+		command: "claude",
+		initialPrompt: "",
+	}));
+	const captureFails = new Set<string>();
+	const sup = new Supervisor({
+		tmuxSession: "dle",
+		targets: () => targets,
+		tmux: async (args) => {
+			calls.push(args);
+			const win = (args[args.indexOf("-t") + 1] ?? "").split(":dle-")[1] ?? "";
+			if (args[0] === "capture-pane")
+				return captureFails.has(win) ? { ok: false, stdout: "" } : { ok: true, stdout: panes.get(win) ?? "" };
+			if (args[0] === "list-windows") return { ok: true, stdout: names.map((n) => `dle-${n}`).join("\n") };
+			return { ok: true, stdout: "" };
+		},
+		isLive: (n) => live.has(n),
+		notify: () => {},
+		now: () => 0,
+		onLimit: (e) => limits.push(e),
+		...extra,
+	});
+	return {
+		sup,
+		panes,
+		calls,
+		limits,
+		live,
+		captureFails,
+		setTargets: (f: (t: SessionTarget[]) => SessionTarget[]) => {
+			targets = f(targets);
+		},
+	};
+}
+const kills = (calls: string[][]) => calls.filter((c) => c[0] === "kill-window").map((c) => c[2]);
+
+test("上限画面で onLimit は1回だけ呼ばれ、同じ画面の次の tick では呼ばれない", async () => {
+	const h = limitSetup(["a"]);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	await h.sup.tick();
+	assert.equal(h.limits.length, 1);
+	assert.deepEqual(h.limits[0], [{ name: "a", since: 0, resetText: "3pm" }]);
+	assert.deepEqual(h.sup.limitedNames(), ["a"]);
+});
+
+test("同じ tick で2 worker が上限なら1回の呼び出しに2件入る", async () => {
+	const h = limitSetup(["a", "b"]);
+	h.panes.set("a", LIMIT_PANE);
+	h.panes.set("b", LIMIT_PANE);
+	await h.sup.tick();
+	assert.equal(h.limits.length, 1);
+	assert.deepEqual(h.limits[0]?.map((e) => e.name).sort(), ["a", "b"]);
+});
+
+test("別の tick に2台目が上限になっても再通知しないが、limitedNames には入る", async () => {
+	const h = limitSetup(["a", "b"]);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	h.panes.set("b", LIMIT_PANE);
+	await h.sup.tick();
+	assert.equal(h.limits.length, 1);
+	assert.deepEqual(h.sup.limitedNames().sort(), ["a", "b"]);
+});
+
+test("1回の不一致では解除されず、2回連続で解除。全員解除でエピソードが終わり再検出で再通知する", async () => {
+	const h = limitSetup(["a", "b"]);
+	h.panes.set("a", LIMIT_PANE);
+	h.panes.set("b", LIMIT_PANE);
+	await h.sup.tick();
+	h.panes.set("a", "");
+	await h.sup.tick(); // a: 不一致1回目
+	assert.deepEqual(h.sup.limitedNames().sort(), ["a", "b"]);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick(); // 一致が挟まり 0 に戻る
+	h.panes.set("a", "");
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames().sort(), ["a", "b"]);
+	await h.sup.tick(); // 2回連続で解除
+	assert.deepEqual(h.sup.limitedNames(), ["b"]);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick(); // b がまだ limited なので再通知しない
+	assert.equal(h.limits.length, 1);
+	h.panes.set("a", "");
+	h.panes.set("b", "");
+	await h.sup.tick();
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	assert.equal(h.limits.length, 2);
+});
+
+test("capture 失敗では状態が変わらず、channel が切れたら limited が解除される", async () => {
+	const h = limitSetup(["a"]);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	h.captureFails.add("a");
+	await h.sup.tick();
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), ["a"]);
+	h.live.delete("a");
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+});
+
+test("limit を渡さなくても検出が動き、undefined の明示も既定値、カスタム patterns が使われる", async () => {
+	const a = limitSetup(["a"], { limit: undefined });
+	a.panes.set("a", LIMIT_PANE);
+	await a.sup.tick();
+	assert.equal(a.limits.length, 1);
+	const b = limitSetup(["a"], { limit: { enabled: true, patterns: ["^上限です"], resetPatterns: [], tailLines: 12 } });
+	b.panes.set("a", LIMIT_PANE);
+	await b.sup.tick();
+	assert.equal(b.limits.length, 0);
+	b.panes.set("a", "上限です\n");
+	await b.sup.tick();
+	assert.equal(b.limits.length, 1);
+});
+
+test("limit.enabled=false なら capture も通知もしない", async () => {
+	const h = limitSetup(["a"], { limit: { enabled: false, patterns: ["^x"], resetPatterns: [], tailLines: 12 } });
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	// checkStuck の capture は従来どおり1回。上限用の追加の capture はしない
+	assert.equal(h.calls.filter((c) => c[0] === "capture-pane").length, 1);
+	assert.equal(h.limits.length, 0);
+});
+
+test("limited の worker でも wake の send-keys は上限なしのときと同じように送られる", async () => {
+	const h = wakeSetup({ panes: ["Claude usage limit reached. Your limit will reset at 3pm\n❯ "] });
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), ["w"]); // 実際に上限として検出されている
+	h.sup.requestWake("w", "dispatch");
+	await h.sup.wakeTick();
+	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+});
+
+test("対象から外れた・startupError の付いた slot は limited が解除され、エピソードが終わる", async () => {
+	const h = limitSetup(["a", "b"]);
+	h.panes.set("a", LIMIT_PANE);
+	await h.sup.tick();
+	assert.equal(h.limits.length, 1);
+	h.setTargets((ts) => ts.filter((t) => t.name !== "a")); // project_set_active で外れた
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+	h.setTargets((ts) => [...ts, { name: "a", cwd: "/w/a", command: "claude", initialPrompt: "" }]);
+	h.panes.set("a", "");
+	h.panes.set("b", LIMIT_PANE); // 別の worker が上限になったら、新しいエピソードとして通知される
+	await h.sup.tick();
+	assert.equal(h.limits.length, 2);
+	h.setTargets((ts) => ts.map((t) => (t.name === "b" ? { ...t, startupError: "壊れた設定" } : t)));
+	await h.sup.tick();
+	assert.deepEqual(h.sup.limitedNames(), []);
+	const r = await h.sup.restartMany("limited", []);
+	assert.deepEqual(r.restarted, []);
+	assert.deepEqual(kills(h.calls), []);
+});
+
+test("restartMany(limited) は limited だけ、all は except を除く全てを1件ずつ kill-window する", async () => {
+	const h = limitSetup(["a", "b", "c"]);
+	h.panes.set("b", LIMIT_PANE);
+	await h.sup.tick();
+	assert.deepEqual((await h.sup.restartMany("limited", [])).restarted, ["b"]);
+	assert.deepEqual(kills(h.calls), ["dle:dle-b"]);
+	const r = await h.sup.restartMany("all", ["a"]);
+	assert.deepEqual(r.restarted, ["b", "c"]);
+	assert.deepEqual(kills(h.calls), ["dle:dle-b", "dle:dle-b", "dle:dle-c"]);
+});
+
+test("存在しない except 名はエラーで、何も kill しない", async () => {
+	const h = limitSetup(["a"]);
+	await assert.rejects(h.sup.restartMany("all", ["typo"]), /typo/);
+	assert.deepEqual(kills(h.calls), []);
+});
+
+test("refreshing / wake.sending / promptPending の slot は kill せず skipped に入る", async () => {
+	const h = limitSetup(["a", "b", "c", "d"]);
+	await h.sup.tick();
+	const slots = h.sup as unknown as {
+		state: Map<string, { refreshing: boolean; promptPending: boolean; wake: { sending: boolean } }>;
+	};
+	const st = (n: string) => slots.state.get(n) as NonNullable<ReturnType<typeof slots.state.get>>;
+	st("a").refreshing = true;
+	st("b").wake.sending = true;
+	st("c").promptPending = true;
+	const r = await h.sup.restartMany("all", []);
+	assert.deepEqual(r.restarted, ["d"]);
+	assert.deepEqual(r.skipped.map((s) => s.name).sort(), ["a", "b", "c"]);
+	assert.deepEqual(kills(h.calls), ["dle:dle-d"]);
+});
+
+test("--limited で対象が0件でも正常に終わる", async () => {
+	const h = limitSetup(["a"]);
+	await h.sup.tick();
+	assert.deepEqual(await h.sup.restartMany("limited", []), { restarted: [], skipped: [] });
 });
