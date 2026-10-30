@@ -13,6 +13,7 @@
 //   dle attention            あなた待ち（--all / --answered と --json で保存済み台帳）
 //   dle board                ボード
 //   dle restart <名前>       窓口や worker を起動し直す（concierge / プロジェクト名）
+//   dle restart --limited | --all [--except 名前...]   上限で止まった worker だけ / 全員を起動し直す
 //   dle mode <名前> harness|native [--command <c>]  ループの進め方を切り替える（登録し直しでは引き継がれるため）
 //   dle notify ...           harness-notify から使う（人の判断が要る通知を A-番号付きで出す）
 
@@ -29,6 +30,7 @@ import { Ledger, type Project } from "./ledger.ts";
 import { registerProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
 import { Rest } from "./rest.ts";
+import { parseRestartArgs } from "./restart-args.ts";
 import { Supervisor, tmuxRunner } from "./supervisor.ts";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -131,6 +133,8 @@ async function cmdStart() {
 		onRefresh: (n, phase, result) => engine?.onRefresh(n, phase, result),
 		onRefreshSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
 		onWakeSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
+		limit: config.worker.limit,
+		onLimit: (entries) => engine?.limitNotice(entries),
 		log,
 	});
 	engine = new Engine({ config, rest, ledger, supervisor, log, gatewayFactory: (h) => new Gateway({ token, ...h }) });
@@ -293,13 +297,38 @@ async function cmdProjects(json: boolean) {
 	}
 }
 
-async function cmdRestart(name: string | undefined) {
-	if (!name) fail("dle restart <concierge またはプロジェクト名>");
+async function cmdRestart(args: string[]) {
+	const parsed = (() => {
+		try {
+			return parseRestartArgs(args);
+		} catch (e) {
+			return fail((e as Error).message);
+		}
+	})();
 	const config = loadConfig(home);
 	// ウィンドウは engine が閉じる（プロジェクトごとの tmux セッションを engine だけが知っているため）
-	const r = await callEngine(config, "restart", { name });
+	if ("name" in parsed) {
+		const r = await callEngine(config, "restart", { name: parsed.name });
+		if (r === null) fail("engine に接続できません（dle up で起動してください）");
+		console.log(`${parsed.name} を次の巡回（30 秒以内）で起動し直します`);
+		return;
+	}
+	const r = (await callEngine(config, "restart", {
+		[parsed.mode]: true,
+		...(parsed.except.length ? { except: parsed.except } : {}),
+	}).catch((e: Error) => fail(e.message))) as {
+		restarted: string[];
+		skipped: { name: string; reason: string }[];
+	} | null;
 	if (r === null) fail("engine に接続できません（dle up で起動してください）");
-	console.log(`${name} を次の巡回（30 秒以内）で起動し直します`);
+	console.log(
+		r.restarted.length
+			? `次の巡回（30 秒以内）で起動し直します: ${r.restarted.join(", ")}`
+			: parsed.mode === "limited"
+				? "上限中の worker はありません"
+				: "起動し直す対象がありません",
+	);
+	for (const s of r.skipped) console.log(`見送り: ${s.name}（${s.reason}）。しばらくしてからもう一度実行してください`);
 }
 
 async function cmdMode(name: string | undefined, mode: string | undefined, flags: Record<string, string | boolean>) {
@@ -425,7 +454,7 @@ const commands: Record<string, () => unknown> = {
 		),
 	attention: () => cmdAttention(argv),
 	board: () => cmdRead("board_show", {}, (l) => l.renderBoard()),
-	restart: () => cmdRestart(rest[0]),
+	restart: () => cmdRestart(argv),
 	mode: () => cmdMode(rest[0], rest[1], flags),
 	notify: () => cmdNotify(flags),
 };
@@ -434,7 +463,7 @@ if (!fn) {
 	console.error(
 		readFileSync(SELF, "utf8")
 			.split("\n")
-			.slice(0, 16)
+			.slice(0, 17)
 			.map((l) => l.replace(/^\/\/ ?/, ""))
 			.join("\n"),
 	);

@@ -17,7 +17,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../src/config.ts";
-import { Engine } from "../src/engine.ts";
+import { Engine, limitNoticeText, restartMode } from "../src/engine.ts";
 import type { Run } from "../src/projects.ts";
 import { type EngineMessage, lineReader, PROTOCOL_VERSION } from "../src/protocol.ts";
 import type { DiscordMessage } from "../src/route.ts";
@@ -1324,6 +1324,10 @@ test("引数検査: CLI ソケットと実 dle notify はエラーを返し、�
 			["notify", { project: "live", event: "merge-request", issue: "22", typo: true }, ["typo", "許可", "body"]],
 			["restart", { name: 123 }, ["name", "string"]],
 			["restart", { name: "live", typo: true }, ["typo", "許可", "name"]],
+			["restart", { limited: "yes" }, ["limited", "boolean"]],
+			["restart", { all: 1 }, ["all", "boolean"]],
+			["restart", { all: true, except: "a" }, ["except", "array"]],
+			["restart", { all: true, except: [1] }, ["except[0]", "string"]],
 			["rules_get", null, ["object"]],
 			["rules_get", [], ["object"]],
 		] as const) {
@@ -1351,6 +1355,18 @@ test("引数検査: CLI ソケットと実 dle notify はエラーを返し、�
 			restart.mock.calls.map((c) => c.arguments),
 			[["live"]],
 		);
+		const many = t.mock.method(engine.supervisor, "restartMany", async () => ({ restarted: ["live"], skipped: [] }));
+		assert.equal((await dle(home, ["restart", "--all", "--except", "stopped", "--except", "x"])).code, 0);
+		assert.equal((await dle(home, ["restart", "--limited"])).code, 0);
+		assert.deepEqual(
+			many.mock.calls.map((c) => c.arguments),
+			[
+				["all", ["stopped", "x"]],
+				["limited", []],
+			],
+		);
+		assert.equal((await dle(home, ["restart", "--except", "x"])).code, 1);
+		assert.equal(many.mock.callCount(), 2);
 		const normal = await dle(home, [
 			"notify",
 			"--project",
@@ -1534,6 +1550,7 @@ test("互換性: 正常な配信・追加5項目・project優先順位・JSON pr
 			await assert.rejects(engine.call({ role: "worker", name: "live" }, name, args), /窓口だけ/);
 		}
 		await assert.rejects(engine.call({ role: "concierge", name: "concierge" }, "restart", { name: "live" }), /CLI/);
+		await assert.rejects(engine.call({ role: "worker", name: "live" }, "restart", { limited: true }), /CLI/);
 		for (const args of [
 			["tasks", "--all"],
 			["projects", "--json"],
@@ -2102,4 +2119,29 @@ test("merge-request: 空ファイル・存在しない添付は従来どおり�
 	await assert.rejects(openGate(engine, "merge-request", "1", { file }), /非空/);
 	await assert.rejects(openGate(engine, "merge-request", "1", { file: path.join(home, "none.mp4") }));
 	assert.equal(engine.ledger.openAttention().length, 0);
+});
+
+test("restart の引数は name / limited / all のちょうど1つ、except は limited / all のときだけ", () => {
+	assert.deepEqual(restartMode({ name: "a" }), { kind: "one", name: "a" });
+	assert.deepEqual(restartMode({ limited: true }), { kind: "limited", except: [] });
+	assert.deepEqual(restartMode({ all: true, except: ["a", "b"] }), { kind: "all", except: ["a", "b"] });
+	for (const a of [
+		{},
+		{ limited: false },
+		{ name: "a", all: true },
+		{ limited: true, all: true },
+		{ name: "a", except: ["b"] },
+	])
+		assert.throws(() => restartMode(a), /restart:/, JSON.stringify(a));
+});
+
+test("上限の通知文は一覧・復帰（または画面で確認）・手順を含み、例のコマンドは1通にまとまる", () => {
+	const text = limitNoticeText([
+		{ name: "a", resetText: "3pm" },
+		{ name: "b", resetText: null },
+	]);
+	assert.match(text, /- a（復帰: 3pm）/);
+	assert.match(text, /- b（復帰: 画面で確認）/);
+	assert.match(text, /dle restart --limited/);
+	assert.match(text, /dle restart --all \[--except 名前\]/);
 });

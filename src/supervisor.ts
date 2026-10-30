@@ -5,6 +5,7 @@
 import { execFile } from "node:child_process";
 import path from "node:path";
 import { type ClaudeSession, contextReader, type TranscriptContext } from "./context.ts";
+import { DEFAULT_WORKER_LIMIT, detectLimit, type WorkerLimit } from "./limit.ts";
 
 import { withinDirectory } from "./worktrees.ts";
 
@@ -174,7 +175,21 @@ interface SlotState {
 	wake: WakeState;
 	/** onRegistered が初期プロンプトを入れる間（5 秒待ち＋送信）だけ真 */
 	promptPending: boolean;
+	/** 画面に上限表示が出ている間だけ真（メモリのみ。台帳には書かない） */
+	limited: boolean;
+	limitMisses: number;
+	limitSince: number | null;
+	limitResetText: string | null;
 }
+
+export interface LimitedEntry {
+	name: string;
+	since: number;
+	resetText: string | null;
+}
+
+// 2 回連続（約 1 分）で上限表示が消えたら解除する。一瞬の描画の揺れで通知の回数管理を壊さないため
+const LIMIT_CLEAR_MISSES = 2;
 
 export interface SupervisorOptions {
 	tmuxSession: string;
@@ -200,6 +215,10 @@ export interface SupervisorOptions {
 	wakeQuietMs?: number;
 	wakeMinIntervalMs?: number;
 	wakeVerifyMs?: number;
+	/** 上限表示の検出設定。省略・undefined は既定値 */
+	limit?: WorkerLimit;
+	/** 上限エピソードの開始時に1回だけ呼ぶ（その時点で上限中の全 worker） */
+	onLimit?: (entries: LimitedEntry[]) => void;
 }
 
 export class Supervisor {
@@ -209,6 +228,8 @@ export class Supervisor {
 	private startupErrors = new Map<string, string>();
 	private ticking = false;
 	private waking = false;
+	/** 現在の上限エピソードで通知済みか。全員が解除されたら戻す */
+	private limitNotified = false;
 
 	constructor(opts: SupervisorOptions) {
 		// channel の接続直後は入力欄がまだ準備できていないことがあるため、少し待ってから入力する
@@ -227,7 +248,10 @@ export class Supervisor {
 			wakeVerifyMs: 3000,
 			activity: () => ({ events: 0, lastAt: 0 }),
 			onRefresh: () => {},
+			onLimit: () => {},
 			...opts,
+			// ...opts に limit: undefined が入っていても既定値になるよう、後ろに置く
+			limit: opts.limit ?? DEFAULT_WORKER_LIMIT,
 		};
 		this.startedAt = this.o.now();
 	}
@@ -251,6 +275,10 @@ export class Supervisor {
 				refreshing: false,
 				wake: { reasons: [], since: null, lastSentAt: null, sending: false, enterOnly: false, unknownNotified: false },
 				promptPending: false,
+				limited: false,
+				limitMisses: 0,
+				limitSince: null,
+				limitResetText: null,
 			};
 			this.state.set(name, s);
 		}
@@ -299,10 +327,13 @@ export class Supervisor {
 			const s = this.st(t.name);
 			const wins = bySession.get(this.sessionOf(t)) ?? null;
 			const exists = wins?.includes(windowName(t.name)) ?? false;
+			// 窓が無い・channel が切れたなら、上限表示は残っていても「上限中」とは扱わない
+			if (!(this.o.isLive(t.name) && exists)) this.clearLimit(s);
 			if (this.o.isLive(t.name)) {
 				s.waitingNotified = false;
 				if (exists) {
 					await this.checkStuck(t.name, s);
+					await this.checkLimit(t.name, s);
 					await this.maybeRefresh(t);
 					await this.maybeWake(t, exists);
 				}
@@ -342,6 +373,115 @@ export class Supervisor {
 			// 同じセッションの次の起動は new-window にする
 			if (wins === null) bySession.set(this.sessionOf(t), [windowName(t.name)]);
 		}
+		this.finishLimitTick(targets);
+	}
+
+	private clearLimit(s: SlotState) {
+		s.limited = false;
+		s.limitMisses = 0;
+		s.limitSince = null;
+		s.limitResetText = null;
+	}
+
+	/**
+	 * 上限表示を読む。read-only（send-keys をしない）なので wake / refresh と衝突せず、それらの判定にも使わない。
+	 * capture に失敗したら状態を変えない。
+	 */
+	private async checkLimit(name: string, s: SlotState) {
+		const cfg = this.o.limit;
+		if (!cfg.enabled) return;
+		const pane = await this.capture(name);
+		if (pane === null) return;
+		const hit = detectLimit(pane, cfg);
+		if (hit) {
+			s.limitMisses = 0;
+			if (!s.limited) {
+				s.limited = true;
+				s.limitSince = this.o.now();
+			}
+			// 後から取れた復帰時刻で更新するだけで、再通知はしない
+			if (hit.resetText !== null) s.limitResetText = hit.resetText;
+			return;
+		}
+		if (!s.limited) return;
+		s.limitMisses += 1;
+		if (s.limitMisses >= LIMIT_CLEAR_MISSES) this.clearLimit(s);
+	}
+
+	/** 現在の targets() にあり startupError の無い名前（上限の数え方はこの集合だけを見る） */
+	private currentNames(): Set<string> {
+		return new Set(
+			this.o
+				.targets()
+				.filter((t) => !t.startupError)
+				.map((t) => t.name),
+		);
+	}
+
+	private limitedEntries(current: Set<string>): LimitedEntry[] {
+		const list: LimitedEntry[] = [];
+		for (const [name, s] of this.state)
+			if (s.limited && current.has(name))
+				list.push({ name, since: s.limitSince ?? this.o.now(), resetText: s.limitResetText });
+		return list;
+	}
+
+	/**
+	 * tick の最後。対象から外れた slot（project_set_active で外れた・startupError）は this.state に残るので、
+	 * ここで解除する。残すとエピソードが終わらず、以後の上限が通知されない。
+	 */
+	private finishLimitTick(targets: SessionTarget[]) {
+		const current = new Set(targets.filter((t) => !t.startupError).map((t) => t.name));
+		for (const [name, s] of this.state) if (!current.has(name)) this.clearLimit(s);
+		const entries = this.limitedEntries(current);
+		if (entries.length === 0) {
+			this.limitNotified = false;
+			return;
+		}
+		if (this.limitNotified) return;
+		this.limitNotified = true;
+		this.o.onLimit(entries);
+	}
+
+	/** 上限中の worker の名前（現在の対象のみ） */
+	limitedNames(): string[] {
+		return this.limitedEntries(this.currentNames()).map((e) => e.name);
+	}
+
+	/**
+	 * 上限で止まった worker（limited）または全員を、1件ずつ窓を閉じて起動し直させる。起動は次の巡回の spawn に任せる。
+	 * 入力途中の slot は壊さないよう kill せず skipped で返す。台帳には触れない。
+	 */
+	async restartMany(
+		mode: "limited" | "all",
+		except: string[],
+	): Promise<{ restarted: string[]; skipped: { name: string; reason: string }[] }> {
+		const known = new Set(this.o.targets().map((t) => t.name));
+		for (const n of except) if (!known.has(n)) throw new Error(`--except に存在しない名前があります: ${n}`);
+		const names = (mode === "limited" ? this.limitedNames() : [...this.currentNames()]).filter(
+			(n) => !except.includes(n),
+		);
+		const restarted: string[] = [];
+		const skipped: { name: string; reason: string }[] = [];
+		const busy = (name: string) => {
+			const s = this.state.get(name);
+			if (!s) return null;
+			if (s.refreshing) return "文脈の整理中";
+			if (s.wake.sending) return "起こしの送信中";
+			if (s.promptPending) return "初期プロンプトの入力中";
+			return null;
+		};
+		for (const name of names) {
+			// 判定と kill の間に await が無いので、判定は kill 時点でも有効
+			const why = busy(name);
+			if (why) {
+				skipped.push({ name, reason: why });
+				continue;
+			}
+			await this.restart(name);
+			restarted.push(name);
+		}
+		return { restarted, skipped };
 	}
 
 	private async checkStuck(name: string, s: SlotState) {

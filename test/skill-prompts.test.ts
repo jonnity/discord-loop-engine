@@ -1139,3 +1139,11 @@ test("issue-loop: 心拍は空キューでも張り、engine 配下では削除�
 		"心拍のプロンプトは単体呼び出しのまま",
 	);
 });
+
+test("issue-loop の起動手順は tasks_list の next から続きを再開する指示を含む", () => {
+	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+	const boot = section(loop, "## 起動時", "## 毎 tick");
+	assert.match(boot, /tasks_list/);
+	assert.match(boot, /次にやること/);
+	assert.match(boot, /GitHub を優先/);
+});

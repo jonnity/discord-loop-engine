@@ -5,6 +5,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { DEFAULT_WORKER_LIMIT, type WorkerLimit } from "./limit.ts";
 import { dleHome, socketPath } from "./protocol.ts";
 
 export const PLUGIN_SPEC = "plugin:discord-loop-engine@discord-loop-engine";
@@ -48,6 +49,8 @@ export interface Config {
 		initialPrompt: string;
 		refresh: WorkerRefresh;
 		wake?: { enabled: boolean };
+		/** 使用量の上限表示の検出。optional（型付きの既存リテラルを壊さない） */
+		limit?: WorkerLimit;
 	};
 	retro: { everyDoneTasks: number; everyDays: number; promoteAfter: number };
 	board: { enabled: boolean };
@@ -73,6 +76,8 @@ export const CONFIG_TEMPLATE = {
 			cooldownMinutes: 30,
 			codexIgnoreAfterMinutes: 120,
 		},
+		// 上限表示の検出。patterns / resetPatterns を足すと文言を差し替えられる（README 参照）
+		limit: { enabled: true },
 	},
 	retro: { everyDoneTasks: 5, everyDays: 7, promoteAfter: 3 },
 	board: { enabled: true },
@@ -85,6 +90,23 @@ function readGit(v: unknown): GitIdentity | null {
 	if (typeof v !== "object" || v === null) return null;
 	const { name, email } = v as Record<string, unknown>;
 	return typeof name === "string" && name.trim() && typeof email === "string" && email.trim() ? { name, email } : null;
+}
+
+/** 正規表現の文字列の配列。不正なものがあれば errors に積む */
+function readPatterns(v: unknown, d: string[], key: string, errors: string[]): string[] {
+	if (v === undefined) return d;
+	if (!Array.isArray(v) || !v.every((x) => typeof x === "string")) {
+		errors.push(`worker.limit.${key}: 正規表現の文字列の配列にしてください`);
+		return d;
+	}
+	for (const p of v as string[]) {
+		try {
+			new RegExp(p, "i");
+		} catch {
+			errors.push(`worker.limit.${key}: 不正な正規表現です: ${p}`);
+		}
+	}
+	return v as string[];
 }
 
 export function expandHome(p: string): string {
@@ -126,6 +148,17 @@ export function loadConfig(home = dleHome()): Config {
 	const w = (raw.worker ?? {}) as Record<string, unknown>;
 	const wr = (w.refresh ?? {}) as Record<string, unknown>;
 	const ww = (w.wake ?? {}) as Record<string, unknown>;
+	const wl = (w.limit ?? {}) as Record<string, unknown>;
+	const limit: WorkerLimit = {
+		enabled: typeof wl.enabled === "boolean" ? wl.enabled : DEFAULT_WORKER_LIMIT.enabled,
+		patterns: readPatterns(wl.patterns, DEFAULT_WORKER_LIMIT.patterns, "patterns", errors),
+		resetPatterns: readPatterns(wl.resetPatterns, DEFAULT_WORKER_LIMIT.resetPatterns, "resetPatterns", errors),
+		tailLines:
+			typeof wl.tailLines === "number" && Number.isInteger(wl.tailLines) && wl.tailLines > 0
+				? wl.tailLines
+				: DEFAULT_WORKER_LIMIT.tailLines,
+	};
+	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const r = (raw.retro ?? {}) as Record<string, unknown>;
 	const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
 	const nonnegative = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
@@ -157,6 +190,7 @@ export function loadConfig(home = dleHome()): Config {
 			extraArgs: strList(w.extraArgs),
 			initialPrompt: typeof w.initialPrompt === "string" ? w.initialPrompt : "/discord-loop-engine:issue-loop",
 			wake: { enabled: typeof ww.enabled === "boolean" ? ww.enabled : true },
+			limit,
 			refresh: {
 				enabled: typeof wr.enabled === "boolean" ? wr.enabled : true,
 				maxTokens: nonnegative(wr.maxTokens, 100000),

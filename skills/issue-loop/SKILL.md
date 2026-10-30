@@ -30,7 +30,10 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 
 ## 起動時
 
-1. **状態把握**: `issue-cycle` の Step 0（`harness-status` / `harness-inbox`）
+1. **状態把握**: `issue-cycle` の Step 0（`harness-status` / `harness-inbox`）。
+   engine 配下の worker は、続けて `tasks_list`（または `task_get`）で自プロジェクトのタスクを読み、
+   `次にやること`（`next`）があれば、再起動直後（使用量の上限でアカウントを替えた `dle restart` の後など）は
+   そこから続ける。GitHub の状態と食い違えば GitHub を優先する
 2. **心拍**: 手順 1 の結果がキュー空・アクティブなしでも、ここで早期終了せず必ず実行する。
    `CronList` にこのループの心拍が無ければ張る（engine 配下で再起動した worker は、空キューでも心拍なしの idle になりやすい）。プロンプトは**スキル呼び出し単体**に固定し、
    複合プロンプト（`/clear` を混ぜる等）にしない（oogiri-doc で心拍が無言で空振りし続けた事故がある）:
