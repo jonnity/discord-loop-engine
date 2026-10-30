@@ -21,7 +21,7 @@ const cases: Record<string, Record<string, string>> = {
 		note: "S",
 		phase: "S",
 	},
-	attention_list: {},
+	attention_list: { project: "S", issue: "S", includeResolved: "B" },
 	attention_answer: { id: "S!", answer: "S!" },
 	dispatch: { project: "S!", text: "S!", task_id: "S" },
 	board_show: {},

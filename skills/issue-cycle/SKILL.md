@@ -148,6 +148,14 @@ Step 0 の追加振り分け: `chat-merge-ok` は同じ tick の Phase 6、`chat
 `missing-attention` は Phase 5-4、`attention-unavailable` / `attention-mismatch` は再確認後に解消不能なら blocked。
 `stale-notify` / `missing-notify` の pending は先に「承認回収の仕分けと共通通知」で分類する。
 
+### 変更前の必須確認（head・状態を変える操作の前）
+
+何かを待っているときだけ行う（待ちが無い Issue では省く）。push・`harness-phase` の遷移・承認の再依頼の直前に、
+`attention_list({project: "<自分のプロジェクト>", issue: "<n>", includeResolved: true})` で、その Issue の最新の A を見る。
+`status` が `resolved` の interview / blocked で、`resolvedAt`（UTC）より後の自分のコメント・phase・ラベルの変化がまだ無ければ、未処理の回答。
+操作の前に `answer` の全文を処理し（interview は Phase 1 の続き、blocked は指示に従う）、その操作がまだ必要かを判断し直す。
+`open` なら待ち中なので、Phase 5-4 の再依頼・stale-notify・missing-notify・head 変更・窓口からの依頼は既存の規則どおり進める（この確認で止めない）。
+merge の回答はここで読まず、`harness-inbox` と Phase 6 に任せる（`harness-merge` は呼ばない）。詳細は issue-loop「待ち A-番号の台帳確認」。`harness-inbox` が空でも省略しない。
 
 ## Phase 1: 要件確認（非ブロッキング）
 

@@ -583,8 +583,14 @@ export class Engine {
 				if (!t) throw new Error(`タスク ${str(a.id)} がありません`);
 				return t;
 			}
-			case "attention_list":
-				return this.ledger.openAttention();
+			case "attention_list": {
+				const project = str(a.project);
+				const issue = str(a.issue);
+				// 既定（引数なし）は従来どおり開いている A だけ。回答済みは includeResolved のときだけ（台帳の形式は変えない）
+				return (a.includeResolved ? this.ledger.attention() : this.ledger.openAttention())
+					.filter((x) => !project || x.project === project)
+					.filter((x) => !issue || x.issue === issue);
+			}
 			case "board_show":
 				return this.ledger.renderBoard();
 			case "projects_list":

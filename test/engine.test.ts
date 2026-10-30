@@ -2153,3 +2153,57 @@ test("limitGaveUpText は名前・回数・dle restart --limited を含み、復
 	assert.match(text, /dle restart --limited/);
 	assert.doesNotMatch(text, /復帰/);
 });
+
+test("#28: attention_list は既定で開いている A だけを返し、絞り込みと includeResolved で回答済みの全文と時刻も返せる", async () => {
+	const { engine, home } = setupEngine();
+	try {
+		for (const name of ["p1", "p2"])
+			engine.ledger.upsertProject({ name, repo: "x/y", path: home, active: true, mode: "harness" });
+		const mk = (project: string, issue: string) =>
+			engine.ledger.addAttention({
+				taskId: "",
+				project,
+				issue,
+				pr: "",
+				kind: "interview",
+				title: `t${project}${issue}`,
+				url: "u",
+				summary: "s",
+			}).attention;
+		const a1 = mk("p1", "1");
+		const a2 = mk("p1", "2");
+		const a3 = mk("p2", "1");
+		const longAnswer = `${"長い回答".repeat(40)}\n2行目`;
+		engine.ledger.resolveAttention(a1.id, longAnswer);
+		const W1 = { role: "worker", name: "p1" } as const;
+		const ids = async (who: typeof W1 | typeof CONCIERGE, args?: Record<string, unknown>) =>
+			((await engine.call(who, "attention_list", args)) as { id: string }[]).map((x) => x.id);
+
+		// 既定の出力は従来どおり（開いているものだけ・全プロジェクト）
+		assert.deepEqual(await ids(W1), [a2.id, a3.id]);
+		assert.deepEqual(await ids(W1, {}), [a2.id, a3.id]);
+		assert.deepEqual(await ids(CONCIERGE, { includeResolved: false }), [a2.id, a3.id]);
+		// 絞り込み
+		assert.deepEqual(await ids(W1, { project: "p1" }), [a2.id]);
+		assert.deepEqual(await ids(W1, { issue: "1" }), [a3.id]);
+		assert.deepEqual(await ids(W1, { project: "p2", issue: "1" }), [a3.id]);
+		// 回答済みを含める: 全文・resolvedAt・status が付き、他プロジェクトは project で除ける
+		const all = (await engine.call(W1, "attention_list", { project: "p1", issue: "1", includeResolved: true })) as {
+			id: string;
+			status: string;
+			answer?: string;
+			resolvedAt?: string;
+		}[];
+		assert.equal(all.length, 1);
+		assert.equal(all[0]?.id, a1.id);
+		assert.equal(all[0]?.status, "resolved");
+		assert.equal(all[0]?.answer, longAnswer);
+		assert.match(all[0]?.resolvedAt ?? "", /^\d{4}-\d\d-\d\dT.*Z$|^\d{4}-\d\d-\d\dT/);
+		assert.deepEqual(await ids(W1, { project: "p1", includeResolved: true }), [a1.id, a2.id]);
+		assert.ok(!(await ids(W1, { project: "p1", includeResolved: true })).includes(a3.id));
+		// 未知の引数は従来どおり拒否
+		await assert.rejects(engine.call(W1, "attention_list", { typo: "x" }), /typo/);
+	} finally {
+		await engine.stop();
+	}
+});
