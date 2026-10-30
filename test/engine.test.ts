@@ -1958,7 +1958,7 @@ test("dispatch と A-番号の回答は worker を起こし（tick ではなく 
 		await c.tool("dispatch", { project: "k", text: "指示" });
 		assert.deepEqual(log, ["request k dispatch", "wakeTick"]);
 		log.length = 0;
-		const a = engine.ledger.addAttention({
+		const { attention: a } = engine.ledger.addAttention({
 			project: "k",
 			kind: "merge",
 			title: "t",
@@ -2049,4 +2049,57 @@ test("queueTick: 初回は覚えるだけ・新しい番号で 1 回だけ起こ
 	set([1, 2]);
 	await engine.queueTick();
 	assert.deepEqual(log, ["request ready queued #2", "wakeTick"], "外れた後の再付与は新規扱い");
+});
+
+// --- Issue #25: blocked / interview の --file が黙って落ちない -----------------------------------
+for (const event of ["blocked", "interview"]) {
+	test(`${event}: 存在する絶対パスの添付は投稿の files にそのまま渡る`, async () => {
+		const { engine, rest, home } = setupEngine();
+		const file = path.join(home, "draft.md");
+		writeFileSync(file, "下書き");
+		await openGate(engine, event, "1", { file });
+		assert.deepEqual(sends(rest).at(-1)?.files, [file]);
+		assert.deepEqual(sends(rest).at(-1)?.fileContents, ["下書き"]);
+	});
+
+	test(`${event}: 存在しない添付はエラーで、投稿も A-番号も残さない`, async () => {
+		const { engine, rest, home } = setupEngine();
+		await assert.rejects(
+			openGate(engine, event, "1", { file: path.join(home, "nothing.md") }),
+			/添付ファイルが見つかりません/,
+		);
+		assert.equal(sends(rest).length, 0);
+		assert.equal(engine.ledger.openAttention().length, 0);
+	});
+
+	test(`${event}: ディレクトリの添付はエラーになる`, async () => {
+		const { engine, rest, home } = setupEngine();
+		await assert.rejects(openGate(engine, event, "1", { file: home }), /通常のファイル/);
+		assert.equal(sends(rest).length, 0);
+		assert.equal(engine.ledger.openAttention().length, 0);
+	});
+}
+
+for (const event of ["blocked", "interview", "merge-request"]) {
+	test(`${event}: 相対パスの添付は engine の cwd に同名ファイルがあっても拒否する`, async () => {
+		const { engine, rest } = setupEngine();
+		const name = `dle-rel-${process.pid}.md`;
+		writeFileSync(name, "誤添付");
+		try {
+			await assert.rejects(openGate(engine, event, "1", { file: name }), /絶対パスで渡してください/);
+		} finally {
+			rmSync(name, { force: true });
+		}
+		assert.equal(sends(rest).length, 0);
+		assert.equal(engine.ledger.openAttention().length, 0);
+	});
+}
+
+test("merge-request: 空ファイル・存在しない添付は従来どおりエラー", async () => {
+	const { engine, home } = setupEngine();
+	const file = path.join(home, "empty.mp4");
+	writeFileSync(file, "");
+	await assert.rejects(openGate(engine, "merge-request", "1", { file }), /非空/);
+	await assert.rejects(openGate(engine, "merge-request", "1", { file: path.join(home, "none.mp4") }));
+	assert.equal(engine.ledger.openAttention().length, 0);
 });

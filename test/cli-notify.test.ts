@@ -2,7 +2,7 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -158,6 +158,47 @@ test("M2: dle --jsonは結果JSONだけを出し、json指定をRPCへ渡さず�
 		}
 	} finally {
 		if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("#25: dle notify --file の相対パスは呼び出し側の cwd で絶対パスにして engine へ渡す", async () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-rel-"));
+	const socket = path.join(home, "engine.sock");
+	writeFileSync(
+		path.join(home, "config.json"),
+		JSON.stringify({ socketPath: socket, channelIds: ["900"], allowedUserIds: ["111"] }),
+	);
+	let received: unknown;
+	const server = net.createServer((s) => {
+		s.on("error", () => {});
+		s.on(
+			"data",
+			lineReader<{ type: string; args?: unknown }>((m) => {
+				if (m.type === "hello") s.write(`${JSON.stringify({ type: "welcome", protocol: PROTOCOL_VERSION })}\n`);
+				if (m.type === "call") {
+					received = m.args;
+					s.write(`${JSON.stringify({ type: "result", id: "1", ok: true, data: { attention: "A-1" } })}\n`);
+					s.end();
+				}
+			}),
+		);
+	});
+	await new Promise<void>((r) => server.listen(socket, r));
+	try {
+		const work = path.join(home, "work");
+		mkdirSync(work);
+		await new Promise<void>((resolve) => {
+			execFile(
+				path.resolve("bin/dle"),
+				["notify", "--event", "blocked", "--title", "t", "--url", "https://e.x", "--file", "./sub/../x.md"],
+				{ cwd: work, timeout: 5000, env: { ...process.env, DLE_HOME: home, DLE_SOCKET: socket } },
+				() => resolve(),
+			);
+		});
+		assert.equal((received as { file?: string }).file, path.join(work, "x.md"));
+	} finally {
+		await new Promise<void>((r) => server.close(() => r()));
 		rmSync(home, { recursive: true, force: true });
 	}
 });

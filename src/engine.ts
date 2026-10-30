@@ -779,10 +779,23 @@ export class Engine {
 		o: { task: Task | null; issue: string; pr: string; title: string; url: string; body: string; file?: string },
 	) {
 		const { task, issue, pr, title, url, body } = o;
-		if (gate.kind === "merge" && o.file) {
-			const stat = statSync(o.file);
-			if (!stat.isFile() || stat.size === 0) throw new Error("承認添付は通常の非空ファイルが必要です");
-			accessSync(o.file, constants.R_OK);
+		if (o.file) {
+			// 相対パスは engine の cwd で解決され、同名の別ファイルを誤添付しうるため、種別を問わず拒否する
+			if (!path.isAbsolute(o.file)) {
+				throw new Error(`添付ファイルは絶対パスで渡してください（engine の cwd からは見えません）: ${o.file}`);
+			}
+			let stat: ReturnType<typeof statSync>;
+			try {
+				stat = statSync(o.file);
+			} catch {
+				throw new Error(`添付ファイルが見つかりません: ${o.file}`);
+			}
+			if (gate.kind === "merge") {
+				if (!stat.isFile() || stat.size === 0) throw new Error("承認添付は通常の非空ファイルが必要です");
+				accessSync(o.file, constants.R_OK);
+			} else if (!stat.isFile()) {
+				throw new Error(`添付ファイルは通常のファイルが必要です: ${o.file}`);
+			}
 		}
 		const added = this.ledger.addAttention({
 			taskId: task?.id ?? "",
@@ -818,7 +831,7 @@ export class Engine {
 		const text = [title, body || null, gate.how(att.id), url ? `<${url}>` : null].filter(Boolean).join("\n");
 		const { firstId: messageId, lastMessage } = await this.postMessages(project, text, {
 			heading: { icon: gate.icon, label, attention: att.id, ...(issue ? { issue } : {}) },
-			files: o.file && (gate.kind === "merge" || existsSync(o.file)) ? [o.file] : [],
+			files: o.file ? [o.file] : [],
 		});
 		if (messageId) {
 			this.ledger.setAttentionMessage(att.id, messageId);
