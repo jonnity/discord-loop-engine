@@ -417,7 +417,7 @@ engine のログに残すだけで、あとから付け直しません。依頼�
 | `worker.refresh` | 有効 / 100k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
-| `worker.limit` | `enabled: true` / `tailLines: 12` | `enabled`・`patterns`・`resetPatterns`・`tailLines`。使用量の上限の表示を画面から探す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
+| `worker.limit` | `enabled: true` / `tailLines: 12` / `wakeIntervalMinutes: 30` / `wakeMaxAttempts: 5` | `enabled`・`patterns`・`resetPatterns`・`tailLines`・`wakeIntervalMinutes`（正の数）・`wakeMaxAttempts`（0 以上の整数。0 は自動で起こさない）。使用量の上限の表示を画面から探し、止まった worker を固定間隔で起こし直す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
@@ -448,7 +448,13 @@ worker が idle（status idle・画面が静止して入力欄が空・直前の
 engine は30秒ごとに各 worker の画面の末尾（`worker.limit.tailLines` 行）を読み、`worker.limit.patterns` に合う行があれば
 「上限で止まっている」とみなして、窓口に1通だけ知らせる（一覧・画面から読めた復帰時刻・手順）。通知は上限の
 エピソードごとに1回で、誰かが上限中のうちに別の worker が加わっても再通知しない。全員が解除されるとエピソードが終わる。
-復帰時刻の表示は画面の文字列のままで、自動で起こし直したり再起動したりはしない（wake / refresh の挙動も変えない）。
+復帰時刻の表示は画面の文字列のままで、制御には使わない。再起動はしない。
+
+上限中の worker は、検出から `wakeIntervalMinutes`（既定30分）後に、idle を確認したうえで `/discord-loop-engine:issue-loop` を
+送って起こし直す（`worker.wake` が有効なときだけ）。まだ上限なら待ちを倍にして再試行する（30→60→120→240→480分、
+最大 `wakeMaxAttempts` 回）。上限中は、他の理由（dispatch・回答など）の起こしはこの再試行のときにまとめて送り、
+上限中の自動の整理（`/clear`）は止める。最後の起こしでも復帰しなければ、窓口に1回だけ知らせて止める
+（エピソードごとに1回、worker が複数でもまとめて1通）。起こした後は、作業中の画面になるまで上限の解除と数えない。
 
 1. 別のアカウントに切り替える
 2. `dle restart --limited`（上限中の worker だけ）か `dle restart --all [--except 名前]`（窓口を含む全員。除外できる）

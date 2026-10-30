@@ -17,7 +17,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import type { Config } from "../src/config.ts";
-import { Engine, limitNoticeText, restartMode } from "../src/engine.ts";
+import { Engine, limitGaveUpText, limitNoticeText, restartMode } from "../src/engine.ts";
 import type { Run } from "../src/projects.ts";
 import { type EngineMessage, lineReader, PROTOCOL_VERSION } from "../src/protocol.ts";
 import type { DiscordMessage } from "../src/route.ts";
@@ -2144,6 +2144,14 @@ test("上限の通知文は一覧・復帰（または画面で確認）・手�
 	assert.match(text, /- b（復帰: 画面で確認）/);
 	assert.match(text, /dle restart --limited/);
 	assert.match(text, /dle restart --all \[--except 名前\]/);
+});
+
+test("limitGaveUpText は名前・回数・dle restart --limited を含み、復帰時刻を含まない", () => {
+	const text = limitGaveUpText({ names: ["a", "b"], attempts: 5 });
+	assert.match(text, /a, b/);
+	assert.match(text, /5 回/);
+	assert.match(text, /dle restart --limited/);
+	assert.doesNotMatch(text, /復帰/);
 });
 
 test("#28: attention_list は既定で開いている A だけを返し、絞り込みと includeResolved で回答済みの全文と時刻も返せる", async () => {

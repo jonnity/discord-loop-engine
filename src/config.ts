@@ -157,6 +157,16 @@ export function loadConfig(home = dleHome()): Config {
 			typeof wl.tailLines === "number" && Number.isInteger(wl.tailLines) && wl.tailLines > 0
 				? wl.tailLines
 				: DEFAULT_WORKER_LIMIT.tailLines,
+		wakeIntervalMinutes:
+			typeof wl.wakeIntervalMinutes === "number" &&
+			Number.isFinite(wl.wakeIntervalMinutes) &&
+			wl.wakeIntervalMinutes > 0
+				? wl.wakeIntervalMinutes
+				: DEFAULT_WORKER_LIMIT.wakeIntervalMinutes,
+		wakeMaxAttempts:
+			typeof wl.wakeMaxAttempts === "number" && Number.isInteger(wl.wakeMaxAttempts) && wl.wakeMaxAttempts >= 0
+				? wl.wakeMaxAttempts
+				: DEFAULT_WORKER_LIMIT.wakeMaxAttempts,
 	};
 	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const r = (raw.retro ?? {}) as Record<string, unknown>;
