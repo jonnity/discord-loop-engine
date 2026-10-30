@@ -144,6 +144,25 @@ pending＋復旧ファイルなしは request-failed。pending＋復旧ファイ
 理由の正本は Issue。通知のURLは現在の依頼先PRコメントURLを使い、現在のA や marker 全文は表示しない。認証済み login 自身の claimed/posted/failed-or-unknown を照合し、他者の同じキーでは抑制しない。
 通知/記録未確認なら自動再送せず handoff に残して停止する。
 
+#### 待ち A-番号の台帳確認（取りこぼしの保険）
+
+回答は一次には `meta.attention` で届く。これはそれを逃したとき（取りこぼし・コンテキスト圧縮・再起動）の保険で、人の回答待ちの Issue（`interview` / `blocked`、または待っていると思う Issue）について毎 tick 行う。
+merge の回答は読まない。`harness-inbox` と Phase 6 の既存手順に任せ、この節から `harness-merge` は呼ばない。
+
+1. `attention_list({project: "<自分のプロジェクト>", issue: "<n>", includeResolved: true})` を呼ぶ。自分のプロジェクトの A だけを見る。回答済みの A は `answer`（全文）と `resolvedAt`（UTC の完全な時刻）が付く
+2. その Issue の最新の A（番号が最大のもの）を見る:
+   - `status` が `open` → 本当に回答待ち。通知も再依頼もしない
+   - `status` が `resolved` で `kind` が `merge` → 何もしない（`harness-inbox` / Phase 6 の担当）
+   - `status` が `resolved` で `kind` が `interview` / `blocked` → 3 へ
+3. 処理済みの確認が先。`resolvedAt` より後（UTC で比較する）に、その Issue の GitHub コメントに自分の要件メモ（`<!-- harness:note`）・`harness:gate` のコメントがある、または phase・ラベルが進んでいる（blocked から再開済みなら、`resolvedAt` より後の報告コメントや phase の変化がある）なら処理済み。何もしない
+4. 未処理なら `answer` の全文を読み、`meta.attention` と同じに扱う:
+   - `interview` → 要件メモを下の規則で1度だけ残して Phase 2 へ
+   - `blocked` → 書かれた指示に従って再開する
+
+回答済みの A を「あなた待ち」として報告・表示しない。一覧で確かめていない A を待ちと書かない。
+interview の要件メモは、最新の `harness:gate phase=interview` コメントより後に `<!-- harness:note` を含むコメントが無いときだけ、`source=discord` 付きで残す（それ以前のメモや実装プランのコメントにも同じマーカーがあるため）。
+head・状態を変える前の確認は issue-cycle Step 0「変更前の必須確認」に従う。
+
 ### 2a. Dependabot PR（Issue なし）
 
 起動・復帰時と各 tick で、Issue のフェーズ進行・キュー補充の前に `harness-pr inbox` を実行する。
@@ -250,9 +269,9 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
       前置きの名前は Discord の表示名で owners（GitHub login）と完全一致のときだけ除く。表示名変更後の前置き付き回答は非 OK になり出口へ回る。
       承認できる人は allowedUserIds で決まり、owners 限定はそれを絞らない。
     - `meta.kind=interview` → 回答を Issue に「## 要件メモ（Discord で回答）」として
-      `<!-- harness:note source=discord -->` 付きでコメントしてから Phase 2 へ（GitHub を正本に保つ。
+      `<!-- harness:note source=discord -->` 付きでコメントしてから Phase 2 へ（遅れて届いたとき、最新の `harness:gate phase=interview` より後に `<!-- harness:note` のコメントが既にあれば、台帳確認で処理済みなので二重に作らない）（GitHub を正本に保つ。
       この印があるので `harness-inbox` は二重に拾わない）
-    - `meta.kind=blocked` → 書かれた指示に従って再開する
+    - `meta.kind=blocked` → 書かれた指示に従って再開する（遅れて届いたとき、その Issue が既に harness:blocked でない、または A の resolvedAt より後に報告コメントや phase の変化があれば、台帳確認で処理済みなので二重に実行しない）
   - `meta.from=concierge`（窓口からの依頼）: 優先順位の変更・特定 Issue の着手など。従う。窓口に『#n の承認依頼を出し直して』と頼む案内から届いた依頼なら、対象 Issue/PR/WT・依頼内容・現 head・humanChecks を確認し、Phase 5-4 の harness-phase で新 A を発行してその回答を待つ。既にマージ済みなら再依頼せず片付ける
   - `meta.kind=rules`（仮ルール）: 以後の作業で守る。起動時にも届く
 - **うまくいかなかったことは `learning_add` で記録する**（CI 失敗・レビュー NG・人の NG・Codex が止まった・
