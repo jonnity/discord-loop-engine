@@ -388,6 +388,7 @@ check "gate: hooks.beforePR が失敗したらゲートも失敗" '[ $? -eq 1 ]'
 echo ""
 source "$ROOT/tests/harness/quality.sh" || exit 1
 source "$ROOT/tests/harness/worktrees.sh" || exit 1
+source "$ROOT/tests/harness/attach.sh" || exit 1
 
 echo "passed: $pass, failed: $fail"
 [ "$fail" -eq 0 ]

@@ -328,6 +328,8 @@ async function cmdNotify(flags: Record<string, string | boolean>) {
 	for (const k of ["project", "event", "title", "url", "issue", "pr", "body", "file", "phase"]) {
 		if (typeof flags[k] === "string") args[k] = flags[k];
 	}
+	// engine の cwd からは相対パスが見えないので、呼び出し側の cwd で絶対パスにしてから渡す
+	if (typeof args.file === "string" && args.file) args.file = path.resolve(process.cwd(), args.file);
 	const r = await callEngine(config, "notify", args).catch((e: Error) => fail(`dle notify: ${e.message}`));
 	if (r === null) {
 		console.error("dle notify: engine が起動していません");

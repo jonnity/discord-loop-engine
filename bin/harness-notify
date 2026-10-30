@@ -68,6 +68,17 @@ esac
 if { [ "$JSON" = 1 ] && [ "$DRY_RUN" = 1 ]; } || { [ "$CHECK_TARGET" = 1 ] && { [ "$JSON" = 1 ] || [ "$DRY_RUN" = 1 ] || [ "$SEEN_FILE" = 1 ]; }; }; then
 	exit 2
 fi
+
+# 添付は engine の cwd から見えないので、絶対パスにしてから渡す。無ければ通知を出さず失敗する
+if [ -n "$FILE" ]; then
+	file_dir=""
+	[ -f "$FILE" ] && file_dir="$(cd -- "$(dirname -- "$FILE")" 2>/dev/null && pwd)"
+	if [ -z "$file_dir" ]; then
+		echo "harness-notify: 添付ファイルが見つかりません（$FILE）。通知は出していません" >&2
+		exit 4
+	fi
+	FILE="${file_dir%/}/$(basename -- "$FILE")"
+fi
 if [ "$CHECK_TARGET" = 0 ] && { [ -z "$TITLE" ] || [ -z "$URL" ]; }; then
 	echo "harness-notify: --title と --url は必須です（リンク無しの通知は送らない）" >&2
 	exit 2
