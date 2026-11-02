@@ -9,6 +9,7 @@ import path from "node:path";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { shq } from "../src/supervisor.ts";
+import { waitForContent } from "./wait-file.ts";
 
 const gate = path.resolve("bin/harness-gate");
 const notify = path.resolve("bin/harness-notify");
@@ -64,14 +65,6 @@ function setup() {
 	};
 	return { dir, main, home, file, env, put, start, run, close: () => rmSync(dir, { recursive: true, force: true }) };
 }
-async function until(file: string) {
-	for (let i = 0; i < 500; i++) {
-		if (existsSync(file)) return;
-		await delay(10);
-	}
-	throw new Error(`timeout: ${file}`);
-}
-
 test("G1/G2/G3/G4: 各2コマンド・並行呼出しの環境、一時home、親設定、hookと入出力", async () => {
 	const h = setup();
 	const record = path.join(h.dir, "record.cjs");
@@ -260,8 +253,7 @@ for (const [signal, code] of [
 			const r = h.start();
 			r.child.stdin.end();
 			try {
-				await until(ready);
-				const home = readFileSync(ready, "utf8");
+				const home = await waitForContent(ready);
 				assert.ok(existsSync(home));
 				r.child.kill(signal);
 				writeFileSync(release, "");
