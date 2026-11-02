@@ -47,8 +47,6 @@ fi
 out="$(jq -r '
 	"# #\(.number) \(.title)\n\n## 本文\n\(.body)\n\n---\n# コメント",
 	(.comments[] | "### \(.author.login)（\(.authorAssociation // "?"), \(.createdAt)）\n\(.body)\n")' <<<"$json")" || exit 1
-number="$(jq -r '.number' <<<"$json")"
-title="$(jq -r '.title' <<<"$json")"
 body="$(jq -r '.body' <<<"$json")"
 # タイトル末尾の改行を $(...) に落とされないよう、末尾に印の . を付けてから外す
 head="$(jq -r '"# #\(.number) \(.title)\n\n## 本文\n."' <<<"$json")"
