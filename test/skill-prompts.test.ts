@@ -1308,6 +1308,14 @@ test("#27: head が branchPrefix+n でない PR だけ --pr 付きの harness-me
 	assert.ok(cycle.includes("`harness-inbox` の tick は `--pr` で扱う PR を拾わない"));
 });
 
+test("#43: Phase 2 は harness-issue-md の失敗（本文が入らない等）を blocked で止め、空の入力で設計を頼まない", () => {
+	const phase2 = section(skill, "## Phase 2: 設計書生成", "# DESIGN_REQUEST_BEGIN");
+	assert.ok(phase2.includes('harness-issue-md {n} > "$WT/.harness/issue-{n}.md" || md_rc=$?'));
+	assert.ok(phase2.includes('harness-phase {n} blocked --comment-file "$WT/.harness/issue-md-error-{n}.md" || exit 1'));
+	assert.ok(phase2.includes('exit "$md_rc"'));
+	assert.ok(skill.includes("本文が出力に入っていなければ非 0"));
+});
+
 test("#42: 中間ファイルは project 名入りの scratchpad に置き、候補ファイルの1行目を検証役が照合する", async () => {
 	// 固定名の再発防止（skills / agents 全体）
 	const docs = [skill, loopSkill, conciergeSkill];

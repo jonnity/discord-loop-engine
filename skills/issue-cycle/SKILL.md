@@ -42,7 +42,7 @@ PR 本文を A.summary・通知・scan/inbox へ入れない。人は PR リン�
 | `harness-inbox` | 人間の返信・承認/差し戻し・通知の鮮度切れを JSON で拾う |
 | `harness-gate [dir]` | PR 前ゲート（CI と同じ検査を全部回して一覧。最後に `hooks.beforePR`） |
 | `harness-hook <phase> [--issue n] [--pr n] [--dir d]` | profile の `hooks.<phase>` を実行する |
-| `harness-issue-md <n>` | Issue 本文＋コメントを設計の入力用 Markdown にして出力する |
+| `harness-issue-md <n>` | Issue 本文＋コメントを設計の入力用 Markdown にして出力する。本文が出力に入っていなければ非 0（Phase 2 は blocked にして止める） |
 | `harness-codex-status check` / `status <window>` | Codex が使えるか・ウィンドウの状態（読み取り専用。確認なしで通る） |
 | `harness-codex start <window> <worktree> <prompt-file>` | Codex を tmux で起動する（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**） |
 | `harness-merge <n> [--pr <PR番号>] [--chat-approval "<引用>" --attention <回答先A-id>]` | 承認・CI・mergeable を確認してマージ → done（`--pr` は head が branchPrefix+{n}（既定 fix/issue-{n}）でない既存 PR のときだけ付ける。ラベルが付いていると `--pr` は全経路で拒否） |
@@ -237,7 +237,20 @@ git -C "$ROOT" worktree add "$WT" -b "$(harness-config '.branchPrefix' fix/issue
   "origin/$(harness-config '.baseBranch' main)"
 harness-hook afterWorktree --issue {n} --dir "$WT" || exit 1   # 失敗したら worktree の準備ができていない。人に渡す
 mkdir -p "$WT/.harness/spec" "$WT/.harness/impl"
-harness-issue-md {n} > "$WT/.harness/issue-{n}.md"           # Codex の入力（本文→コメント＝要件メモの順）
+md_rc=0
+harness-issue-md {n} > "$WT/.harness/issue-{n}.md" || md_rc=$?   # Codex の入力（本文→コメント＝要件メモの順。本文が入らなければ非 0）
+if [ "$md_rc" -ne 0 ]; then
+  rm -f "$WT/.harness/issue-{n}.md"
+  cat > "$WT/.harness/issue-md-error-{n}.md" <<'ISSUE_MD_ERROR'
+設計の入力（Issue の本文とコメント）を生成できませんでした（harness-issue-md が失敗）。
+終了コード 1 は gh・JSON の取得失敗（認証・存在しない Issue・不完全な JSON）、3 は出力に本文が入っていない検査失敗です。
+標準エラーのメッセージを確かめ、直してから Issue を再開してください。
+設計依頼の作成と designing 遷移・Codex 起動は行っていません。
+ISSUE_MD_ERROR
+  printf '\n終了コード: %s\n' "$md_rc" >> "$WT/.harness/issue-md-error-{n}.md"
+  harness-phase {n} blocked --comment-file "$WT/.harness/issue-md-error-{n}.md" || exit 1
+  exit "$md_rc"
+fi
 harness-config '.notes' '' > "$WT/.harness/notes.md"          # engine 側の設定にある決まりごと
 # DESIGN_REQUEST_BEGIN
 gate_rc=0
