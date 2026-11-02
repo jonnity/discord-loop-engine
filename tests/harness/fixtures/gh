@@ -42,5 +42,10 @@ case "$*" in
 "issue view 20 --json number,title,body,comments") cat "$D/issue20.json" ;;
 "issue view 21 --json number,title,body,comments") cat "$D/issue21.json" ;;
 "issue view 22 --json number,title,body,comments") cat "$D/issue22.json" ;;
+"issue view 23 --json number,title,body,comments") cat "$D/issue23.json" ;;
+"issue view 24 --json number,title,body,comments") cat "$D/issue24.json" ;;
+"issue view 25 --json number,title,body,comments") cat "$D/issue25.json" ;;
+"issue view 26 --json number,title,body,comments") cat "$D/issue26.json" ;;
+"issue view 27 --json number,title,body,comments") cat "$D/issue27.json" ;;
 *) echo "gh stub: unexpected: $*" >&2; exit 1 ;;
 esac

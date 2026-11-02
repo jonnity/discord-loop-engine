@@ -26,6 +26,44 @@ if ! [[ "$ISSUE" =~ ^[0-9]+$ ]]; then
 	exit 2
 fi
 
-gh issue view "$ISSUE" "${repo_args[@]}" --json number,title,body,comments | jq -r '
-	"# #\(.number) \(.title)\n\n## 本文\n\(.body // "")\n\n---\n# コメント",
-	(.comments[] | "### \(.author.login)（\(.authorAssociation // "?"), \(.createdAt)）\n\(.body)\n")'
+# 終了コード: 0 成功（本文が空のときの警告を含む）/ 1 gh・JSON の取得失敗 / 2 使い方 / 3 出力に本文が入っていない
+# 失敗時は stdout を空にする（`> file` に半端な入力を残さない）。警告・エラーは stderr のみ。
+#
+# なぜ出力を自分で確かめるか: `gh issue view --comments` は非 TTY（パイプ・リダイレクト先）でコメントだけを出し、
+# 本文（受け入れ条件）が抜けたことがある（#43、kishimen-tool #21）。--json でも、整形の変更で本文が落ちたら
+# 設計が「本文なし」で進むので、同じ JSON の .body と突き合わせる。
+# なぜ前置一致か: コメントが `## 本文` と本文を引用していると、部分一致では本文が落ちても通ってしまう。
+
+if ! json="$(gh issue view "$ISSUE" "${repo_args[@]}" --json number,title,body,comments)"; then
+	echo "harness-issue-md: gh の取得に失敗しました（Issue #$ISSUE）" >&2
+	exit 1
+fi
+# body は null・キー欠落を空本文とみなさない（"" だけが空本文）
+if ! jq -e '(.number|type=="number") and (.title|type=="string") and has("body") and (.body|type=="string") and (.comments|type=="array")' <<<"$json" >/dev/null 2>&1; then
+	echo "harness-issue-md: gh の JSON が不完全です（Issue #$ISSUE）" >&2
+	exit 1
+fi
+
+out="$(jq -r '
+	"# #\(.number) \(.title)\n\n## 本文\n\(.body)\n\n---\n# コメント",
+	(.comments[] | "### \(.author.login)（\(.authorAssociation // "?"), \(.createdAt)）\n\(.body)\n")' <<<"$json")" || exit 1
+number="$(jq -r '.number' <<<"$json")"
+title="$(jq -r '.title' <<<"$json")"
+body="$(jq -r '.body' <<<"$json")"
+# タイトル末尾の改行を $(...) に落とされないよう、末尾に印の . を付けてから外す
+head="$(jq -r '"# #\(.number) \(.title)\n\n## 本文\n."' <<<"$json")"
+head="${head%.}"
+fail=0
+
+# 空白除去の置換は UTF-8 で長い本文だと二乗に遅いので、非空白 1 文字の有無で見る
+if ! [[ "$body" =~ [^[:space:]] ]]; then
+	echo "harness-issue-md: 警告: Issue #$ISSUE の本文が空です（受け入れ条件が設計の入力に入りません）" >&2
+	[[ "$out" == "$head"* ]] || fail=1
+else
+	[[ "$out" == "${head}${body}"* ]] || fail=1
+fi
+if [ "$fail" = 1 ]; then
+	echo "harness-issue-md: 検査に失敗しました: 出力に Issue #$ISSUE の本文（## 本文）が入っていません" >&2
+	exit 3
+fi
+printf '%s\n' "$out"

@@ -1306,3 +1306,11 @@ test("#27: head が branchPrefix+n でない PR だけ --pr 付きの harness-me
 	assert.ok(loop.includes("tick の `harness-inbox` は branchPrefix+番号の PR しか見ない"));
 	assert.ok(cycle.includes("`harness-inbox` の tick は `--pr` で扱う PR を拾わない"));
 });
+
+test("#43: Phase 2 は harness-issue-md の失敗（本文が入らない等）を blocked で止め、空の入力で設計を頼まない", () => {
+	const phase2 = section(skill, "## Phase 2: 設計書生成", "# DESIGN_REQUEST_BEGIN");
+	assert.ok(phase2.includes('harness-issue-md {n} > "$WT/.harness/issue-{n}.md" || md_rc=$?'));
+	assert.ok(phase2.includes('harness-phase {n} blocked --comment-file "$WT/.harness/issue-md-error-{n}.md" || exit 1'));
+	assert.ok(phase2.includes('exit "$md_rc"'));
+	assert.ok(skill.includes("本文が出力に入っていなければ非 0"));
+});

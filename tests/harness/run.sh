@@ -100,6 +100,57 @@ md22="$(PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" 22 2>&1)"
 check "issue-md: 本文が空でもエラーにしない" '[ -n "$md22" ] && grep -q "^# #22 " <<<"$md22"'
 PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" >/dev/null 2>&1
 check "issue-md: 番号無しは拒否(2)" '[ $? -eq 2 ]'
+# 出力の検査（#43）。stdout と stderr を分け、失敗時は stdout が空で終了コードが決まった値であること
+mdrun() { # 番号。stdout を $TMP/md.out、stderr を $TMP/md.err、終了コードを md_rc へ（MDPATH で PATH を差し替え可）
+	PATH="${MDPATH:-$GHSTUB:$PATH}" "$BIN/harness-issue-md" "$1" >"$TMP/md.out" 2>"$TMP/md.err" </dev/null
+	md_rc=$?
+}
+mdrun 20
+check "issue-md: 本文あり→exit 0・stderr 空・1 行目が見出し" '[ "$md_rc" -eq 0 ] && [ ! -s "$TMP/md.err" ] && [ "$(head -n1 "$TMP/md.out")" = "# #20 本文ありのIssue" ] && grep -q "1. これができる" "$TMP/md.out"'
+mdrun 22
+check "issue-md: 空本文→exit 0・警告は stderr のみ・stdout に混ざらない" '[ "$md_rc" -eq 0 ] && grep -q "警告" "$TMP/md.err" && grep -q "本文が空" "$TMP/md.err" && grep -q "^## 本文$" "$TMP/md.out" && ! grep -q "警告" "$TMP/md.out"'
+# 本文を落とす jq（整形の退行を擬似再現）。MODE=drop は本文欄を空に、MODE=tail は本文の最後の行だけ削る
+REALJQ="$(command -v jq)"
+mkdir -p "$TMP/jqw"
+cat >"$TMP/jqw/jq" <<JQW
+#!/usr/bin/env bash
+args=()
+for a in "\$@"; do
+	if [ "\${MODE:-}" = drop ] && [[ "\$a" == *'## 本文'* ]]; then a="\${a/'\\(.body)'/}"; fi
+	args+=("\$a")
+done
+if [ "\${MODE:-}" = tail ] && [[ "\$*" == *'## 本文'* ]]; then
+	"$REALJQ" "\${args[@]}" | grep -v '^1\. これができる\$'
+	exit
+fi
+exec "$REALJQ" "\${args[@]}"
+JQW
+chmod +x "$TMP/jqw/jq"
+MDPATH="$TMP/jqw:$GHSTUB:$PATH" MODE=drop mdrun 20
+check "issue-md: 整形が本文を落としたら exit 3・stdout 空・検査に失敗" '[ "$md_rc" -eq 3 ] && [ ! -s "$TMP/md.out" ] && grep -q "検査に失敗" "$TMP/md.err"'
+MDPATH="$TMP/jqw:$GHSTUB:$PATH" MODE=tail mdrun 20
+check "issue-md: 本文の最後の行だけ落ちても exit 3・stdout 空" '[ "$md_rc" -eq 3 ] && [ ! -s "$TMP/md.out" ]'
+MDPATH="$TMP/jqw:$GHSTUB:$PATH" MODE=drop mdrun 26
+check "issue-md: コメントが ## 本文 と本文を引用していても、本文が落ちたら exit 3" '[ "$md_rc" -eq 3 ] && [ ! -s "$TMP/md.out" ] && grep -q "検査に失敗" "$TMP/md.err"'
+mdrun 26
+check "issue-md: 引用コメントがあっても通常は exit 0" '[ "$md_rc" -eq 0 ]'
+mdrun 27
+check "issue-md: タイトル末尾が改行でも exit 0" '[ "$md_rc" -eq 0 ] && [ ! -s "$TMP/md.err" ]'
+fail=1 mdrun 20
+check "issue-md: 環境変数 fail=1 が入っていても exit 0" '[ "$md_rc" -eq 0 ]'
+mdrun 99
+check "issue-md: gh 失敗→exit 1・stdout 空・gh の取得に失敗" '[ "$md_rc" -eq 1 ] && [ ! -s "$TMP/md.out" ] && grep -q "gh の取得に失敗" "$TMP/md.err"'
+mdrun 23
+check "issue-md: 途中で切れた JSON→exit 1・stdout 空" '[ "$md_rc" -eq 1 ] && [ ! -s "$TMP/md.out" ] && grep -q "JSON が不完全" "$TMP/md.err"'
+mdrun 24
+check "issue-md: comments 欠落→exit 1・stdout 空" '[ "$md_rc" -eq 1 ] && [ ! -s "$TMP/md.out" ]'
+mdrun 25
+check "issue-md: body キー無し→exit 1・stdout 空（空本文の警告で通さない）" '[ "$md_rc" -eq 1 ] && [ ! -s "$TMP/md.out" ] && ! grep -q "本文が空" "$TMP/md.err"'
+# 非 TTY（リダイレクト）でも本文が入り、失敗時の出力ファイルは空
+PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" 20 >"$TMP/x.md" 2>/dev/null </dev/null
+check "issue-md: 非 TTY のファイル出力でも本文が入り、1 行目が見出し" '[ "$(head -n1 "$TMP/x.md")" = "# #20 本文ありのIssue" ] && grep -q "1. これができる" "$TMP/x.md"'
+PATH="$GHSTUB:$PATH" "$BIN/harness-issue-md" 25 >"$TMP/x.md" 2>/dev/null </dev/null
+check "issue-md: 失敗時の > file は空" '[ ! -s "$TMP/x.md" ]'
 
 # 旧配置を明示した利用者の互換試験。
 jq '.worktreeRoot = ".worktrees"' "$PROJ/.claude/harness.json" > "$TMP/h.json" && mv "$TMP/h.json" "$PROJ/.claude/harness.json"
