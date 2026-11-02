@@ -102,14 +102,28 @@ umask 077
 # 動画と投稿本文の一時ファイルは通知の完了まで保持する。
 media_tmp="" comment_tmp="" convert_pid=""
 cleanup() {
+	local pids="" pid attempt alive
 	if [ -n "$convert_pid" ]; then
-		kill -TERM "$convert_pid" 2>/dev/null || true
+		pids="$convert_pid"
+	else
+		# `ffmpeg … &` と `convert_pid=$!` の間に HUP/INT/TERM が届くと convert_pid が空のまま来る。
+		# Why not: 代入を `&` の前に出す案は、$! を使う以上できない。wait の外で待つ案は、シグナルの即時回収を失う。
+		# このスクリプトのバックグラウンドは、変換と通知依頼（どちらも convert_pid で追う）だけなので、
+		# jobs -p の子をそれらとみなして片付ける。
+		pids="$(jobs -p 2>/dev/null || true)"
+	fi
+	if [ -n "$pids" ]; then
+		kill -TERM $pids 2>/dev/null || true
 		for ((attempt = 0; attempt < 20; attempt++)); do
-			kill -0 "$convert_pid" 2>/dev/null || break
+			alive=0
+			for pid in $pids; do
+				kill -0 "$pid" 2>/dev/null && alive=1
+			done
+			[ "$alive" = 1 ] || break
 			sleep 0.05
 		done
-		kill -KILL "$convert_pid" 2>/dev/null || true
-		wait "$convert_pid" 2>/dev/null || true
+		kill -KILL $pids 2>/dev/null || true
+		wait $pids 2>/dev/null || true
 	fi
 	[ -z "$comment_tmp" ] || rm -f -- "$comment_tmp"
 	[ -z "$media_tmp" ] || rm -rf -- "$media_tmp"
