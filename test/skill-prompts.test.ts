@@ -6,6 +6,7 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
+	readdirSync,
 	readFileSync,
 	realpathSync,
 	rmSync,
@@ -1313,4 +1314,78 @@ test("#43: Phase 2 は harness-issue-md の失敗（本文が入らない等）�
 	assert.ok(phase2.includes('harness-phase {n} blocked --comment-file "$WT/.harness/issue-md-error-{n}.md" || exit 1'));
 	assert.ok(phase2.includes('exit "$md_rc"'));
 	assert.ok(skill.includes("本文が出力に入っていなければ非 0"));
+});
+
+test("#42: 中間ファイルは project 名入りの scratchpad に置き、候補ファイルの1行目を検証役が照合する", async () => {
+	// 固定名の再発防止（skills / agents 全体）
+	const docs = [skill, loopSkill, conciergeSkill];
+	for (const name of readdirSync(new URL("../agents/", import.meta.url)))
+		docs.push(readFileSync(new URL(`../agents/${name}`, import.meta.url), "utf8"));
+	for (const d of docs) assert.ok(!d.includes("/tmp/harness-"));
+
+	// 4種別とも $D 配下の {P}-{n}-種別 形式
+	for (const kind of ["q", "pr", "merge", "review-{spec|impl}-candidate"])
+		assert.ok(skill.includes(`$D/{P}-{n}-${kind}.md`) || skill.includes(`$D/$P-{n}-${kind}.md`), kind);
+	// --comment-file ... / --body-file ... の本文も同じ規則
+	const rule = section(skill, "## 中間ファイルの置き場", "## Codex の共通起動手順");
+	assert.ok(rule.includes("`--comment-file ...` / `--body-file ...` に渡す本文"));
+	assert.ok(rule.includes("固定名で `/tmp` に書かない"));
+	for (const w of [
+		"DLE_PROJECT",
+		"Scratchpad directory",
+		`${"$"}{TMPDIR:-/tmp}/dle-scratch`,
+		'echo "D=$D P=$P"',
+		"echo で得た `D` と `P` の値",
+	])
+		assert.ok(rule.includes(w), w);
+
+	// $D を使う fenced block は D= の導出も同じ block に持つ（空の $D で /xxx.md になるのを防ぐ）
+	for (const m of skill.matchAll(/```bash\n([\s\S]*?)```/g)) {
+		if (/\$D(?![A-Za-z_])/.test(m[1] ?? "")) assert.ok(/(^|[\s;])D=/m.test(m[1] ?? ""), (m[1] ?? "").slice(0, 80));
+	}
+
+	// 候補ファイルの1行目と照合
+	const common = section(skill, "## レビュー共通:", "## Phase 3:");
+	for (const w of [
+		"候補: project={P} issue=#{n} kind={spec|impl}",
+		"`rm -f`",
+		"検証役を起動せず、懐疑役を1回だけやり直す",
+		"head -n1",
+		"一致しない",
+		"`NG`",
+		"懐疑役を作り直して",
+		"懐疑役を1回だけやり直す（再度無ければ、取り違えと同じく blocked）",
+		"harness-phase {n} blocked --comment-file $D/{P}-{n}-blocked.md",
+	])
+		assert.ok(common.includes(w), w);
+	// 取り違え NG は Phase 3・5-1 の NG 分岐でも Codex に差し戻さない
+	assert.equal(skill.split("**NG**（取り違え NG は除く。レビュー共通に従い懐疑役を作り直す）→").length - 1, 2);
+
+	// パス規則のシェルを実行
+	const block = /```bash\n([\s\S]*?)```/.exec(rule)?.[1] ?? "";
+	assert.ok(block.includes("D="));
+	const root = mkdtempSync(path.join(os.tmpdir(), "dle42-"));
+	const run = (proj: string, scratch: string) =>
+		bash(
+			`harness-config() { echo "$@" | grep -q -- --root && echo /x/repo || echo "$2"; }
+cd "${root}"
+${block.replace(/SCRATCH="<[^"]*>"/, `SCRATCH="${scratch}"`)}
+echo "RES=$D"
+echo "PP=$P"`,
+			{ ...process.env, DLE_PROJECT: proj, TMPDIR: root },
+		);
+	const field = (out: string) => /RES=(.*)/.exec(out)?.[1] ?? "";
+	const a = field((await run("proj-a", root)).stdout);
+	const b = field((await run("proj b/!", root)).stdout);
+	assert.equal(a, path.join(root, "proj-a"));
+	assert.match((await run("proj b/!", root)).stdout, /D=\S+ P=proj_b__/);
+	assert.equal(b, path.join(root, "proj_b__"));
+	assert.notEqual(a, b);
+	// scratchpad なし・相対のまま（置換し忘れ）は TMPDIR 配下のフォールバック。cwd に相対ディレクトリを作らない
+	for (const s of ["", "<システムプロンプトの Scratchpad directory の絶対パス>", `${root}/nonexistent`]) {
+		const r = await run("proj-a", s);
+		assert.equal(field(r.stdout), path.join(root, "dle-scratch", "proj-a"), s);
+	}
+	assert.ok(!existsSync(path.join(root, "<システムプロンプトの Scratchpad directory の絶対パス>")));
+	rmSync(root, { recursive: true, force: true });
 });

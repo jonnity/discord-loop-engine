@@ -15,6 +15,7 @@ import {
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { waitForContent } from "./wait-file.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const fixtures = path.join(root, "tests/harness/fixtures");
@@ -77,8 +78,9 @@ for (const signal of ["SIGHUP", "SIGINT", "SIGTERM", "child", "ignore"] as const
 			const done = new Promise<number | null>((r) => child.once("exit", r));
 			let converter = 0;
 			try {
-				await until(() => existsSync(env.MEDIA_PID));
-				converter = Number(readFileSync(env.MEDIA_PID, "utf8"));
+				converter = Number(await waitForContent(env.MEDIA_PID));
+				// 0 や NaN のまま kill すると自分のプロセスグループに送ってしまう
+				assert.ok(Number.isInteger(converter) && converter > 0, `不正な PID: ${converter}`);
 				if (signal === "child") process.kill(converter, "SIGTERM");
 				else child.kill(signal === "ignore" ? "SIGTERM" : signal);
 				let timer: ReturnType<typeof setTimeout> | undefined;

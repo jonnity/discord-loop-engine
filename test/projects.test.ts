@@ -11,7 +11,6 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { setTimeout as delay } from "node:timers/promises";
 import { type Config, loadConfig } from "../src/config.ts";
 import { Ledger, type Project } from "../src/ledger.ts";
 import {
@@ -24,6 +23,7 @@ import {
 	sessionTargets,
 } from "../src/projects.ts";
 import { Supervisor } from "../src/supervisor.ts";
+import { waitForContent } from "./wait-file.ts";
 
 test("origin の URL から owner/repo を読む", () => {
 	assert.equal(repoFromRemote("https://github.com/jonnity/kishimen-tool.git"), "jonnity/kishimen-tool");
@@ -370,9 +370,7 @@ test("W6: --add-dir・exec env の実argv/cwd/PID、sh/dash、mkdir失敗とrepo
 				});
 				const done = once(child, "close");
 				try {
-					for (let i = 0; i < 500 && !existsSync(ready); i++) await delay(10);
-					assert.ok(existsSync(ready), t.command);
-					const r = JSON.parse(readFileSync(ready, "utf8"));
+					const r = JSON.parse(await waitForContent(ready, { label: t.command }));
 					assert.equal(r.pid, child.pid);
 					assert.equal(r.cwd, main);
 					assert.equal(r.configHome, home);
