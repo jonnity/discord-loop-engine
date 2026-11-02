@@ -86,6 +86,23 @@ preflight/gate は自分で全 DLE_*/DISCORD_* を除去し、一時 home/socket
 
 以下 `{n}` は Issue 番号、`$WT` は `harness-config --worktree {n}` の解決済み絶対パス。
 
+## 中間ファイルの置き場
+
+Issue 本文・PR 本文・質問・候補指摘などの中間ファイルは、プロジェクト名入りの scratchpad に置く（Issue 番号だけの固定名は別プロジェクトと衝突する）。
+
+```bash
+P="${DLE_PROJECT:-$(harness-config '.project' "$(basename "$(harness-config --root)")")}"
+P="$(printf %s "$P" | tr -c 'A-Za-z0-9._-' '_')"
+SCRATCH="<システムプロンプトの Scratchpad directory の絶対パス>"
+case "$SCRATCH" in /*) [ -d "$SCRATCH" ] ;; *) false ;; esac || SCRATCH="${TMPDIR:-/tmp}/dle-scratch"
+D="$SCRATCH/$P"; mkdir -p "$D"; echo "D=$D P=$P"
+```
+
+- ファイル名は `$D/{P}-{n}-<種別>.md`（種別は q・pr・merge・review-spec-candidate・review-impl-candidate など）。固定の `/tmp` 名にしない。
+- echo で得た `D` と `P` の値を、Write のパスの `{P}` と本文に使う。`$D` / `$P` を使う各 Bash ブロックは、先頭で `D="<echo の D>"`、`P="<echo の P>"` と置く（別シェルのため）。
+- `--comment-file ...` / `--body-file ...` に渡す本文（note・plan・blocked・ログなど）も `$D/{P}-{n}-<種別>.md` に置き、固定名で `/tmp` に書かない。
+- 懐疑役・検証役には `D` を導出させず、主セッションが決めた絶対パスを渡す。
+
 ## Codex の共通起動手順
 
 全ての起動・再起動（Phase 2/4、設計/実装レビューNG、監視、CI red、衝突解消、ユーザーNG）は、
@@ -172,7 +189,8 @@ demo が設定されていて UI・操作に関わる変更、または動画利
 設計で「最小」「実装者判断」に委ねない。demo=null/UI 非変更の全案件には録画を強制しない。
 
 ```bash
-harness-phase {n} interview --comment-file /tmp/harness-q-{n}.md \
+D="<echo で得た絶対パス>"; P="<無害化済みのプロジェクト名>"
+harness-phase {n} interview --comment-file "$D/$P-{n}-q.md" \
   --summary "Q1. ...（1行）"
 ```
 
@@ -397,9 +415,13 @@ T5 は gate 取得の非0を stub で注入する単体検証であり、不正 
 Phase 3・5 のレビューは、成果物を作った文脈から切り離した **fresh なサブエージェント2体**で行う。
 
 1. **懐疑役**: 「問題がある」前提で反証を試みる。良い点は書かない。候補指摘を
-   `/tmp/harness-review-{n}-{spec|impl}-candidate.md` に書いて終わる。
+   `$D/{P}-{n}-review-{spec|impl}-candidate.md`（絶対パスで渡す）に書いて終わる。1行目は
+   `候補: project={P} issue=#{n} kind={spec|impl}`、2行目以降に候補指摘。
+   主セッションは懐疑役を起動する**前に**このファイルを `rm -f` する。返却後にファイルが無ければ検証役を起動せず、懐疑役を1回だけやり直す（再度無ければ、取り違えと同じく blocked）。
 2. **検証役**: 別の fresh context で、候補指摘を成果物・実コード・テスト・一次情報に照らして再検証し、
-   実証できないものを棄却する。返却は先頭 `OK` / `NG`、確定指摘ごとに
+   実証できないものを棄却する。最初に `head -n1` で候補ファイルの1行目を、主セッションが渡した期待文字列と
+   完全一致で比べる。不一致・ファイル無し・空は、内容を読まず `NG`、確定指摘は
+   `[高][確定] 候補ファイル — 1行目が依頼と一致しない（取り違え）— 期待/実際` の1件だけにする。返却は先頭 `OK` / `NG`、確定指摘ごとに
    `[深刻度][確度] 箇所 — 指摘 — 根拠`、最後に `反証を試みたが壊せなかった点:` を1〜2行。
 
 検証役の判定基準: ツールのメジャー版更新で、ローカルでは確かめられない環境依存については、一次情報で
@@ -408,8 +430,10 @@ Phase 3・5 のレビューは、成果物を作った文脈から切り離し�
 設計時に実行できないという理由だけで同じ確認の再依頼を繰り返さない。一般のコード不備や未対応の受け入れ条件を
 通す根拠にはしない。実装段階の修正回数の判定は PR 作成後の 5-3 で行う。
 
+取り違え NG は成果物の問題ではないので Codex に差し戻さず、懐疑役を作り直して検証役を新しい fresh で再実行する
+（1回だけ。再度不一致なら `harness-phase {n} blocked --comment-file $D/{P}-{n}-blocked.md`。期待/実際の1行目と経緯を書く）。
 主セッションは検証役の結果（数行）だけを受け取り、採否を決める。過剰設計になる指摘は棄却してよい。
-渡すのはパスだけ（`$WT`、spec、Issue ファイル、`context`。Phase 3・5 両方の懐疑役・検証役に生成済みの
+渡すのはパスだけ（`$WT`、候補ファイルの絶対パスと期待する1行目、spec、Issue ファイル、`context`。Phase 3・5 両方の懐疑役・検証役に生成済みの
 `prompt-spec-{n}.md` も渡す）。Codex の説明や主セッションの会話は渡さない。
 
 ## Phase 3: 設計書レビュー
@@ -427,7 +451,7 @@ gate と同じ列・順序の検査、新規テストの探索/除外/呼び出�
 
 - **OK** → 設計書を Issue にコメント（`## 実装プラン` 見出し＋本文、末尾 `<!-- harness:note -->`）し、
   `harness-phase {n} implementing` → Phase 4
-- **NG** → `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストと gate を残した同じファイルを渡して
+- **NG**（取り違え NG は除く。レビュー共通に従い懐疑役を作り直す）→ `prompt-spec-{n}.md` に確定指摘を追記し、チェックリストと gate を残した同じファイルを渡して
   `codex-spec-{n}` を共通起動手順（準備で `harness-codex stop` → 別 Bash で `harness-codex start`）で再起動し、spec を書き直させる（Claude は直さない）。
   指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
   フォールバックにもこの同じ依頼ファイルのパスを渡す
@@ -489,7 +513,7 @@ gate の列・順序と終了値、新規テストの探索/除外/呼び出し�
 停止計画が impl サマリへ引き継がれたかも確認する。未実施は未確認として残す。
 この時点では実 CI ログ・修正回数を要求せず、その判定は PR 作成後の 5-3 に置く。
 
-- **NG** → 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動（軽微でも Claude は直さない）。指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
+- **NG**（取り違え NG は除く。レビュー共通に従い懐疑役を作り直す）→ 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動（軽微でも Claude は直さない）。指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
 
 ### 5-2. 実動作の確認（UI 変更のとき）
 
@@ -512,13 +536,14 @@ if [ -n "$REC" ]; then mkdir -p "$WT/$REC"; { cat "$WT/.harness/spec/{n}.md"; \
   printf '\n\n---\n\n# 実装完了サマリ\n\n'; cat "$WT/.harness/impl/{n}.md"; } > "$WT/$REC/{n}.md"; fi
 git -C "$WT" add <変更ファイルを列挙> ${REC:+$REC/{n}.md}   # .harness/ は絶対に add しない
 git -C "$WT" commit -m "<Why が分かるメッセージ>"
+D="<echo で得た絶対パス>"; P="<無害化済みのプロジェクト名>"
 gate_rc=0
 (cd "$WT" && harness-gate) || gate_rc=$?
 # 0=成功、1=コード検査失敗、2=設定不備、3=環境不備。非0ならこのブロックを止める。
 if [ "$gate_rc" -ne 0 ]; then exit "$gate_rc"; fi
 git -C "$WT" push -u origin "$(harness-config '.branchPrefix' fix/issue-){n}"
 gh pr create --base "$(harness-config '.baseBranch' main)" --head "$(harness-config '.branchPrefix' fix/issue-){n}" \
-  --title "<種別>: <要約> (#{n})" --body-file /tmp/harness-pr-{n}.md   # 本文に必ず "closes #{n}"
+  --title "<種別>: <要約> (#{n})" --body-file "$D/$P-{n}-pr.md"   # 本文に必ず "closes #{n}"
 ```
 
 gate の終了1は Codex にコード修正を差し戻し（指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。）、終了2は設定を修正する。終了3は環境不備として
@@ -544,7 +569,8 @@ UI 非変更や demo=null の全案件には録画を強制しない。長い変
 サマリの録画時 full SHA・PR 現 head・完成markerを直前/完成後に照合し、違う/不明なら撮り直す。
 
 ```bash
-(cd "$WT" && harness-phase {n} awaiting-merge --pr <PR番号> --comment-file /tmp/harness-merge-{n}.md \
+D="<echo で得た絶対パス>"; P="<無害化済みのプロジェクト名>"
+(cd "$WT" && harness-phase {n} awaiting-merge --pr <PR番号> --comment-file "$D/$P-{n}-merge.md" \
   --summary "判定 ✅ / 受け入れ条件 1✅ 2✅ / 要実機確認 1件" \
   --file "<合意範囲を現 head で録画した mp4>")
 ```
