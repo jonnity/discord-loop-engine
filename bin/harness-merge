@@ -122,6 +122,63 @@ if [ -n "$bad_checks" ]; then
 	exit 1
 fi
 
+# プロジェクトが merge.requiredChecks を指定したときだけ、必須の検査が現在の head で SUCCESS であることを要求する（opt-in）。
+# cfg() は失敗を握りつぶして空にするため、不正な merge を「指定なし」と取り違えないよう harness-config を直接呼ぶ。
+# 終了 1 は「キー無し・設定無し」（指定なし）、1 以外の非 0 は jq の型エラー（merge が配列・文字列など）で fail closed。
+required_rc=0
+required="$("$SCRIPT_DIR/harness-config" '.merge.requiredChecks | select(. != null) | tojson' 2>/dev/null)" || required_rc=$?
+required_invalid() {
+	reject required-checks-invalid || true
+	echo "harness-merge: harness.json の merge.requiredChecks は文字列の配列、merge.hint は文字列で指定してください" >&2
+	exit 1
+}
+if [ "$required_rc" -gt 1 ]; then required_invalid; fi
+if [ "$required_rc" = 0 ] && [ -n "$required" ]; then
+	jq -e 'type == "array" and all(.[]; type == "string" and length > 0)' <<<"$required" >/dev/null 2>&1 || required_invalid
+	if [ "$(jq 'length' <<<"$required")" -gt 0 ]; then
+		hint_rc=0
+		hint="$("$SCRIPT_DIR/harness-config" '.merge.hint | select(. != null) | if type == "string" then . else error("hint") end' 2>/dev/null)" || hint_rc=$?
+		if [ "$hint_rc" -gt 1 ]; then required_invalid; fi
+		[ "$hint_rc" = 0 ] || hint=""
+		req_state="$(gh pr view "$PR" --json headRefOid,statusCheckRollup)" || { reject approval-unavailable || true; exit 1; }
+		cur_head="$(jq -r '.headRefOid | strings' <<<"$req_state" 2>/dev/null)" || cur_head=""
+		want_head="$(jq -r .gate.head <<<"$snapshot")"
+		hex40='^[0-9a-f]{40}$'
+		if [[ ! "$cur_head" =~ $hex40 ]] || [[ ! "$want_head" =~ $hex40 ]] || [ "$cur_head" != "$want_head" ]; then
+			reject request-stale || true
+			echo "harness-merge: 承認依頼の head ${want_head:0:7} と現在の head ${cur_head:0:7} が違います。承認依頼を出し直し、現在の head で検査を実行してください" >&2
+			exit 1
+		fi
+		# 合格は積極判定のみ（一致する要素が 1 件以上で全件 SUCCESS）。jq の失敗・空出力は合格にしない。
+		# 名前は --argjson で渡し、== で完全一致させる（正規表現や部分一致にしない）。
+		unmet_rc=0
+		unmet="$(jq -c --argjson req "$required" '
+			if (.statusCheckRollup | type) != "array" then error("rollup") else . end
+			| .statusCheckRollup as $r
+			| [$req[] as $n
+				| [$r[] | select((.name // .context) == $n)
+					| (if (.status // "") != "" then (if .status == "COMPLETED" then (.conclusion // "") else .status end) else (.state // "") end)
+					| if . == "" then "不明" else . end] as $states
+				| if ($states | length) == 0 then "  - \($n): 未実行（statusCheckRollup に見つかりません）"
+				  elif all($states[]; . == "SUCCESS") then empty
+				  else "  - \($n): \([$states[] | select(. != "SUCCESS") | if IN("IN_PROGRESS", "QUEUED", "WAITING", "PENDING", "REQUESTED") then "pending(\(.))" else . end] | unique | join(", "))" end] as $lines
+			| {ok: ($lines | length == 0), lines: $lines}' <<<"$req_state" 2>/dev/null)" || unmet_rc=$?
+		if [ "$unmet_rc" != 0 ] || ! jq -e '.ok == true' <<<"$unmet" >/dev/null 2>&1; then
+			reject required-checks-unmet || true
+			echo "harness-merge: 承認依頼の出し直しではなく、必須の検査を通してください。" >&2
+			echo "harness-merge: 必須の検査が現在の head ${cur_head:0:7} で success になっていません:" >&2
+			if [ "$unmet_rc" = 0 ]; then jq -r '.lines[]' <<<"$unmet" >&2; else echo "  - statusCheckRollup を判定できませんでした" >&2; fi
+			if [ -n "$hint" ]; then
+				echo "$hint" >&2
+			else
+				echo "足すもの: 各検査を現在の head で実行して success にしてください（検査名は statusCheckRollup の name と完全一致で照合しています）。" >&2
+				echo "head を更新した場合は、古い head の結果は数えないので再実行が要ります。" >&2
+			fi
+			exit 1
+		fi
+	fi
+fi
+
 if ! "$SCRIPT_DIR/harness-hook" beforeMerge --issue "$ISSUE" --pr "$PR"; then
 	reject before-merge-failed || true
 	echo "harness-merge: hooks.beforeMerge が通らないためマージしません" >&2

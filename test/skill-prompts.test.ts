@@ -911,6 +911,14 @@ fs.writeFileSync(p,JSON.stringify(comments));
 		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, count);
 		assert.equal((await run("A-14", "attention-open")).code, 0);
 		assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, count + 1);
+		// 待っても直らない 2 コードは「通知済みまたは通知不要」の腕に載せず、オーナーへ通知する。
+		for (const reason of ["required-checks-unmet", "required-checks-invalid"]) {
+			const before = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length;
+			assert.equal((await run("A-14", reason)).code, 0, reason);
+			assert.equal(readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").length, before + 1, reason);
+			const latest = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n").at(-1) ?? "";
+			assert.ok(latest.includes("承認依頼の出し直しではなく"), reason);
+		}
 		assert.equal((await run("A-14", "request-pending", "0", "pending")).code, 3);
 		mkdirSync(path.join(dir, ".harness"));
 		symlinkSync(path.join(dir, "missing"), path.join(dir, ".harness/merge-recovery-3.json"));

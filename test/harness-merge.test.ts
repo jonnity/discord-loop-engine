@@ -1247,3 +1247,266 @@ for (const [name, env, config] of [
 		}
 	});
 }
+
+// ---- merge.requiredChecks（必須の検査を現在の head の SUCCESS で要求する opt-in。#51）----
+type Rollup = Record<string, unknown>;
+const done = (name: string, conclusion: string): Rollup => ({
+	__typename: "CheckRun",
+	name,
+	status: "COMPLETED",
+	conclusion,
+});
+const running = (name: string, status: string): Rollup => ({ __typename: "CheckRun", name, status, conclusion: "" });
+const E2E = "Local E2E";
+async function plainFixture() {
+	const s = setup();
+	assert.equal((await s.call("harness-phase", args)).code, 0);
+	const state = s.state();
+	state.comments.push(ownerOk);
+	writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
+	return s;
+}
+function setMerge(s: { env: NodeJS.ProcessEnv }, merge: unknown) {
+	const config = JSON.parse(readFileSync(String(s.env.HARNESS_CONFIG), "utf8"));
+	if (merge === undefined) delete config.merge;
+	else config.merge = merge;
+	writeFileSync(String(s.env.HARNESS_CONFIG), JSON.stringify(config));
+}
+const rollupViews = (s: { env: NodeJS.ProcessEnv }) => (log(s).match(/^rollup-view /gm) ?? []).length;
+type Fixture = typeof plainFixture;
+type Sx = Awaited<ReturnType<Fixture>>;
+// 1 ケース分: 設定と rollup を与えて harness-merge を呼び、後始末までする。
+async function withRequired(
+	merge: unknown,
+	rollup: Rollup[] | undefined,
+	body: (s: Sx, r: { code: number; stdout: string; stderr: string }) => void | Promise<void>,
+	opts: { fixture?: Fixture; env?: NodeJS.ProcessEnv; argv?: string[] } = {},
+) {
+	const s = await (opts.fixture ?? plainFixture)();
+	try {
+		setMerge(s, merge);
+		const env = { ...(rollup ? { ROLLUP: JSON.stringify(rollup) } : {}), ...opts.env };
+		const r = await s.call("harness-merge", opts.argv ?? ["3"], env);
+		await body(s, r);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+}
+const req = { requiredChecks: [E2E] };
+const expectReject = (reason: string, pattern?: RegExp) => (s: Sx, r: { code: number; stderr: string }) => {
+	assert.equal(r.code, 1, r.stderr);
+	assert.match(r.stderr, new RegExp(`harness-merge: ${reason}。`));
+	if (pattern) assert.match(r.stderr, pattern);
+	noMerge(s);
+};
+
+test("T1: 必須の検査が現在の head で SUCCESS ならマージされる（取得は 1 回）", async () => {
+	await withRequired(req, [done(E2E, "SUCCESS")], (s, r) => {
+		assert.equal(r.code, 0, r.stderr);
+		assert.equal((log(s).match(/^merge /gm) ?? []).length, 1);
+		assert.equal(rollupViews(s), 1);
+	});
+});
+test("T2: SKIPPED は拒否し、検査名・SKIPPED・出し直しではない旨・足すものを示す", async () => {
+	await withRequired(req, [done(E2E, "SKIPPED")], (s, r) => {
+		expectReject("required-checks-unmet", /Local E2E: SKIPPED/)(s, r);
+		assert.match(r.stderr, /出し直しではなく、必須の検査を通してください/);
+		assert.match(r.stderr, /足すもの: /);
+		assert.equal(rollupViews(s), 1);
+	});
+});
+test("T3: IN_PROGRESS（pending）は拒否する", async () => {
+	await withRequired(
+		req,
+		[running(E2E, "IN_PROGRESS")],
+		expectReject("required-checks-unmet", /pending\(IN_PROGRESS\)/),
+	);
+});
+test("T4: rollup に無い（未実行）は他の検査が SUCCESS でも拒否し「未実行」を示す", async () => {
+	await withRequired(req, [done("Build", "SUCCESS")], expectReject("required-checks-unmet", /Local E2E: 未実行/));
+});
+test("T5: headRefOid が承認依頼の head と違えば、rollup が SUCCESS でも request-stale で拒否する", async () => {
+	await withRequired(req, [done(E2E, "SUCCESS")], expectReject("request-stale", /違います/), {
+		env: { ROLLUP_HEAD: "d".repeat(40) },
+	});
+});
+for (const c of ["NEUTRAL", "FAILURE"])
+	test(`T6: ${c} は拒否する`, async () => {
+		await withRequired(req, [done(E2E, c)], expectReject("required-checks-unmet", new RegExp(`Local E2E: ${c}`)));
+	});
+test("T7: 複数の必須検査で 1 つだけ不合格なら、不合格の名前だけ列挙する", async () => {
+	await withRequired({ requiredChecks: [E2E, "Build"] }, [done(E2E, "SKIPPED"), done("Build", "SUCCESS")], (s, r) => {
+		expectReject("required-checks-unmet", /Local E2E: SKIPPED/)(s, r);
+		assert.doesNotMatch(r.stderr, /- Build:/);
+	});
+});
+for (const [label, merge] of [
+	["merge なし", undefined],
+	["requiredChecks なし", { hint: "x" }],
+	["requiredChecks が空配列", { requiredChecks: [] }],
+] as const)
+	test(`T8: opt-in なし（${label}）は SKIPPED があってもマージされ、新しい gh 呼び出しが無い`, async () => {
+		await withRequired(
+			merge,
+			[done(E2E, "SKIPPED")],
+			(s, r) => {
+				assert.equal(r.code, 0, r.stderr);
+				assert.equal(rollupViews(s), 0);
+				assert.equal((log(s).match(/^merge /gm) ?? []).length, 1);
+			},
+			{},
+		);
+	});
+test("T9: merge.hint があればメッセージが置き換わり、無ければ既定文", async () => {
+	await withRequired(
+		{ requiredChecks: [E2E], hint: "e2e ラベルを付けて実行してください" },
+		[done(E2E, "SKIPPED")],
+		(s, r) => {
+			expectReject("required-checks-unmet", /e2e ラベルを付けて実行してください/)(s, r);
+			assert.doesNotMatch(r.stderr, /足すもの: /);
+			assert.match(r.stderr, /Local E2E: SKIPPED/);
+		},
+	);
+});
+test("T10: harness-merge <issue> --pr <番号> でも同じ判定が効く", async () => {
+	const o = { fixture: () => featFixture(), argv: ["3", "--pr", "9"] };
+	await withRequired(
+		req,
+		[done(E2E, "SUCCESS")],
+		(s, r) => {
+			assert.equal(r.code, 0, r.stderr);
+			assert.match(log(s), /^merge-target 9$/m);
+		},
+		o,
+	);
+	await withRequired(req, [done(E2E, "SKIPPED")], expectReject("required-checks-unmet", /SKIPPED/), o);
+	await withRequired(req, [done(E2E, "SUCCESS")], expectReject("request-stale"), {
+		...o,
+		env: { ROLLUP_HEAD: "d".repeat(40) },
+	});
+});
+for (const [label, merge] of [
+	["requiredChecks が文字列", { requiredChecks: "Local E2E" }],
+	["merge が文字列", "x"],
+] as const)
+	test(`T11: ${label}は fail closed`, async () => {
+		await withRequired(merge, [done(E2E, "SUCCESS")], expectReject("required-checks-invalid"));
+	});
+test("T12: チャット承認で不合格なら診断 JSON の reason が required-checks-unmet", async () => {
+	await withRequired(
+		req,
+		[done(E2E, "SKIPPED")],
+		(s, r) => {
+			assert.equal(r.code, 1, r.stderr);
+			const d = diagnostics(r.stderr);
+			assert.equal(d.length, 1);
+			assert.equal(d[0].reason, "required-checks-unmet");
+			noMerge(s);
+		},
+		{ fixture: chatFixture, argv: chatArgs },
+	);
+});
+test("T13: 同名の検査は全件 SUCCESS のときだけ合格", async () => {
+	await withRequired(req, [done(E2E, "SUCCESS"), done(E2E, "FAILURE")], expectReject("required-checks-unmet"));
+	await withRequired(req, [done(E2E, "SUCCESS"), done(E2E, "SKIPPED")], expectReject("required-checks-unmet"));
+	await withRequired(req, [done(E2E, "SUCCESS"), done(E2E, "SUCCESS")], (_s, r) => assert.equal(r.code, 0, r.stderr));
+});
+test("T14: StatusContext（context/state）は SUCCESS のみ合格", async () => {
+	const ctx = (state: string): Rollup => ({ __typename: "StatusContext", context: E2E, state });
+	await withRequired(req, [ctx("SUCCESS")], (_s, r) => assert.equal(r.code, 0, r.stderr));
+	for (const st of ["PENDING", "FAILURE", "ERROR"])
+		await withRequired(req, [ctx(st)], expectReject("required-checks-unmet", new RegExp(`Local E2E: .*${st}`)));
+});
+test("T15: pending 語彙と conclusion 語彙はすべて拒否する", async () => {
+	for (const st of ["QUEUED", "WAITING", "PENDING", "IN_PROGRESS"])
+		await withRequired(
+			req,
+			[running(E2E, st)],
+			expectReject("required-checks-unmet", new RegExp(`pending\\(${st}\\)`)),
+		);
+	for (const c of ["CANCELLED", "TIMED_OUT", "ACTION_REQUIRED", "STALE", "STARTUP_FAILURE"])
+		await withRequired(req, [done(E2E, c)], expectReject("required-checks-unmet", new RegExp(`Local E2E: ${c}`)));
+});
+test("T16: 名前は完全一致（大小文字・空白・部分一致・正規表現メタ文字）", async () => {
+	const near = ["local e2e", " Local E2E", "Local E2E ", "Local E2E 2", "Local.E2E", ".*", "Local E2"].map((n) =>
+		done(n, "SUCCESS"),
+	);
+	await withRequired(req, near, expectReject("required-checks-unmet", /Local E2E: 未実行/));
+	await withRequired(
+		{ requiredChecks: ["Local.E2E"] },
+		[done("Local E2E", "SUCCESS")],
+		expectReject("required-checks-unmet"),
+	);
+	await withRequired({ requiredChecks: [".*"] }, [done("Local E2E", "SUCCESS")], expectReject("required-checks-unmet"));
+	await withRequired({ requiredChecks: ["Local.E2E"] }, [done("Local.E2E", "SUCCESS")], (_s, r) =>
+		assert.equal(r.code, 0, r.stderr),
+	);
+});
+test("T17: 不正な形はすべて required-checks-invalid（マージなし）", async () => {
+	const bad: unknown[] = [
+		{ requiredChecks: [""] },
+		{ requiredChecks: [1] },
+		{ requiredChecks: {} },
+		{ requiredChecks: false },
+		{ requiredChecks: "x" },
+		[],
+		"x",
+		{ requiredChecks: [E2E], hint: 5 },
+	];
+	for (const merge of bad) await withRequired(merge, [done(E2E, "SUCCESS")], expectReject("required-checks-invalid"));
+});
+test("T18: 拒否時は beforeMerge・harness-phase done・merge が走らない", async () => {
+	const s = await plainFixture();
+	try {
+		const marker = path.join(s.dir, "marker");
+		const config = JSON.parse(readFileSync(String(s.env.HARNESS_CONFIG), "utf8"));
+		config.hooks.beforeMerge = [`touch ${marker}`];
+		config.merge = req;
+		writeFileSync(String(s.env.HARNESS_CONFIG), JSON.stringify(config));
+		const r = await s.call("harness-merge", ["3"], { ROLLUP: JSON.stringify([done(E2E, "SKIPPED")]) });
+		assert.equal(r.code, 1);
+		assert.equal(existsSync(marker), false);
+		noMerge(s);
+		assert.ok(s.state().labels.includes("harness:awaiting-merge"));
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+test("T19: CI 赤・mergeable でないときは先にそちらで拒否し、検査は取得しない", async () => {
+	await withRequired(
+		req,
+		[done(E2E, "SKIPPED")],
+		(s, r) => {
+			expectReject("ci-not-green")(s, r);
+			assert.equal(rollupViews(s), 0);
+		},
+		{ env: { CI_BAD: "1" } },
+	);
+	await withRequired(
+		req,
+		[done(E2E, "SKIPPED")],
+		(s, r) => {
+			expectReject("mergeable-unconfirmed")(s, r);
+			assert.equal(rollupViews(s), 0);
+		},
+		{ env: { MERGEABLE: "CONFLICTING" } },
+	);
+});
+test("T20: 検査の取得に失敗したら approval-unavailable で拒否する", async () => {
+	await withRequired(req, [done(E2E, "SUCCESS")], expectReject("approval-unavailable"), { env: { ROLLUP_FAIL: "1" } });
+});
+test("T21: rollup が null・配列でない（値入りオブジェクト含む）・headRefOid が欠落や不正なら合格にしない", async () => {
+	const h = "a".repeat(40);
+	const ok = [done(E2E, "SUCCESS")];
+	const raws: [Record<string, unknown>, string][] = [
+		[{ headRefOid: h, statusCheckRollup: null }, "required-checks-unmet"],
+		[{ headRefOid: h, statusCheckRollup: {} }, "required-checks-unmet"],
+		[{ headRefOid: h, statusCheckRollup: { a: done(E2E, "SUCCESS") } }, "required-checks-unmet"],
+		[{ headRefOid: h }, "required-checks-unmet"],
+		[{ statusCheckRollup: ok }, "request-stale"],
+		[{ headRefOid: "xyz", statusCheckRollup: ok }, "request-stale"],
+		[{ headRefOid: h, statusCheckRollup: ["x"] }, "required-checks-unmet"],
+	];
+	for (const [raw, reason] of raws)
+		await withRequired(req, undefined, expectReject(reason), { env: { ROLLUP_RAW: JSON.stringify(raw) } });
+});
