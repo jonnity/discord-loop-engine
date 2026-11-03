@@ -328,9 +328,12 @@ claude plugin update discord-loop-engine@discord-loop-engine
 dle down && dle up
 ```
 
+plugin の cache が古いと、worker の PATH に `harness-codex` などの入口が入らず、許可を足しても届きません（0.1.1 に version を上げたのは、据え置きだと `claude plugin update` が更新するか未確認のため、更新を確実にする狙いです）。
+更新後、worker の plugin cache の `bin/` に `harness-codex` があることを確かめ、worker を再起動してください（許可は起動時に決まります）。
+
 ### Codex の設定移行
 
-Codex の既定値と配布雛形は次のコマンドです。明示された `codex.command` は優先されるため、既存設定は自動で変わりません。
+Codex の既定値と配布雛形は次のコマンドです。`codex.command` は固定の文法（`codex` の後に `-C {worktree}` を 1 回、`-c <許可された key>=<値>`、`--model <名>`、`exec`、`--sandbox <workspace-write|read-only>` だけ）に全体一致するときだけ使われ、外れたもの（bypass・`--yolo`・danger-full-access・引用・`$` などを含むもの）は警告（stdout の `warning: bypass-rejected`。プロジェクトごとに初回だけ）を出して、上の既定で起動します。設定の書き換えはしないので、各プロジェクトの設定はオーナーが直してください。
 
 ```text
 codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write
@@ -340,7 +343,7 @@ codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.ne
 依存導入・ビルドが失敗しえます。依存導入は worker 側の `hooks.afterWorktree` か gate で行い、Codex の書込み範囲は広げません。
 一時領域・追加 root の可否は実設定に依存し、外側の sandbox・OS・組織ポリシー・認証・プロキシをネットワーク設定で越えることはできません。
 
-engine 側の harness.json に `codex.command` を明示しているプロジェクトには、既定値の変更が効きません。
+engine 側の harness.json に `codex.command` を明示しているプロジェクトのうち、文法に合うものは既定値の変更が効きません。
 窓口が該当するプロジェクトと実効設定の一覧を確認します。`HARNESS_CONFIG`、main の設定、engine 側設定の優先を確認し、
 対象ごとの旧→新 command・他項目を保つ完全な設定案・Codex に依存導入やビルドをさせているか・ホーム制限の影響と worker との分担を提示します。
 独自 command を自動置換せず、上書き元が不明なら移行を止めます。
@@ -607,14 +610,14 @@ projects/<名前>/       プロジェクトごとの設定（harness.json）と�
 - Codex が使えないとき（`reason=not-installed` / `not-logged-in`、確認済みの認証切れ・usage limit）は、worker が Discord に info で一度だけ知らせ、
   設計・実装を Claude（`harness-implementer`）に自動で切り替えます。Codex が戻れば次の段階から Codex に戻ります
 - 起動の権限拒否・`reason=launch-failed`（tmux 起動失敗）・拒否/利用不可の判別不能は、代行せず `blocked` と人向け起動1行を案内します。
-  exit 10 だけで代行を決めません。拒否時の自動再試行・直接起動・フラグ変更・許可追加による迂回は行いません
+  exit 10 だけで代行を決めません。拒否時の自動再試行・直接起動・フラグ変更・許可追加による迂回は行いません（engine が組み込みで渡す `harness-codex start` / `stop` を除く）
 - 届くのはセッションが動いている間だけです。窓口が止まっている間の発言は保存しておき、起動したら渡します
 
 ### Codex の起動と拒否時の案内
 
 全ての起動・再起動は [issue-cycle の共通起動手順](skills/issue-cycle/SKILL.md#codex-の共通起動手順) に従います。
 依頼ファイル作成・stop・フェーズ変更を準備で済ませ、解決済み絶対パスを引用した `harness-codex start` の1コマンドを
-単独の Bash ツール呼び出しで実行し、監視は別の呼び出しに分けます。engine に起動許可は追加しません。
+単独の Bash ツール呼び出しで実行し、監視は別の呼び出しに分けます。worker の許可には `harness-codex start` と `harness-codex stop` だけを足します（`tmux new-window`・`codex exec` は許可しません）。引数・窓の所有はラッパーが検証します（窓名 `codex-(spec|impl)-<n>`・worktree が `harness-config --worktree <n>` と一致・依頼ファイルは `.harness/` の下）。許可を足した効果（分類器の拒否が止まるか）は実測待ちです。依頼ファイルの検査（realpath）と複製の読み出しの間には狭い競合が残ります（塞いでいません）。
 
 権限拒否・launch-failed・判別不能は、理由と当該段階の人向け起動1行を GitHub 本文・Discord summary の両方へ入れ、
 `harness-phase` で blocked にします。両方の1行をフェンスのコードブロックに入れて、Markdown に引用を壊させません。

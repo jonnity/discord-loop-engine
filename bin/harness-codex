@@ -13,56 +13,173 @@
 # 片付けは stop。ウィンドウ（id と名前が一致するときだけ）を kill-window し、.id と .exit も消す。
 # id ファイルが無い・空でも何もせず 0 で返す（空の -t は今いるウィンドウ＝呼び出し元を消してしまうため、決して tmux に渡さない）。
 #
+# 検証（start・stop 共通。副作用より前に行う）: 窓名は codex-(spec|impl)-<n>、worktree は
+# `harness-config --worktree <n>` と realpath が一致、.harness は symlink でない。以降は realpath の値だけを使う。
+# start は依頼文を .harness/<window>.prompt に複製して渡し（検査と使用の間に差し替えられない）、
+# tmux のウィンドウオプション @dle_wt に worktree を残す。stop は @dle_wt が一致する窓だけ kill する
+# （.id は worker が置けるので、id と名前の一致だけでは別プロジェクトの同名窓を守れない）。
+# codex.command は固定の文法に全体一致するときだけ使い、外れたら警告して既定で起動する（初回のみ警告）。
+#
 # 使い方: harness-codex start <window> <worktree> <prompt-file>
 #         harness-codex stop <window> <worktree>
-# 終了コード: 0=起動受付 / 10=check 失敗または launch-failed（reason で代行と blocked を分ける） / 2=引数不正
+# 終了コード: 0=起動受付 / 10=check 失敗または launch-failed（reason で代行と blocked を分ける） / 2=引数・検証の不正
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+usage() {
+	echo "使い方: harness-codex start <window> <worktree> <prompt-file> | stop <window> <worktree>" >&2
+	exit 2
+}
+die() {
+	echo "harness-codex: $1" >&2
+	exit 2
+}
+
+# 窓名と worktree の検証。成功すると WT_REAL（realpath）と N を設定する。
+# stop では worktree が既に消えていることがあるので -m で比べ、実在しなければ NO_WT=1 にする
+validate_target() {
+	local window="$1" wt="$2" mode="$3" expect given
+	[[ "$window" =~ ^codex-(spec|impl)-[1-9][0-9]*$ ]] || die "窓の名前は codex-(spec|impl)-<番号> に限ります: $window"
+	N="${window##*-}"
+	expect="$("$SCRIPT_DIR/harness-config" --worktree "$N")" || die "worktree の解決に失敗しました（設定を確認してください）"
+	expect="$(realpath -m -- "$expect")" || die "worktree の解決に失敗しました"
+	given="$(realpath -m -- "$wt")" || die "worktree を解決できません: $wt"
+	[ "$expect" = "$given" ] || die "worktree が Issue $N の worktree と一致しません"
+	WT_REAL="$given"
+	NO_WT=""
+	if [ ! -d "$WT_REAL" ]; then
+		[ "$mode" = stop ] || die "worktree がありません: $wt"
+		NO_WT=1
+		return 0
+	fi
+	# .harness が symlink だと、以降の書き込み・削除が worktree の外へ出る
+	if [ -e "$WT_REAL/.harness" ] || [ -L "$WT_REAL/.harness" ]; then
+		[ "$(realpath -- "$WT_REAL/.harness" 2>/dev/null)" = "$WT_REAL/.harness" ] || die ".harness が worktree 内の実ディレクトリではありません"
+	fi
+}
+
+# codex.command が固定の文法に全体一致するか（拒否リストではなく受け入れる形の限定）。
+# Why not 拒否リスト: シェル文字列なので、引用・brace 展開・変数・別名で語を隠せる
+command_ok() {
+	local cmd="$1" w prev="" c_n=0 exec_n=0 sb_n=0 key val
+	local charset='^[A-Za-z0-9_.={} -]+$'
+	[[ "$cmd" =~ $charset ]] || return 1
+	[[ "$cmd" != *"  "* && "$cmd" != " "* && "$cmd" != *" " ]] || return 1
+	local -a words
+	read -r -a words <<<"$cmd"
+	[ "${words[0]}" = codex ] || return 1
+	local i
+	for ((i = 1; i < ${#words[@]}; i++)); do
+		w="${words[i]}"
+		case "$w" in
+		-C)
+			i=$((i + 1))
+			[ "${words[i]:-}" = '{worktree}' ] || return 1
+			c_n=$((c_n + 1))
+			;;
+		-c)
+			i=$((i + 1))
+			[[ "${words[i]:-}" =~ ^([A-Za-z0-9_.]+)=([A-Za-z0-9_.][A-Za-z0-9_.-]*)$ ]] || return 1
+			key="${BASH_REMATCH[1]}" val="${BASH_REMATCH[2]}"
+			case "$key" in
+			model_reasoning_effort | sandbox_workspace_write.network_access) ;;
+			sandbox_mode) [ "$val" = workspace-write ] || [ "$val" = read-only ] || return 1 ;;
+			*) return 1 ;;
+			esac
+			;;
+		--model)
+			i=$((i + 1))
+			[[ "${words[i]:-}" =~ ^[A-Za-z0-9_.][A-Za-z0-9_.-]*$ ]] || return 1 # 先頭が - の値は別のフラグに見えるので拒否
+			;;
+		exec) exec_n=$((exec_n + 1)) ;;
+		--sandbox)
+			i=$((i + 1))
+			[ "${words[i]:-}" = workspace-write ] || [ "${words[i]:-}" = read-only ] || return 1
+			sb_n=$((sb_n + 1))
+			;;
+		*) return 1 ;;
+		esac
+	done
+	[ "$c_n" -eq 1 ] && [ "$exec_n" -eq 1 ] && [ "$sb_n" -le 1 ]
+}
+
 if [ "${1:-}" = stop ] && [ $# -eq 3 ]; then
-	WINDOW="$2" WT="$3"
-	IDFILE="$WT/.harness/$WINDOW.id"
+	WINDOW="$2"
+	validate_target "$2" "$3" stop
+	[ -z "$NO_WT" ] || exit 0 # worktree が無ければ消すものも無い（副作用なし）
+	HDIR="$WT_REAL/.harness"
+	IDFILE="$HDIR/$WINDOW.id"
 	ID=""
 	[ -f "$IDFILE" ] && ID="$(head -n1 "$IDFILE" | tr -d '[:space:]')"
 	if [ -n "$ID" ] && tmux list-panes -a -F '#{window_id} #{window_name}' 2>/dev/null | awk -v i="$ID" -v n="$WINDOW" '$1 == i && $2 == n { f = 1 } END { exit !f }'; then
-		tmux kill-window -t "$ID" >/dev/null 2>&1
+		# 所有の照合。.id は worker が置けるので、start が窓に残した @dle_wt が一致するときだけ kill する
+		OWNER="$(tmux display-message -p -t "$ID" '#{@dle_wt}' 2>/dev/null || true)"
+		if [ "$OWNER" = "$WT_REAL" ]; then
+			tmux kill-window -t "$ID" >/dev/null 2>&1
+		else
+			echo "not-killed: 所有を確認できません（$WINDOW の窓 $ID はこの worktree が起動したものではない、または古い版で起動した）。人が確認して片付けてください"
+		fi
 	fi
-	rm -f "$IDFILE" "$WT/.harness/$WINDOW.exit" # 残すと status が exited を返し続け、シェパードが毎 tick 拾う
+	rm -f "$IDFILE" "$HDIR/$WINDOW.exit" "$HDIR/$WINDOW.prompt" # 残すと status が exited を返し続け、シェパードが毎 tick 拾う
 	exit 0
 fi
 if [ "${1:-}" != start ] || [ $# -ne 4 ]; then
-	echo "使い方: harness-codex start <window> <worktree> <prompt-file> | stop <window> <worktree>" >&2
-	exit 2
+	usage
 fi
-WINDOW="$2" WT="$3" PROMPT="$4"
-[ -f "$PROMPT" ] || { echo "harness-codex: 依頼文が見つかりません: $PROMPT" >&2; exit 2; }
+WINDOW="$2" PROMPT="$4"
+validate_target "$2" "$3" start
+HDIR="$WT_REAL/.harness"
+# 依頼ファイルは worktree の .harness の下の、空でない通常ファイルに限る（任意のファイルを Codex に読ませない）
+PROMPT_REAL="$(realpath -- "$PROMPT" 2>/dev/null)" || die "依頼文が見つかりません: $PROMPT"
+case "$PROMPT_REAL" in "$HDIR"/*) ;; *) die "依頼文は $HDIR の下に置いてください" ;; esac
+[ -f "$PROMPT_REAL" ] && [ -s "$PROMPT_REAL" ] || die "依頼文が空、または通常ファイルではありません: $PROMPT"
 
 "$SCRIPT_DIR/harness-codex-status" check || exit 10
 
-mkdir -p "$WT/.harness"
-EXITFILE="$WT/.harness/$WINDOW.exit" IDFILE="$WT/.harness/$WINDOW.id"
+mkdir -p "$HDIR"
+[ "$(realpath -- "$HDIR")" = "$HDIR" ] || die ".harness が worktree 内の実ディレクトリではありません"
+EXITFILE="$HDIR/$WINDOW.exit" IDFILE="$HDIR/$WINDOW.id" COPY="$HDIR/$WINDOW.prompt"
 rm -f "$EXITFILE" "$IDFILE" # 前回の終了ファイルが残っていると、起動直後の status が古い結果を返してしまう
+# 検査後に依頼ファイルを差し替えられても影響しないよう、検証した実体の複製を渡す。
+# 一時ファイル経由なのは、複製先と同じ実体を渡されても自分で切り詰めないため。
+# 検査（realpath）と読み出しの間の狭い競合は残る（設計書 4.2-6）
+cat -- "$PROMPT_REAL" >"$COPY.tmp.$$" && mv -f -- "$COPY.tmp.$$" "$COPY" || { rm -f "$COPY.tmp.$$"; die "依頼文を複製できません"; }
 
-# 設定の codex.command はシェルのコマンドなので、そのまま使う（引用し直すと1語になって壊れる）。
+# 設定の codex.command は、固定の文法に全体一致するときだけ使う（そのままシェルのコマンドになるため）。
+# 外れたら警告して既定で起動する。他のフラグは引き継がない
+# （Why not: 問題の語だけを削ると、exec の位置や -C の重複で壊れたコマンドを作りやすい）。
 # 引用するのは埋め込むパスだけ（空白入りのパスに耐える）
 DEFAULT_CODEX='codex -C {worktree} -c model_reasoning_effort=high -c sandbox_workspace_write.network_access=true exec --sandbox workspace-write'
 CODEX="$("$SCRIPT_DIR/harness-config" '.codex.command' "$DEFAULT_CODEX")"
-CODEX="${CODEX//\{worktree\}/$(printf '%q' "$WT")}"
-INNER="$CODEX \"\$(cat $(printf '%q' "$PROMPT"))\"; rc=\$?; echo EXIT=\$rc | tee $(printf '%q' "$EXITFILE"); exit \$rc"
+WARNING=""
+if ! command_ok "$CODEX"; then
+	CODEX="$DEFAULT_CODEX"
+	# 警告はプロジェクトごとに初回だけ（全プロジェクトが bypass の設定なので、毎回出すと worker が慣れてしまう）
+	MARK_DIR="$("$SCRIPT_DIR/harness-config" --root 2>/dev/null)/.harness"
+	if [ ! -e "$MARK_DIR/bypass-warned" ]; then
+		WARNING="warning: bypass-rejected (codex.command が受け入れ形でないため無視し、既定の workspace-write で起動します。設定の修正はオーナーの作業です)"
+	fi
+fi
+CODEX="${CODEX//\{worktree\}/$(printf '%q' "$WT_REAL")}"
+INNER="$CODEX \"\$(cat $(printf '%q' "$COPY"))\"; rc=\$?; echo EXIT=\$rc | tee $(printf '%q' "$EXITFILE"); exit \$rc"
 
-# new-window と remain-on-exit は同じ tmux 呼び出しに連結する。別々だと、即終了したときに
+# new-window と remain-on-exit・@dle_wt は同じ tmux 呼び出しに連結する。別々だと、即終了したときに
 # 設定より先にウィンドウが消える。
 # - -d を付けない: 付けると連結した set-option が元の（アクティブな）ウィンドウに効いてしまう。
 #   フォーカスは後で戻す（Why not: 名前で -t すると、同名の死んだウィンドウが残っていたとき古いほうに効く）
 # - window-id（@N。tmux サーバーの中で一意）を <window>.id に保存し、status は名前ではなくこの id で引く
 #   （Issue 番号はリポジトリ間で重複するので、別プロジェクトの同名ウィンドウを自分のものと取り違えない）
+# - @dle_wt は stop の所有の照合用（整合の印。tmux set-option を打てる主体には偽造できる）
 PREV="$(tmux display-message -p '#{window_id}' 2>/dev/null || true)"
-if ! ID="$(tmux new-window -n "$WINDOW" -P -F '#{window_id}' "$INNER" \; set-option -w remain-on-exit on)" || [ -z "$ID" ]; then
+if ! ID="$(tmux new-window -n "$WINDOW" -P -F '#{window_id}' "$INNER" \; set-option -w remain-on-exit on \; set-option -w @dle_wt "$WT_REAL")" || [ -z "$ID" ]; then
 	echo "reason=launch-failed (tmux new-window に失敗しました)" >&2
 	exit 10
 fi
 printf '%s\n' "$ID" >"$IDFILE"
 [ -n "$PREV" ] && tmux select-window -t "$PREV" >/dev/null 2>&1
 echo "started: $WINDOW ($ID)"
+# 印は起動に成功してから作る（失敗した起動で警告を使い切らない）
+[ -z "$WARNING" ] || { mkdir -p "$MARK_DIR" && : >"$MARK_DIR/bypass-warned"; } 2>/dev/null || true
+[ -z "$WARNING" ] || echo "$WARNING"

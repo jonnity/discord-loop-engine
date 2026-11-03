@@ -1,11 +1,24 @@
 #!/usr/bin/env bash
 # テスト用の tmux スタブ。呼び出しを TMUX_STUB_LOG に1行ずつ記録する。
 # list-panes には TMUX_STUB_PANES の中身（"<window_id> <window_name> <pane_dead>" の行）を、
-# new-window -P には TMUX_STUB_NEXT_ID（既定 @7）を、display-message には @1（今のウィンドウ）を返す
+# new-window -P には TMUX_STUB_NEXT_ID（既定 @7）を、display-message には @1（今のウィンドウ）を返す。
+# display-message -t <id> に #{@dle_wt} が含まれるときは、TMUX_STUB_OWNERS の "<window_id> <worktree>" 行から所有者を返す
 printf '%s\n' "$*" >>"${TMUX_STUB_LOG:-/dev/null}"
 case "$1" in
 list-panes) [ -f "${TMUX_STUB_PANES:-}" ] && cat "$TMUX_STUB_PANES" ;;
 new-window) echo "${TMUX_STUB_NEXT_ID:-@7}" ;;
-display-message) echo "@1" ;;
+display-message)
+	case "$*" in
+	*@dle_wt*)
+		id="" prev=""
+		for a in "$@"; do
+			[ "$prev" = -t ] && id="$a"
+			prev="$a"
+		done
+		[ -f "${TMUX_STUB_OWNERS:-}" ] && awk -v i="$id" '$1 == i { $1 = ""; sub(/^ /, ""); print }' "$TMUX_STUB_OWNERS"
+		;;
+	*) echo "@1" ;;
+	esac
+	;;
 esac
 exit 0

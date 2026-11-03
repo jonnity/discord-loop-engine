@@ -4,7 +4,7 @@ W="$TMP/worktrees"
 mkdir -p "$W/main/.claude" "$W/home"
 (
 	export CLAUDE_PROJECT_DIR="$W/main" DLE_HOME="$W/home" DLE_SOCKET="$W/home/engine.sock" DLE_PROJECT=registered
-	export PATH="$ROOT/tests/harness/fixtures:$PATH" TMUX_STUB_LOG="$W/tmux.log" TMUX_STUB_PANES="$W/panes"
+	export PATH="$ROOT/tests/harness/fixtures:$PATH" TMUX_STUB_LOG="$W/tmux.log" TMUX_STUB_PANES="$W/panes" TMUX_STUB_OWNERS="$W/owners"
 	for value in null '".worktrees"' "\"$W/absolute space\""; do
 		printf '{"worktreeRoot":%s,"repo":"example/test"}\n' "$value" > "$W/main/.claude/harness.json"
 		wroot="$("$BIN/harness-config" --worktree-root)"
@@ -24,7 +24,7 @@ mkdir -p "$W/main/.claude" "$W/home"
 			output="$("$BIN/harness-status")"
 			check "W3: $value status=$state を実入口で共有" '[ "$actual" = "$state" ] && grep -q "codex-impl-9: $state" <<< "$output"'
 		done
-		: > "$W/tmux.log"; echo '@9 codex-impl-9 1' > "$W/panes"
+		: > "$W/tmux.log"; echo '@9 codex-impl-9 1' > "$W/panes"; printf '@9 %s\n' "$(realpath "$wt")" > "$W/owners"
 		"$BIN/harness-codex" stop codex-impl-9 "$wt"
 		check 'W3: stop は保存idでkill' 'grep -qx "kill-window -t @9" "$W/tmux.log"'
 	done

@@ -68,7 +68,7 @@ description: discord-loop-engine に登録されたばかりのリポジトリ�
   - `beforeMerge`: マージ前の確認（例: 静的解析の新しい指摘が 0 であること）
   - 規約ファイルに「PR 前に必ず〜」「マージ前に〜を確認」などがあれば、ここに写す。無ければ書かない
 - `permissions`: worker が確認なしで使ってよいコマンド（`Bash(npm:*)` など。広げすぎない）。
-  Codex の起動（`harness-codex` / `tmux new-window` / `codex exec`）の許可は**足さない**（権限判定が拒否したときは
+  Codex の起動の許可は、engine が `harness-codex start` / `stop` だけを組み込みで渡す（A-375 1a）。それ以外（`tmux new-window` / `codex exec` / `harness-codex` 全体）の許可は**足さない**（権限判定が拒否したときは
   issue-cycle が起動1行を案内して blocked にする。未導入・認証切れ・usage limit だけ代行し、判定を回避する許可を雛形で配らない）
 - `humanChecks`: 自動では確かめられないもの
 - `demo`: 録画の手順が既にあるときだけ。無ければ `null`

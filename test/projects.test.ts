@@ -229,16 +229,16 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 
 	assert.match(k?.command ?? "", /'Bash\(harness-issue-md:\*\)'/);
 	assert.match(k?.command ?? "", /'Bash\(harness-codex-status:\*\)'/, "読み取り専用の確認は無人で通す");
-	assert.doesNotMatch(k?.command ?? "", /harness-codex:|harness-codex\)/, "Codex の起動（start）は許可しない");
-	// T17d: 細分した起動許可や判定回避用の mode も組込みでは渡さない。
-	for (const permission of [
-		"Bash(harness-codex:*)",
-		"Bash(harness-codex start:*)",
-		"Bash(tmux new-window:*)",
-		"Bash(codex exec:*)",
-	])
+	// #50: 起動の入口は start / stop だけを許可する（引数と所有はラッパーが検証する）
+	assert.match(k?.command ?? "", /'Bash\(harness-codex start:\*\)'/, "Codex の起動はラッパー経由だけ許可");
+	assert.match(k?.command ?? "", /'Bash\(harness-codex stop:\*\)'/);
+	// T17d: サブコマンド全体の許可や、直接起動・判定回避用の mode は渡さない。
+	for (const permission of ["Bash(harness-codex:*)", "Bash(tmux new-window:*)", "Bash(codex exec:*)"])
 		assert.ok(!k?.command.includes(permission), permission);
-	assert.doesNotMatch(k?.command ?? "", /Bash\([^)]*(?:harness-codex(?:\s|:)|tmux\s+new-window|codex\s+exec)/);
+	assert.doesNotMatch(
+		k?.command ?? "",
+		/Bash\([^)]*(?:harness-codex(?!-status| start:| stop:)(?:\s|:)|tmux\s+new-window|codex\s+exec)/,
+	);
 	assert.doesNotMatch(
 		k?.command ?? "",
 		/--permission-mode (?:bypassPermissions|dontAsk)|--dangerously-skip-permissions/,
@@ -249,6 +249,7 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	assert.equal(o?.tmuxSession, "dev");
 	assert.match(o?.command ?? "", /DLE_LOOP=native/);
 	assert.doesNotMatch(o?.command ?? "", /harness-merge/, "native にはハーネスの許可を渡さない");
+	assert.doesNotMatch(o?.command ?? "", /harness-codex start/, "native には Codex 起動の許可も渡さない");
 
 	// 設定が確定したら issue-loop で始め、設定の permissions も許可に加える
 	mkdirSync(path.join(home, "projects", "kishimen-tool"), { recursive: true });
