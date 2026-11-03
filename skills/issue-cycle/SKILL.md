@@ -778,6 +778,8 @@ chat_rejection() (
   answer-before-created) sentence="回答時刻が A-番号の作成時刻より前になっている" ;;
   answer-not-ok) sentence="本文の先頭が OK ではない" ;;
   approval-changed) sentence="マージ直前の再確認で依頼または回答が変わった" ;;
+  required-checks-unmet) sentence="必須の検査が現在の head で success になっていない（承認依頼の出し直しではなく、検査を通す必要がある。hint があればその指示に従う）" ;;
+  required-checks-invalid) sentence="harness.json の merge.requiredChecks / merge.hint の形が正しくない（承認依頼の出し直しではなく、設定を直す必要がある）" ;;
   *) exit 1 ;;
   esac
   subject="unknown" display="A 不明"

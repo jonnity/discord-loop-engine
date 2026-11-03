@@ -181,6 +181,16 @@ harness に切り替えると、worker は独自のループのスキルを読�
 | `onCIRed` | CI が赤くなったとき | 0 以外 = コード起因として Codex に差し戻す。0 = 対処済み（再実行など） | `pnpm ci:triage` → INFRA なら `gh run rerun` |
 | `beforeMerge` | `harness-merge` の直前 | マージしない | SonarCloud の新しい指摘が 0 か |
 
+### マージ前に必須の検査を要求する（`merge.requiredChecks`）
+
+`harness.json` の任意の `merge.requiredChecks` に検査名の配列（例: `["Local E2E"]`）を書くと、`harness-merge` は
+その検査が **現在の PR head で SUCCESS** であることを要求します。`statusCheckRollup` の `name`（StatusContext は `context`）と完全一致で照合し、
+SKIPPED・NEUTRAL・実行中・未実行・失敗、古い head の結果は満たしたことになりません（同名が複数あれば全件 SUCCESS が要ります）。
+満たさないときは検査名と状態を表示して止まり、足すものは任意の `merge.hint`（文字列）で上書きできます。
+未指定・空配列なら従来どおり（SUCCESS・NEUTRAL・SKIPPED を green と見る CI 判定だけ）です。
+`requiredChecks` や `hint` の型が不正、または `merge` がオブジェクトでないときは、設定ミスで検査が外れないよう拒否します。
+`harness-merge <issue> --pr <番号>` にも同じ判定が効きます。Dependabot 用の `harness-merge --pr <番号>` には課しません。
+
 ### 環境の前提を確認する（`preflight`）
 
 `harness.json` の任意の `preflight` は `[{"name":"環境名","run":"確認コマンド"}]` です。

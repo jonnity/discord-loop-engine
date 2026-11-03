@@ -23,6 +23,7 @@ else if(/^pr view [1-9][0-9]* --json state,isCrossRepository$/.test(key)){const 
 else if(/^pr view [1-9][0-9]* --json headRefOid -q \.headRefOid$/.test(key)&&args[2]!=="5")out(prView(args[2]!).head);
 else if(/^pr view [1-9][0-9]* --json headRefOid,url$/.test(key)&&args[2]!=="5")out({headRefOid:prView(args[2]!).head,url:`https://github.com/example/project/pull/${args[2]}`});
 else if(/^pr view [1-9][0-9]* --json mergeable,mergeStateStatus,statusCheckRollup$/.test(key)&&args[2]!=="5"){prView(args[2]!);out({mergeable:process.env.MERGEABLE??"MERGEABLE",statusCheckRollup:process.env.CI_BAD?[{name:"test",conclusion:"FAILURE"}]:[]});}
+else if(/^pr view [1-9][0-9]* --json headRefOid,statusCheckRollup$/.test(key)){if(process.env.ROLLUP_FAIL)process.exit(1);event(`rollup-view ${args[2]}`);out(process.env.ROLLUP_RAW?JSON.parse(process.env.ROLLUP_RAW):{headRefOid:process.env.ROLLUP_HEAD??prView(args[2]!).head,statusCheckRollup:JSON.parse(process.env.ROLLUP??"[]")});}
 else if(key==="pr view 5 --json headRefOid -q .headRefOid"){
  if((fail==="head-before"&&state.comments.length)||(fail==="head-final"&&state.comments.some(c=>c.body.includes("harness:gate")))){state.head="b".repeat(40);save();}out(state.head);
 }

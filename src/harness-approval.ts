@@ -307,7 +307,9 @@ export type ChatRejectionReason =
 	| "approval-changed"
 	| "ci-not-green"
 	| "mergeable-unconfirmed"
-	| "before-merge-failed";
+	| "before-merge-failed"
+	| "required-checks-unmet"
+	| "required-checks-invalid";
 function structuralAttention(
 	item: AttentionRecord,
 ): item is AttentionRecord & Pick<Attention, "taskId" | "title" | "url" | "summary" | "status"> {
