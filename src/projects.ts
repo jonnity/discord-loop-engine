@@ -58,9 +58,13 @@ const HARNESS_COMMANDS = [
 	"harness-notify",
 	"harness-labels",
 	"harness-issue-md",
-	// 読み取り専用の check / status だけ。起動（harness-codex）は許可に含めない
+	// 読み取り専用の check / status
 	"harness-codex-status",
 ];
+
+// サブコマンド単位で許可するもの。harness-codex は start と stop だけで、引数（窓名・worktree・依頼ファイル）と
+// 窓の所有はラッパーが検証する。Why not `Bash(harness-codex:*)`: 将来足されるサブコマンドまで無条件に通ってしまう
+const HARNESS_SUBCOMMANDS = ["harness-codex start", "harness-codex stop"];
 
 export function repoFromRemote(url: string): string {
 	const trimmed = url
@@ -264,7 +268,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 								DLE_TOOLS_RULE,
 								// ハーネスの入口は確認なしで通す（離席中にここで止まらないように）。どれもガード付きで、
 								// harness-merge は人の承認記録が無ければマージしない。native では使わないので渡さない
-								...(native ? [] : HARNESS_COMMANDS.map((c) => `Bash(${c}:*)`)),
+								...(native ? [] : [...HARNESS_COMMANDS, ...HARNESS_SUBCOMMANDS].map((c) => `Bash(${c}:*)`)),
 								...READ_ONLY_COMMANDS.map((c) => `Bash(${c}:*)`),
 								...fromProfile,
 								...(p.allow ?? []),

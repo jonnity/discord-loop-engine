@@ -157,10 +157,11 @@ jq '.worktreeRoot = ".worktrees"' "$PROJ/.claude/harness.json" > "$TMP/h.json" &
 
 # --- harness-codex / harness-codex-status（codex・tmux はスタブ） ------------------
 STUBS="$ROOT/tests/harness/fixtures"
-CW="$TMP/cwt dir"   # 空白入りの worktree
+# ラッパーは worktree が harness-config --worktree <n> と一致することを要求する（窓名の n = 4）
+CW="$PROJ/.worktrees/issue-4"
 mkdir -p "$CW/.harness"
-echo "依頼 'quote' です" >"$TMP/prompt.md"
-export TMUX_STUB_LOG="$TMP/tmux.log" TMUX_STUB_PANES="$TMP/panes"
+echo "依頼 'quote' です" >"$CW/.harness/prompt.md"
+export TMUX_STUB_LOG="$TMP/tmux.log" TMUX_STUB_PANES="$TMP/panes" TMUX_STUB_OWNERS="$TMP/owners"
 cs() { (cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-codex-status" "$@"); }
 cx() { (cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-codex" "$@"); }
 
@@ -174,24 +175,24 @@ err="$(PATH="$MIN" "$(command -v bash)" "$BIN/harness-codex-status" check 2>&1 >
 check "codex check: codex が無ければ 10 と reason=not-installed" '[ $rc -eq 10 ] && head -n1 <<<"$err" | grep -q "^reason=not-installed"'
 
 : >"$TMUX_STUB_LOG"
-CODEX_STUB_LOGIN=1 cx start codex-spec-9 "$CW" "$TMP/prompt.md" >/dev/null 2>&1
+CODEX_STUB_LOGIN=1 cx start codex-spec-4 "$CW" "$CW/.harness/prompt.md" >/dev/null 2>&1
 check "codex start: 未ログインは 10 で、tmux のウィンドウを作らない" '[ $? -eq 10 ] && ! grep -q new-window "$TMUX_STUB_LOG"'
-echo old >"$CW/.harness/codex-spec-9.exit"
+echo old >"$CW/.harness/codex-spec-4.exit"
 : >"$TMUX_STUB_LOG"
-cx start codex-spec-9 "$CW" "$TMP/prompt.md" >/dev/null 2>&1
-check "codex start: ログイン済みなら起動できる" '[ $? -eq 0 ] && grep -q "^new-window -n codex-spec-9 -P -F #{window_id} " "$TMUX_STUB_LOG"'
-check "codex start: new-window と remain-on-exit が同じ tmux 呼び出し（\; 連結）で、名前では -t しない" 'grep -c "^new-window" "$TMUX_STUB_LOG" | grep -qx 1 && grep -q "^new-window .* ; set-option -w remain-on-exit on$" "$TMUX_STUB_LOG" && ! grep -q "set-option .* -t " "$TMUX_STUB_LOG"'
-check "codex start: window-id を .id に保存し、フォーカスを元に戻す" '[ "$(cat "$CW/.harness/codex-spec-9.id")" = @7 ] && grep -qx "select-window -t @1" "$TMUX_STUB_LOG"'
-check "codex start: 前回の .exit を消す" '[ ! -e "$CW/.harness/codex-spec-9.exit" ]'
+cx start codex-spec-4 "$CW" "$CW/.harness/prompt.md" >/dev/null 2>&1
+check "codex start: ログイン済みなら起動できる" '[ $? -eq 0 ] && grep -q "^new-window -n codex-spec-4 -P -F #{window_id} " "$TMUX_STUB_LOG"'
+check "codex start: new-window と remain-on-exit が同じ tmux 呼び出し（\; 連結）で、@dle_wt に worktree を残し、名前では -t しない" 'grep -c "^new-window" "$TMUX_STUB_LOG" | grep -qx 1 && grep -q "^new-window .* ; set-option -w remain-on-exit on ; set-option -w @dle_wt $CW$" "$TMUX_STUB_LOG" && ! grep -q "set-option .* -t " "$TMUX_STUB_LOG"'
+check "codex start: window-id を .id に保存し、フォーカスを元に戻す" '[ "$(cat "$CW/.harness/codex-spec-4.id")" = @7 ] && grep -qx "select-window -t @1" "$TMUX_STUB_LOG"'
+check "codex start: 前回の .exit を消す" '[ ! -e "$CW/.harness/codex-spec-4.exit" ]'
 check "codex start: EXIT= を残す" 'grep -q "echo EXIT=" "$TMUX_STUB_LOG"'
 # 起動文字列を実際に sh で動かし、空白入りのパス・引用符入りの依頼文が壊れずに codex へ渡ることを確かめる
-inner="$(grep "^new-window" "$TMUX_STUB_LOG" | sed -e "s/^new-window -n codex-spec-9 -P -F #{window_id} //" -e "s/ ; set-option.*$//")"
+inner="$(grep "^new-window" "$TMUX_STUB_LOG" | sed -e "s/^new-window -n codex-spec-4 -P -F #{window_id} //" -e "s/ ; set-option.*$//")"
 mkdir -p "$TMP/echobin"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"$ECHO_OUT"\n' >"$TMP/echobin/codex"; chmod +x "$TMP/echobin/codex"
 ECHO_OUT="$TMP/echo.out" PATH="$TMP/echobin:$PATH" bash -c "$inner" >/dev/null 2>&1
 check "codex start: 空白入りの worktree と引用符入りの依頼文が壊れない" 'grep -qx "$CW" "$TMP/echo.out" && grep -qx "依頼 '"'"'quote'"'"' です" "$TMP/echo.out"'
-check "codex start: 終了コードを .exit に残す" 'grep -qx "EXIT=0" "$CW/.harness/codex-spec-9.exit"'
-cx start codex-spec-9 >/dev/null 2>&1
+check "codex start: 終了コードを .exit に残す" 'grep -qx "EXIT=0" "$CW/.harness/codex-spec-4.exit"'
+cx start codex-spec-4 >/dev/null 2>&1
 check "codex start: 引数不正は 2" '[ $? -eq 2 ]'
 
 # T17a/b: 配布値だけでなく、tmux 内の bash が実際に渡す argv と片付けを確認する。
@@ -203,15 +204,17 @@ done
 launch17() (
 	case17="$1"
 	root17="$TMP/launch17-$case17"
-	wt17="$root17/wt space '\$ (x)"
-	prompt17="$root17/prompt space '\$ (x).md"
+	wroot17="$root17/root space '\$ (x)"
+	wt17="$wroot17/issue-17"
+	prompt17="$wt17/.harness/prompt space '\$ (x).md"
 	mkdir -p "$wt17/.harness" "$root17/bin" || exit 1
+	rm -f "$PROJ/.harness/bypass-warned"
 	export HARNESS_CONFIG="$root17/profile.json" TMUX_STUB_LOG="$root17/tmux.log" TMUX_STUB_PANES="$root17/panes"
 	case "$case17" in
-	absent) echo '{}' > "$HARNESS_CONFIG" ;;
-	empty) echo '{"codex":{}}' > "$HARNESS_CONFIG" ;;
-	legacy) jq -n --arg c 'codex -C {worktree} exec --dangerously-bypass-approvals-and-sandbox' '{codex:{command:$c}}' > "$HARNESS_CONFIG" ;;
-	custom) jq -n --arg c 'codex -C {worktree} exec --model custom' '{codex:{command:$c}}' > "$HARNESS_CONFIG" ;;
+	absent) jq -n --arg r "$wroot17" '{worktreeRoot:$r}' > "$HARNESS_CONFIG" ;;
+	empty) jq -n --arg r "$wroot17" '{worktreeRoot:$r,codex:{}}' > "$HARNESS_CONFIG" ;;
+	legacy) jq -n --arg r "$wroot17" --arg c 'codex -C {worktree} exec --dangerously-bypass-approvals-and-sandbox' '{worktreeRoot:$r,codex:{command:$c}}' > "$HARNESS_CONFIG" ;;
+	custom) jq -n --arg r "$wroot17" --arg c 'codex -C {worktree} exec --model custom' '{worktreeRoot:$r,codex:{command:$c}}' > "$HARNESS_CONFIG" ;;
 	esac
 	printf '%s' '依頼 "quote" '\''single'\'' $value `literal`
 次の行' > "$prompt17"
@@ -222,7 +225,11 @@ STUB17
 	chmod +x "$root17/bin/codex" || exit 1
 	: > "$TMUX_STUB_LOG"
 	echo old > "$wt17/.harness/codex-spec-17.exit"
-	cx start codex-spec-17 "$wt17" "$prompt17" >/dev/null 2>&1 || exit 1
+	cx start codex-spec-17 "$wt17" "$prompt17" >"$root17/start.out" 2>&1 || exit 1
+	case "$case17" in
+	legacy) grep -q '^warning: bypass-rejected' "$root17/start.out" || exit 1 ;;
+	*) ! grep -q '^warning:' "$root17/start.out" || exit 1 ;;
+	esac
 	[ "$(cat "$wt17/.harness/codex-spec-17.id")" = @7 ] || exit 1
 	[ ! -e "$wt17/.harness/codex-spec-17.exit" ] || exit 1
 	inner17="$(sed -n 's/^new-window -n codex-spec-17 -P -F #{window_id} //; s/ ; set-option.*$//p' "$TMUX_STUB_LOG")"
@@ -230,13 +237,14 @@ STUB17
 	[ -s "$root17/argv.json" ] || exit 1
 	case "$case17" in
 	absent|empty) args17='["-c","model_reasoning_effort=high","-c","sandbox_workspace_write.network_access=true","exec","--sandbox","workspace-write"]' ;;
-	legacy) args17='["exec","--dangerously-bypass-approvals-and-sandbox"]' ;;
+	legacy) args17='["-c","model_reasoning_effort=high","-c","sandbox_workspace_write.network_access=true","exec","--sandbox","workspace-write"]' ;;
 	custom) args17='["exec","--model","custom"]' ;;
 	esac
 	jq -e --arg wt "$wt17" --rawfile prompt "$prompt17" --argjson args "$args17" \
 		'. == (["-C", $wt] + $args + [$prompt])' "$root17/argv.json" >/dev/null || exit 1
 	[ "$(cat "$wt17/.harness/codex-spec-17.exit")" = EXIT=0 ] || exit 1
 	printf '@7 codex-spec-17 1\n' > "$TMUX_STUB_PANES"
+	printf '@7 %s\n' "$wt17" > "$TMUX_STUB_OWNERS"
 	cx stop codex-spec-17 "$wt17" >/dev/null 2>&1 || exit 1
 	grep -qx 'kill-window -t @7' "$TMUX_STUB_LOG" &&
 		[ ! -e "$wt17/.harness/codex-spec-17.id" ] && [ ! -e "$wt17/.harness/codex-spec-17.exit" ]
@@ -282,12 +290,138 @@ printf '@4 other-window 0\n' >"$TMUX_STUB_PANES"; : >"$TMUX_STUB_LOG"
 cx stop codex-impl-4 "$CW" >/dev/null 2>&1
 check "codex stop: 名前が違うウィンドウは kill しない" '! grep -q kill-window "$TMUX_STUB_LOG"'
 echo "@4" >"$CW/.harness/codex-impl-4.id"; echo "EXIT=0" >"$CW/.harness/codex-impl-4.exit"
-printf '@4 codex-impl-4 1\n' >"$TMUX_STUB_PANES"; : >"$TMUX_STUB_LOG"
+printf '@4 codex-impl-4 1\n' >"$TMUX_STUB_PANES"; : >"$TMUX_STUB_LOG"; printf '@4 %s\n' "$CW" >"$TMUX_STUB_OWNERS"
 cx stop codex-impl-4 "$CW" >/dev/null 2>&1
-check "codex stop: id と名前が一致すれば id で kill-window し、.id と .exit を消す" 'grep -qx "kill-window -t @4" "$TMUX_STUB_LOG" && [ ! -e "$CW/.harness/codex-impl-4.id" ] && [ ! -e "$CW/.harness/codex-impl-4.exit" ]'
+check "codex stop: id と名前と所有（@dle_wt）が一致すれば id で kill-window し、.id と .exit を消す" 'grep -qx "kill-window -t @4" "$TMUX_STUB_LOG" && [ ! -e "$CW/.harness/codex-impl-4.id" ] && [ ! -e "$CW/.harness/codex-impl-4.exit" ]'
 check "codex stop: 片付けた後の status は none（exited:0 を返し続けない）" '[ "$(cs status codex-impl-4 "$CW")" = none ]'
 cx stop codex-impl-4 >/dev/null 2>&1
 check "codex stop: 引数不正は 2" '[ $? -eq 2 ]'
+
+# --- #50: 入口の検証・所有の照合・codex.command の文法 ------------------------------------
+# 検証に失敗したら exit 2 で、tmux を呼ばず、worktree の外へ何も書かない・消さない
+OUT50="$TMP/out50"; mkdir -p "$OUT50"
+echo keep >"$OUT50/victim.id"; echo keep >"$OUT50/victim.exit"
+echo "依頼" >"$CW/.harness/p50.md"; echo secret >"$OUT50/secret.md"
+ln -sfn "$OUT50/secret.md" "$CW/.harness/link.md"
+: >"$TMUX_STUB_LOG"
+for w in codex-probe-50 concierge '../x' codex-spec-0 codex-spec-04 codex-spec-4x ''; do
+	cx start "$w" "$CW" "$CW/.harness/p50.md" >/dev/null 2>&1; rc1=$?
+	cx stop "$w" "$CW" >/dev/null 2>&1; rc2=$?
+	check "50: 不正な窓名「$w」は start・stop とも exit 2 で、tmux を呼ばない" '[ $rc1 -eq 2 ] && [ $rc2 -eq 2 ] && [ ! -s "$TMUX_STUB_LOG" ]'
+done
+cx start codex-spec-4 "$PROJ/.worktrees/issue-5" "$CW/.harness/p50.md" >/dev/null 2>&1
+check "50: worktree が窓名の Issue と一致しなければ start は exit 2" '[ $? -eq 2 ] && [ ! -s "$TMUX_STUB_LOG" ]'
+cx stop codex-spec-4 "$OUT50" >/dev/null 2>&1
+check "50: worktree が一致しなければ stop は exit 2（外のファイルを消さない）" '[ $? -eq 2 ] && [ -e "$OUT50/victim.id" ]'
+cx stop 'codex-spec-4/../../x' "$CW" >/dev/null 2>&1
+check "50: 窓名の ../ で外のファイルを rm しない" '[ $? -eq 2 ] && [ -e "$OUT50/victim.id" ]'
+(cd "$PROJ" && HARNESS_CONFIG="$TMP/none.json" PATH="$STUBS:$PATH" "$BIN/harness-codex" start codex-spec-4 "$CW" "$CW/.harness/p50.md" >/dev/null 2>&1)
+check "50: harness-config が失敗する環境では exit 2 で止まる（検証を飛ばさない）" '[ $? -eq 2 ] && [ ! -s "$TMUX_STUB_LOG" ]'
+for pf in "$OUT50/secret.md" "$CW/.harness/link.md" "$CW/.harness" "$CW/.harness/none.md"; do
+	cx start codex-spec-4 "$CW" "$pf" >/dev/null 2>&1
+	check "50: 依頼文が .harness の外・外への symlink・ディレクトリ・不在なら exit 2（$pf）" '[ $? -eq 2 ] && [ ! -s "$TMUX_STUB_LOG" ]'
+done
+: >"$CW/.harness/empty.md"
+cx start codex-spec-4 "$CW" "$CW/.harness/empty.md" >/dev/null 2>&1
+check "50: 空の依頼文は exit 2" '[ $? -eq 2 ] && [ ! -s "$TMUX_STUB_LOG" ]'
+SYM50="$PROJ/.worktrees/issue-6"; mkdir -p "$SYM50"; ln -sfn "$OUT50" "$SYM50/.harness"
+cx start codex-spec-6 "$SYM50" "$SYM50/.harness/p.md" >/dev/null 2>&1
+check "50: .harness が symlink の worktree は exit 2" '[ $? -eq 2 ] && [ ! -s "$TMUX_STUB_LOG" ]'
+cx stop codex-spec-6 "$SYM50" >/dev/null 2>&1
+check "50: .harness が symlink の worktree の stop も exit 2（外を消さない）" '[ $? -eq 2 ] && [ -e "$OUT50/victim.id" ]'
+rm -f "$SYM50/.harness"
+# 依頼文は複製を渡す（検証後に symlink へ差し替えても、渡る内容は検証時のもの）
+: >"$TMUX_STUB_LOG"
+cx start codex-spec-4 "$CW" "$CW/.harness/p50.md" >/dev/null 2>&1
+ln -sfn "$OUT50/secret.md" "$CW/.harness/p50.md"
+inner50="$(sed -n 's/^new-window -n codex-spec-4 -P -F #{window_id} //; s/ ; set-option.*$//p' "$TMUX_STUB_LOG")"
+printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$@" >"$ECHO_OUT"\n' >"$TMP/echobin/codex"
+ECHO_OUT="$TMP/echo50.out" PATH="$TMP/echobin:$PATH" bash -c "$inner50" >/dev/null 2>&1
+check "50: 検証後に依頼ファイルを差し替えても、Codex には検証時の複製が渡る" 'grep -qx "依頼" "$TMP/echo50.out" && ! grep -q secret "$TMP/echo50.out"'
+rm -f "$CW/.harness/p50.md"
+
+# stop の所有の照合: 別プロジェクトの同名窓・所有が空の窓は kill しない
+echo "@4" >"$CW/.harness/codex-impl-4.id"; echo "EXIT=0" >"$CW/.harness/codex-impl-4.exit"; echo x >"$CW/.harness/codex-impl-4.prompt"
+printf '@4 codex-impl-4 0\n' >"$TMUX_STUB_PANES"; printf '@4 /other/project/.worktrees/issue-4\n' >"$TMUX_STUB_OWNERS"; : >"$TMUX_STUB_LOG"
+out50="$(cx stop codex-impl-4 "$CW" 2>&1)"; rc=$?
+check "50: stop は所有（@dle_wt）が別の worktree の窓を kill せず、not-killed を出して 0" '[ $rc -eq 0 ] && ! grep -q kill-window "$TMUX_STUB_LOG" && grep -q "^not-killed:" <<<"$out50"'
+check "50: 所有が不一致でも自分の .id・.exit・.prompt は消す" '[ ! -e "$CW/.harness/codex-impl-4.id" ] && [ ! -e "$CW/.harness/codex-impl-4.exit" ] && [ ! -e "$CW/.harness/codex-impl-4.prompt" ]'
+echo "@4" >"$CW/.harness/codex-impl-4.id"; : >"$TMUX_STUB_OWNERS"; : >"$TMUX_STUB_LOG"
+out50="$(cx stop codex-impl-4 "$CW" 2>&1)"
+check "50: 所有（@dle_wt）が空の窓も kill しない" '! grep -q kill-window "$TMUX_STUB_LOG" && grep -q "^not-killed:" <<<"$out50"'
+echo "@4" >"$CW/.harness/codex-impl-4.id"; : >"$TMUX_STUB_PANES"; : >"$TMUX_STUB_LOG"
+out50="$(cx stop codex-impl-4 "$CW" 2>&1)"
+check "50: 窓がもう無い通常ケースは黙って片付ける" '[ -z "$out50" ] && ! grep -q kill-window "$TMUX_STUB_LOG" && [ ! -e "$CW/.harness/codex-impl-4.id" ]'
+: >"$TMUX_STUB_LOG"
+cx stop codex-impl-4 "$PROJ/.worktrees/issue-4-gone" >/dev/null 2>&1
+check "50: worktree が一致しない（消えた別パス）stop は exit 2" '[ $? -eq 2 ]'
+GONE50="$PROJ/.worktrees/issue-8"; rm -rf "$GONE50"
+cx stop codex-impl-8 "$GONE50" >/dev/null 2>&1
+check "50: worktree が既に削除されていれば stop は副作用なしで 0" '[ $? -eq 0 ] && [ ! -e "$GONE50" ] && [ ! -s "$TMUX_STUB_LOG" ]'
+
+# codex.command の文法: 外れたものは bypass の有無にかかわらず警告して既定で起動する
+DEFAULT50='["-C","WT","-c","model_reasoning_effort=high","-c","sandbox_workspace_write.network_access=true","exec","--sandbox","workspace-write"]'
+cmd50() (
+	local_cmd="$1"
+	export HARNESS_CONFIG="$TMP/cmd50.json"
+	jq -n --arg r "$PROJ/.worktrees" --arg c "$local_cmd" '{worktreeRoot:$r,codex:{command:$c}}' >"$HARNESS_CONFIG"
+	rm -f "$PROJ/.harness/bypass-warned"; : >"$TMUX_STUB_LOG"
+	echo "依頼" >"$CW/.harness/c50.md"
+	cx start codex-spec-4 "$CW" "$CW/.harness/c50.md"
+)
+accept50() { out="$(cmd50 "$1" 2>&1)"; ! grep -q '^warning:' <<<"$out" && grep -q '^started:' <<<"$out"; }
+reject50() { out="$(cmd50 "$1" 2>&1)"; grep -q '^warning: bypass-rejected' <<<"$out" && grep -q '^started:' <<<"$out" && grep -q -- '--sandbox workspace-write' "$TMUX_STUB_LOG"; }
+for c in \
+	'codex -C {worktree} exec --model custom' \
+	'codex -C {worktree} -c model_reasoning_effort=high exec --sandbox read-only' \
+	'codex -C {worktree} -c sandbox_mode=read-only exec' \
+	'codex -C {worktree} -c sandbox_mode=workspace-write -c sandbox_workspace_write.network_access=false exec'; do
+	check "50: 文法に合う codex.command はそのまま使う（警告なし）: $c" 'accept50 "$c"'
+done
+for c in \
+	'codex -C {worktree} exec --dangerously-bypass-approvals-and-sandbox' \
+	'codex -C {worktree} -c model_reasoning_effort=high exec --dangerously-bypass-approvals-and-sandbox' \
+	'codex -C {worktree} exec --dangerously-bypass-approvals-and-san""dbox' \
+	'codex -C {worktree} exec --yolo' \
+	'codex -C {worktree} exec --yo{l,l}o' \
+	'codex -C {worktree} exec --model $X' \
+	'codex -C {worktree} exec --sandbox danger-full-access' \
+	'codex -C {worktree} exec -s danger-full-access' \
+	'codex -C {worktree} exec -s=danger-full-access' \
+	'codex -C {worktree} exec --sandbox  danger-full-access' \
+	'codex -C {worktree} -c sandbox_mode = "danger-full-access" exec' \
+	'codex -C {worktree} --config sandbox_mode=danger-full-access exec' \
+	"codex -C {worktree} -c 'sandbox_mode=\"danger-full-access\"' exec" \
+	'codex -C {worktree} -c sandbox_mode=danger-full-access exec' \
+	'codex -C {worktree} -c mcp_servers.x.command=sh exec' \
+	'codex -C {worktree} -c profile=danger exec' \
+	'codex -C {worktree} -c sandbox_workspace_write.writable_roots=[/] exec' \
+	'codex -C {worktree} exec -o /tmp/out' \
+	'codex -C {worktree} --model --dangerously-bypass-approvals-and-sandbox exec' \
+	'codex -C {worktree} --model --yolo exec' \
+	'codex -C {worktree} --model -c exec' \
+	'codex -C {worktree} --model -- exec' \
+	'codex -C {worktree} -c model_reasoning_effort=-x exec' \
+	'codex -C {worktree} --profile x exec' \
+	'codex -C {worktree} --add-dir / exec' \
+	'codex -C {worktree} exec; id' \
+	'codex -C {worktree} exec $(id)' \
+	'codex -C {worktree} exec > /tmp/x' \
+	'sh -c codex' \
+	'env codex -C {worktree} exec' \
+	'codex exec' \
+	'codex -C /tmp exec' \
+	'codex -C {worktree} -C {worktree} exec' \
+	'codex -C {worktree}  exec' \
+	'codex -C {worktree} exec ~' \
+	'codex -C {worktree} exec *'; do
+	check "50: 文法の外れは警告して既定で起動する: $c" 'reject50 "$c"'
+done
+out="$(cmd50 'codex -C {worktree} exec --yolo' 2>&1)"
+check "50: 警告は stdout の 1 行で、codex.command の全文は出さない" '[ "$(grep -c "^warning:" <<<"$out")" = 1 ] && ! grep -q yolo <<<"$out"'
+out="$(cx start codex-spec-4 "$CW" "$CW/.harness/c50.md" 2>&1)"
+check "50: 警告は初回だけ（印ファイルが残り、2 回目は出ない）" '[ -e "$PROJ/.harness/bypass-warned" ] && ! grep -q "^warning:" <<<"$out"'
+rm -f "$PROJ/.harness/bypass-warned"
 mkdir -p "$PROJ/.worktrees/issue-5/.harness"; echo "EXIT=0" >"$PROJ/.worktrees/issue-5/.harness/codex-spec-5.exit"; : >"$TMUX_STUB_PANES"
 check "codex status: worktree 省略時は window 名の番号から探す" '[ "$(cs status codex-spec-5)" = exited:0 ]'
 

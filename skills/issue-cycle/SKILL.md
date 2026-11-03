@@ -44,7 +44,7 @@ PR 本文を A.summary・通知・scan/inbox へ入れない。人は PR リン�
 | `harness-hook <phase> [--issue n] [--pr n] [--dir d]` | profile の `hooks.<phase>` を実行する |
 | `harness-issue-md <n>` | Issue 本文＋コメントを設計の入力用 Markdown にして出力する。本文が出力に入っていなければ非 0（Phase 2 は blocked にして止める） |
 | `harness-codex-status check` / `status <window>` | Codex が使えるか・ウィンドウの状態（読み取り専用。確認なしで通る） |
-| `harness-codex start <window> <worktree> <prompt-file>` | Codex を tmux で起動する（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**） |
+| `harness-codex start <window> <worktree> <prompt-file>` / `stop <window> <worktree>` | Codex を tmux で起動・片付ける（認証確認・終了コード記録つき。**Codex の起動は必ずこれを通す**。許可済み。窓名は `codex-(spec\|impl)-<n>`、worktree は `harness-config --worktree <n>`、依頼ファイルは `$WT/.harness/` の下に限る。外れると exit 2） |
 | `harness-merge <n> [--pr <PR番号>] [--chat-approval "<引用>" --attention <回答先A-id>]` | 承認・CI・mergeable を確認してマージ → done（`--pr` は head が branchPrefix+{n}（既定 fix/issue-{n}）でない既存 PR のときだけ付ける。ラベルが付いていると `--pr` は全経路で拒否） |
 | `harness-notify --event ... --title ... --url ...` | Discord 通知（通常は harness-phase が呼ぶ） |
 | `harness-pr scan` / `harness-pr inbox` | Dependabot PR の検出・台帳の承認回収・後始末の確認（Issue なし） |
@@ -109,11 +109,12 @@ D="$SCRATCH/$P"; mkdir -p "$D"; echo "D=$D P=$P"
 以下の3段階を守る。各段階を別の Bash ツール呼び出しにする。
 
 1. **準備**: `WT` の解決、必要な `harness-codex stop`、依頼ファイルの作成・内容確認、フェーズ変更を済ませる。
-   `harness-config --path` と `command -v harness-codex`（PATH に無ければ `${CLAUDE_PLUGIN_ROOT}/bin/harness-codex`）を
-   `realpath` で絶対パスにし、実効設定・入口・WT・非空の依頼ファイルが実在することを確認する。
+   `harness-config --path` を `realpath` で絶対パスにし、`command -v harness-codex` で PATH の入口があること、
+   実効設定・WT・非空の依頼ファイルが実在することを確認する。入口は PATH の `harness-codex` を第一にし、
+   PATH に無ければ絶対パスで代用せず「Codex 起動を blocked にする」へ進む（plugin cache が古い。下の注記）。
 2. **起動**: `harness-codex start` の1コマンドだけを単独の Bash で呼ぶ。`cd`、代入、`&&`、`;`、pipe、
    通知・フェーズ変更・status・capture を同じ呼び出しへ足さない。呼び出し間でシェル変数が残ると考えず、
-   準備の出力から得た絶対パスを `printf %q` で引用して直接記載する。入口が PATH に無ければ解決済みの絶対入口を使う。
+   準備の出力から得た絶対パスを `printf %q` で引用して直接記載する。起動は PATH の `harness-codex` で呼ぶ（絶対パスの入口は許可ルールに合わず、確認が出て無人で止まるため使わない）。
    パスは %q の出力をそのまま置き、さらに引用符で囲まない。
    以下の起動例の `{n}` とパスは実値へ置き換える。
 3. **監視**: 起動受付の0を確認した後だけ、別の Bash で WT を解決し直し、保存ID・status・`workdir:`・成果物を確認する。
@@ -124,6 +125,12 @@ Bash の権限判定による拒否は、start が動いていない場合もあ
 「Codex 起動を blocked にする」へ進む。自動再試行・Claude 代行・直接の `tmux new-window … codex` / `codex exec`・
 フラグや別シェル/別名/env 経由の迂回をしない。worker が permissions・permission mode・設定を変えて権限を広げない。
 `reason=not-installed` / `not-logged-in` の exit 10 と、確認できた認証切れ・usage limit だけがフォールバック対象。
+
+- exit 2（窓名・worktree・依頼ファイルの検証の不正）は未起動で、上の「自動再試行禁止」の対象外。理由どおりに引数を直して 1 回だけ再実行してよい。同じ理由で再び exit 2 なら blocked（`unknown`）。
+- `harness-codex` が PATH に無い（plugin cache が古い）ときは、絶対パスや直接起動に落とさず blocked（`launch-failed`、理由は「plugin cache が古い」）。人の作業は plugin の更新と worker の再起動。
+- 許可に合わず確認が出る形（絶対パス・env 前置・置換付き）も、形を変えて再投入せず blocked（`tool-denied`）。
+- start が stdout に `warning: bypass-rejected` を出したら、プロジェクトの `codex.command` が受け入れ形でなく無視された（既定の workspace-write で起動済み）。監視を続け、窓口へ info を 1 回送る（修正はオーナーの作業）。
+- stop が `not-killed:` を出したら、窓の所有を確認できず kill していない。窓口へ info を 1 回送り、人に kill を頼む。`tmux kill-window` を直接打たない。
 
 ## フェーズ（ラベル）
 
@@ -879,6 +886,7 @@ quote_home() {
 config_path="$(harness-config --path)" || exit 1
 config_path="$(realpath "$config_path")" || exit 1
 [ -s "$config_path" ] || exit 1
+# codex_entry は人向け起動1行の組み立て用（人は絶対パスで実行する）。worker の起動には使わない（起動は PATH の harness-codex）
 codex_entry="$(command -v harness-codex)" || codex_entry="${CLAUDE_PLUGIN_ROOT:-}/bin/harness-codex"
 codex_entry="$(realpath "$codex_entry")" || exit 1
 [ -x "$codex_entry" ] || exit 1

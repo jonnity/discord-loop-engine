@@ -1389,3 +1389,19 @@ echo "PP=$P"`,
 	assert.ok(!existsSync(path.join(root, "<システムプロンプトの Scratchpad directory の絶対パス>")));
 	rmSync(root, { recursive: true, force: true });
 });
+
+test("#50: 起動の入口は PATH の harness-codex を第一にし、無ければ blocked。絶対パスの入口は人向け起動1行の組み立てだけ", () => {
+	const common = section(skill, "## Codex の共通起動手順", "## フェーズ");
+	assert.match(common, /PATH の `harness-codex` を第一/);
+	assert.match(common, /PATH に無ければ絶対パスで代用せず[\s\S]*blocked/);
+	assert.match(common, /exit 2[\s\S]*未起動/);
+	assert.match(common, /warning: bypass-rejected/);
+	assert.match(common, /not-killed:/);
+	// 矛盾の検出: 絶対パスの入口へ落とす旧文言が共通手順に残っていない
+	assert.doesNotMatch(common, /PATH に無ければ `\$\{CLAUDE_PLUGIN_ROOT\}\/bin\/harness-codex`/);
+	assert.doesNotMatch(common, /入口が PATH に無ければ解決済みの絶対入口を使う/);
+	// 人向け起動1行の組み立てにだけ絶対パスの入口を使い、その旨を明記している
+	const blocked = section(skill, "## Codex 起動を blocked にする", "## フォールバック");
+	assert.match(blocked, /codex_entry は人向け起動1行の組み立て用/);
+	assert.equal((skill.match(/\$\{CLAUDE_PLUGIN_ROOT:-\}\/bin\/harness-codex/g) ?? []).length, 1);
+});

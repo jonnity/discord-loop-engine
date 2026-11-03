@@ -84,7 +84,7 @@ for idf in "$WROOT"/issue-*/.harness/codex-*.id; do
   running) running_windows+=("$idf") ;;
   exited:0)
     if [ -f "$WT/.harness/$phase/$n.md" ]; then
-      harness-codex stop "$window" "$WT" || exit 1
+      harness-codex stop "$window" "$WT" || echo "harness-codex stop が失敗しました（$window）。走査を続けます" >&2 # 失敗で走査全体を止めない
     fi
     ;;
   esac
