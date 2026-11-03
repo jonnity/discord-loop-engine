@@ -63,7 +63,7 @@ validate_target() {
 # codex.command が固定の文法に全体一致するか（拒否リストではなく受け入れる形の限定）。
 # Why not 拒否リスト: シェル文字列なので、引用・brace 展開・変数・別名で語を隠せる
 command_ok() {
-	local cmd="$1" w prev="" c_n=0 exec_n=0 sb_n=0 key val
+	local cmd="$1" w c_n=0 exec_n=0 sb_n=0 key val
 	local charset='^[A-Za-z0-9_.={} -]+$'
 	[[ "$cmd" =~ $charset ]] || return 1
 	[[ "$cmd" != *"  "* && "$cmd" != " "* && "$cmd" != *" " ]] || return 1
