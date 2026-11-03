@@ -1,0 +1,41 @@
+[Unit]
+Description=GitHub Actions runner (%i)
+# user manager に network-online.target は無い（After= は効かない）。ネットワークが無いときは
+# ラッパーが 71 以外で失敗し、Restart=always が RestartSec ごとに、戻るまで無制限に試し直す
+StartLimitIntervalSec=0
+
+[Service]
+# dle-runner は fnm を持たない。node・pnpm は workflow の setup action が入れる
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+Environment=LANG=C.UTF-8
+# 掃除フック。root 所有のスクリプトだが、Runner.Listener は起動時に .env を読んで環境変数を上書きするため、
+# .env に同名の行があれば .env が勝つ。.env の書き換えは dle runner status が検知する
+Environment=ACTIONS_RUNNER_HOOK_JOB_COMPLETED=/usr/local/libexec/dle/job-completed.sh
+# テスト用の差し替え変数（runner-start.sh）を、manager の環境から引き継がない
+UnsetEnvironment=DLE_CURL DLE_RUNNERS_ROOT DLE_INTEROP_FILE
+# 事故防止（防御ではない）。同じ uid の job は、user manager のバスに systemd-run --user で届き、
+# サンドボックスの無いユニットを起動できる。cron・/init の直接実行でも迂回できる。
+# user manager では PrivateUsers=yes が暗黙に有効になる
+PrivateTmp=yes
+InaccessiblePaths=-/run/WSL
+InaccessiblePaths=-/mnt/wslg
+# 資源の上限（3 並列の E2E が WSL 全体のメモリを食い尽くさないように）。cgroup の委譲が無ければ無視される。仮置き
+TasksMax=4096
+MemoryHigh=7G
+MemoryMax=8G
+# 無いと 200/CHDIR で起動できない。登録解除後に先に disable しないと、この失敗が 60 秒おきに続く
+WorkingDirectory=%h/actions-runners/%i
+# ラッパーが private・登録の有無を確認してから run.sh に exec する。起動してはいけないときは 71 で終わる。
+# Why not ExecCondition: systemd 自身の exec 失敗（200 番台）が「条件を満たさない」扱いになり、再試行されない
+ExecStart=/usr/local/libexec/dle/runner-start.sh %i
+# run.sh は Listener が 0・1・5・未知のコード・シグナルで終わると exit 0 する。on-failure だと戻らない
+Restart=always
+RestartSec=60
+# 71 = ラッパーが「起動してはいけない」と判断した（public・登録なし・書式違反）。再試行しない
+RestartPreventExitStatus=71
+KillMode=control-group
+KillSignal=SIGTERM
+TimeoutStopSec=5min
+
+[Install]
+WantedBy=default.target
