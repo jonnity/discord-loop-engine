@@ -1,0 +1,14 @@
+[Unit]
+Description=Disable WSL interop binfmt (dle-runner isolation)
+# WSL が binfmt を登録する順序と競合しうる。WSL を再起動したあとも disabled のままか、必ず確認する
+ConditionPathExists=/proc/sys/fs/binfmt_misc/WSLInterop
+After=proc-sys-fs-binfmt_misc.mount
+Before=user@.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/bin/sh -c 'echo -1 > /proc/sys/fs/binfmt_misc/WSLInterop'
+
+[Install]
+WantedBy=multi-user.target

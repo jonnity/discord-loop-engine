@@ -16,6 +16,7 @@
 //   dle restart --limited | --all [--except 名前...]   上限で止まった worker だけ / 全員を起動し直す
 //   dle mode <名前> harness|native [--command <c>]  ループの進め方を切り替える（登録し直しでは引き継がれるため）
 //   dle notify ...           harness-notify から使う（人の判断が要る通知を A-番号付きで出す）
+//   dle runner status|start|stop|update   self-hosted runner の状態（sudo 不要）と、起動・停止・更新のコマンド表示
 
 import { execFile } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -31,6 +32,7 @@ import { registerProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
 import { Rest } from "./rest.ts";
 import { parseRestartArgs } from "./restart-args.ts";
+import { cmdRunner } from "./runner.ts";
 import { Supervisor, tmuxRunner } from "./supervisor.ts";
 
 const SELF = fileURLToPath(import.meta.url);
@@ -438,6 +440,15 @@ async function cmdDoctor() {
 	);
 }
 
+function usageLines(source: string): string {
+	const lines = source.split("\n");
+	const end = lines.findIndex((l) => !l.startsWith("//"));
+	return lines
+		.slice(0, end < 0 ? lines.length : end)
+		.map((l) => l.replace(/^\/\/ ?/, ""))
+		.join("\n");
+}
+
 const [cmd, ...argv] = process.argv.slice(2);
 const { flags, rest } = parseFlags(argv);
 const commands: Record<string, () => unknown> = {
@@ -458,15 +469,15 @@ const commands: Record<string, () => unknown> = {
 	restart: () => cmdRestart(argv),
 	mode: () => cmdMode(rest[0], rest[1], flags),
 	notify: () => cmdNotify(flags),
+	runner: async () => {
+		process.exitCode = await cmdRunner(argv);
+	},
 };
 const fn = cmd ? commands[cmd] : undefined;
 if (!fn) {
 	console.error(
-		readFileSync(SELF, "utf8")
-			.split("\n")
-			.slice(0, 17)
-			.map((l) => l.replace(/^\/\/ ?/, ""))
-			.join("\n"),
+		// 使い方は冒頭のコメント（最初の空行まで）。行数を数えずに切ると、行を足したときに末尾が欠ける
+		usageLines(readFileSync(SELF, "utf8")),
 	);
 	process.exit(cmd ? 1 : 0);
 }

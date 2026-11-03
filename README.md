@@ -405,6 +405,120 @@ engine のログに残すだけで、あとから付け直しません。依頼�
 | `dle restart --limited` / `dle restart --all [--except 名前]...` | 使用量の上限で止まった worker だけ／窓口を含む全員を起動し直す（`--except` は複数指定可。作業の入力中の worker は見送って一覧に出す） |
 | `dle mode <名前> harness\|native [--command <コマンド>]` | 進め方を切り替える |
 | `dle doctor` | 必要なものが揃っているか |
+| `dle runner status [--json]` | self-hosted runner（専用ユーザー `dle-runner`）の状態。sudo 不要・読み取りだけ |
+| `dle runner start\|stop\|update [名前...\|--all]` | 実行すべき `sudo` コマンドを表示する（dle 自身は実行しない。終了コード 1） |
+
+### self-hosted runner（`dle runner`）
+
+private リポジトリの CI をこの PC（WSL2）の self-hosted runner で走らせ、GitHub Actions の無料枠を使わないための仕組みです。
+runner は専用の OS ユーザー `dle-runner` の下に、リポジトリごとに登録します（systemd のユーザーサービスを runner ごとに 1 つ）。
+**セットアップ・登録・起動・停止・更新は人が（sudo で）行い、dle は状態の確認とコマンドの表示だけをします。**
+トークンは dle も worker も扱いません。
+
+安全の前提:
+- **private のリポジトリだけに登録する**。起動のたびに `runner-start.sh` が登録先を確認し、public なら起動しません（終了コード 71）
+- job は `dle-runner` の権限で動きます。jonnity の資格情報（gh・ssh・Discord Bot トークン）には届きません（`/home/jonnity` が 0750）
+- `PrivateTmp`・`InaccessiblePaths` は **事故防止であって防御ではありません**。job は同じ uid で `systemd-run --user` などにより迂回できます
+- **WSL interop**（Windows の実行ファイルの起動）は、`binfmt_misc` の `WSLInterop` を無効化し、再起動後も戻らないようにしてから登録します。有効な間は `runner-start.sh` が起動を拒否し（終了コード 72）、`dle runner status` が `⚠ interop 有効` を出します
+- 登録した時点から、リポジトリに push できる人は誰でも `runs-on: [self-hosted, linux, dle]` の workflow をこの PC で走らせられます。登録は検証の直前に行い、検証後は切り替えの日まで runner を止めておきます
+
+#### セットアップ（オーナーが一度だけ。sudo が要る）
+
+`<リポジトリ>` はこのリポジトリのチェックアウト、`<コミット>` は入れる内容を読んで決めたコミットです。**root 所有の場所に入れるファイルは、入れる前に内容を読み、作業ツリーでなく `git show <コミット>:<パス>` の出力から入れます。**
+
+```bash
+sudo adduser --disabled-password --gecos "" dle-runner     # sudo・docker グループに入れない
+sudo loginctl enable-linger dle-runner                      # WSL の再起動後に user manager を起動する
+H=$(getent passwd dle-runner | cut -d: -f6)
+sudo chmod 711 "$H"                                         # jonnity から状態を読めるように（通り抜けだけ）
+sudo -H -u dle-runner install -d -m 755 "$H/actions-runners"
+sudo install -d -m 755 /usr/local/libexec/dle /usr/local/libexec/dle/baseline
+# runner-start.sh・job-completed.sh を /usr/local/libexec/dle/ に、dle-runner@.service を /etc/systemd/user/ に（root 所有）
+for f in templates/runner/runner-start.sh templates/runner/job-completed.sh; do
+  git -C <リポジトリ> show <コミット>:$f | sudo install -m 755 -o root -g root /dev/stdin /usr/local/libexec/dle/$(basename $f)
+done
+git -C <リポジトリ> show <コミット>:templates/systemd/dle-runner@.service | sudo install -m 644 -o root -g root /dev/stdin /etc/systemd/user/dle-runner@.service
+# cron・at を dle-runner に使わせない（先に /etc/cron.allow・at.allow が無いことを確認する）
+echo dle-runner | sudo tee -a /etc/cron.deny /etc/at.deny >/dev/null
+# 以降で使う関数（dle-runner の user manager を操作する。--machine は使えない。systemd-machined が無い）
+DR() { local u; u=$(id -u dle-runner)
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR=/run/user/$u DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/$u/bus "$@"; }
+DR systemctl --user daemon-reload
+```
+
+**WSL interop の無効化（必須）**: `/etc/wsl.conf` の `[interop] enabled=false` は、この環境では効いていないことがあります。
+`binfmt_misc` を無効化する system ユニット `templates/systemd/dle-no-wsl-interop.service` を `/etc/systemd/system/` に置いて
+`sudo systemctl enable --now dle-no-wsl-interop` します。**WSL を再起動した後も、`/proc/sys/fs/binfmt_misc/WSLInterop` が無い（`echo -1` はエントリを削除するので、通常はファイルごと消える）か、あっても 1 行目が `disabled` であること**を確認してください（`dle runner status` も、`enabled` のときだけ警告します）。**再起動後にこのユニットが効くか（WSL が binfmt を登録する順序との競合）は、実機で確認していません。**
+無効化すると、jonnity も Linux から `explorer.exe`・`clip.exe` などの Windows の実行ファイルを起動できなくなります。
+無効化できない場合は登録しないでください。
+
+登録（runner 3 つ）は `config.sh` で行います。**トークンは引数でなく環境変数 `ACTIONS_RUNNER_INPUT_TOKEN` で渡し**（`ps` に出るため）、
+`umask 077` は `config.sh` の間だけにします。登録後、status が読めるようにディレクトリの権限を整え（`.credentials` は 0600 のまま）、
+**`enable --now` の前に、改変検知の基準値を保存します**:
+
+```bash
+B=/usr/local/libexec/dle/baseline
+d=$H/actions-runners/<名前>
+for f in .runner .env .path run.sh run-helper.sh.template env.sh config.sh; do
+  if [ -f "$d/$f" ]; then sudo -H -u dle-runner sha256sum "$d/$f"; else echo "absent  $d/$f"; fi
+done | sudo tee $B/<名前>.sha256 >/dev/null
+for f in .bashrc .profile .bash_logout; do
+  if [ -f "$H/$f" ]; then sudo -H -u dle-runner sha256sum "$H/$f"; else echo "absent  $H/$f"; fi
+done | sudo tee $B/home.sha256 >/dev/null
+DR systemctl --user enable --now dle-runner@<名前>
+dle runner status --json    # ? と警告が無いこと
+```
+
+#### 実機で確認していないこと
+
+この節の手順と仕組みのうち、次は **実機で確認していません**（テストで確かめたのは、スクリプト・コード・テンプレートの文字列の振る舞いだけです）:
+別ユーザーの systemd 操作（`DR` 関数）、`runner-start.sh` の 71 と `RestartPreventExitStatus=71` の挙動、オフライン・強制終了・自己更新の後の復帰、
+`PrivateTmp`・`InaccessiblePaths` の動作、WSL interop が止まること（`/init <exe>` の直接実行を含む）と再起動後の持続、資源の上限、
+自己更新で基準値の対象が変わるか、`bin/runnerversion` の有無、**フックに `GITHUB_WORKSPACE`・`RUNNER_TEMP` の環境変数が渡ること**（ソースの読み取りでは渡る見込み）。
+セットアップのあと、検証用の一時ブランチの workflow で確かめてください（掃除フックの目印ファイルが消えること、interop が起動できないこと、など）。
+
+#### 日常
+
+- `dle runner status` — 動作中か・何件走っているか・public でないか・異常停止・改変の疑い・再起動の繰り返し・interop 有効、を表示します（sudo 不要）。
+  enabled のまま Listener がいなければ `⚠ 異常停止`、`disable` して止めた runner は `停止（無効化済み）`（警告にならない）です。
+  警告が 1 つでもあれば終了コード 1。**public の警告が出たら、すぐ `dle runner stop --force` が表示するコマンドで止めてください**
+- `dle runner start|stop` — 実行する `sudo ... systemctl --user ...` のコマンドを表示します。走行中の runner は、`--force` を付けない限り stop のコマンドを表示しません
+- `dle runner update [--check]` — 最新の runner との比較と、手動で更新する手順（一時ディレクトリへの展開→検証→差し替え。失敗したら自動で元に戻す）を表示します。runner は自己更新するので、実行は任意です。**更新が成功しても `bin.dle-bak`・`externals.dle-bak` などの退避（`*.dle-bak`）は残ります。起動を確認してから削除してください**（次の更新の最初に消えます）
+
+#### 改変検知の範囲と基準値の取り直し
+
+`dle runner status` が検知するのは、ユニットの上書き・drop-in（`~/.config/systemd/user/`）、想定外のユーザーサービス、`environment.d`、
+`.bashrc`・`.profile`・`.bash_logout`、各 runner の `.runner`・`.env`・`.path`・`run.sh`・`run-helper.sh.template`・`env.sh`・`config.sh` の変更です（登録直後の sha256 との比較）。
+**検知できないもの**: `bin/`・`externals/`、`hooks`、`_work` の中、メモリ上の改変、`systemd-run --user` の一時ユニット、cron・at・autostart。
+**警告が無いことは、安全の証明ではありません。**
+crontab は `sudo crontab -l -u dle-runner`（`no crontab` が出ること）で定期的に確認してください。
+
+基準値は、次のときに **内容を確認してから** 取り直します（上の保存の手順のうち、対象の runner か `home.sha256` の分）:
+- runner の更新（`dle runner update` が表示する手順）の後
+- `.bashrc`・`.profile` を正当に変更した後
+- runner の自己更新の後に `⚠ 設定の改変の疑い` が出たとき。`run.sh` などの差分が runner のリリースの正当な変更か（リリースの tar.gz の同名ファイルと比べて）確認し、確認できないときは取り直さず調査する。
+  なお、自己更新で基準値の対象のファイルが変わるかは、実機で確認していません（変わるなら、更新のたびにこの手順が要ります）
+
+#### 切り替えと元に戻す
+
+oogiri-doc は `runs-on: ${{ fromJson(vars.CI_RUNNER_LABELS) }}` を使っているので、リポジトリ変数を変えるだけです（workflow の編集は不要）。
+
+```bash
+gh variable set CI_RUNNER_LABELS --repo jonnity/oogiri-doc --body '["self-hosted","linux","dle"]'   # self-hosted へ
+gh variable set CI_RUNNER_LABELS --repo jonnity/oogiri-doc --body '["ubuntu-latest"]'              # 元に戻す
+```
+
+変数を戻しても、`queued` のまま待っている job は動きません（`gh run cancel` → `gh run rerun`）。
+PC が止まっている間は、runner を指す job が待機になります（自動のフォールバックはありません）。長く止まるときは変数を戻します。
+**切り替える前に**、Playwright の `--with-deps`（sudo を使うので `dle-runner` では失敗する）を、`runner.environment == 'github-hosted'` のときだけ実行するよう workflow を直してください。
+secrets を使う job も全部 self-hosted になります。repository secrets は、push できる人の workflow から GitHub-hosted でも見えます（self-hosted で増えるのは、PC 上で永続的に動き LAN に届く点です）。
+
+#### 削除
+
+```bash
+DR systemctl --user disable --now dle-runner@<名前>      # 先に止める（ディレクトリを消すと CHDIR で失敗し続けるため）
+# トークンを環境変数 ACTIONS_RUNNER_INPUT_TOKEN で渡して、dle-runner として ./config.sh remove --unattended を実行し、ディレクトリと基準値を消す
+```
 
 ## 設定（`~/.discord-loop-engine/config.json`）
 
