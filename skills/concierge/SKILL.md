@@ -77,7 +77,8 @@ meta.issue が空で meta.pr がある PR 用の A は worker が `harness-merge
 A-番号は engine が worker の「人の判断が要る」報告に付けたもの（要件確認・マージ承認・要対応）。
 
 1. 返事の中身を読み、その A-番号への回答として成り立っているか確かめる（`meta.attention_status` が
-   「対応済み」なら、もう答えが出ていることを伝える）
+   「対応済み」なら、もう答えが出ていることを伝える）。マージ承認の投稿への 🙆‍♂️ リアクションは
+   engine が直接 OK として記録・配送し、`meta.kind=notice` で知らせる。重ねて `attention_answer` しない
 2. `attention_answer`（id・answer）で回答を渡す。answer には本文をそのまま入れ、末尾に
    「（Discord: <meta.user>）」を付ける。worker が止まっていても起動後に届く
 3. マージ承認の「OK」は、engine が配送した meta.attention を worker が

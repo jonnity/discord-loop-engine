@@ -56,6 +56,8 @@ export interface Config {
 	board: { enabled: boolean };
 	/** worker が git commit するときの作者。任意（型付きの Config リテラルを壊さない）。null は未設定 */
 	git?: GitIdentity | null;
+	/** マージ承認の投稿に付けると OK になる絵文字。未指定は既定（🙆‍♂️）、null は無効。optional（型付きの Config リテラルを壊さない） */
+	reactionEmoji?: string | null;
 }
 
 export const CONFIG_TEMPLATE = {
@@ -141,6 +143,12 @@ export function loadConfig(home = dleHome()): Config {
 	if (!isIdList(raw.channelIds)) errors.push("channelIds: Discord のチャンネル ID（数字の文字列）を1つ以上");
 	if (!isIdList(raw.allowedUserIds))
 		errors.push("allowedUserIds: 中継を許す Discord ユーザー ID（数字の文字列）を1つ以上");
+	let reactionEmoji: string | null | undefined;
+	if (raw.reactionEmoji === undefined) reactionEmoji = undefined;
+	else if (raw.reactionEmoji === false) reactionEmoji = null;
+	else if (typeof raw.reactionEmoji === "string" && raw.reactionEmoji.trim() !== "")
+		reactionEmoji = raw.reactionEmoji.trim();
+	else errors.push("reactionEmoji: 絵文字1つの文字列、または false（リアクションでの OK を無効にする）");
 	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const channelIds = raw.channelIds as string[];
 	const c = (raw.concierge ?? {}) as Record<string, unknown>;
@@ -217,5 +225,6 @@ export function loadConfig(home = dleHome()): Config {
 		},
 		board: { enabled: (raw.board as Record<string, unknown> | undefined)?.enabled !== false },
 		git: readGit(raw.git),
+		...(reactionEmoji !== undefined ? { reactionEmoji } : {}),
 	};
 }

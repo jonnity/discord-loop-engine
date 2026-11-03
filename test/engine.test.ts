@@ -7,6 +7,8 @@
 // - worker がいない間の指示は、worker が繋がった時に届く
 // - フェーズ done で台帳が完了になり、閾値に達すると窓口へ振り返りの依頼が届く
 // - ボードは1通を投稿・ピン留めし、以後は書き換える
+// - マージ承認の投稿への 🙆‍♂️（許可ユーザーの最初の1回）だけが、窓口を通さず OK の回答として文字の回答と同じ経路で記録・配送され、受付が1回返る。
+//   他人・bot・別の絵文字・外す・対応済み・マージ承認以外・別チャンネルは何も変えない
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
@@ -16,11 +18,12 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
+import { isAttentionAnswerOk } from "../src/attention-read.ts";
 import type { Config } from "../src/config.ts";
 import { Engine, limitGaveUpText, limitNoticeText, restartMode } from "../src/engine.ts";
 import type { Run } from "../src/projects.ts";
 import { type EngineMessage, lineReader, PROTOCOL_VERSION } from "../src/protocol.ts";
-import type { DiscordMessage } from "../src/route.ts";
+import { DEFAULT_REACTION_EMOJI, type DiscordMessage, parsePost } from "../src/route.ts";
 import { Supervisor } from "../src/supervisor.ts";
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -128,6 +131,8 @@ function setupEngine(retroEvery = 5, exec?: Run, existingHome?: string, log: (m:
 	};
 	const rest = fakeRest();
 	let onMessage: (d: unknown) => void = () => {};
+	let onReaction: (d: unknown, kind: "add" | "remove") => void = () => {};
+	let onReady: (user: { id: string } | null) => void = () => {};
 	const engine = new Engine({
 		config,
 		rest,
@@ -136,10 +141,19 @@ function setupEngine(retroEvery = 5, exec?: Run, existingHome?: string, log: (m:
 		...(exec ? { exec } : {}),
 		gatewayFactory: (h) => {
 			onMessage = h.onMessage;
+			onReaction = h.onReaction;
+			onReady = h.onReady;
 			return { start() {}, stop() {}, connected: true, user: { id: "999", username: "bot" } };
 		},
 	});
-	return { engine, rest, home, discord: (d: DiscordMessage) => onMessage(d) };
+	return {
+		engine,
+		rest,
+		home,
+		discord: (d: DiscordMessage) => onMessage(d),
+		reaction: (d: unknown, kind: "add" | "remove" = "add") => onReaction(d, kind),
+		ready: (id = "999") => onReady({ id }),
+	};
 }
 
 type Rpc = { id?: number; method?: string; params?: Record<string, unknown>; result?: Record<string, unknown> };
@@ -2205,5 +2219,331 @@ test("#28: attention_list は既定で開いている A だけを返し、絞り
 		await assert.rejects(engine.call(W1, "attention_list", { typo: "x" }), /typo/);
 	} finally {
 		await engine.stop();
+	}
+});
+
+// --- Issue #53: マージ承認の投稿への 🙆‍♂️ で OK を返す ---------------------------------------
+const OWNER_NAME = "jonnity";
+const rx = (messageId: string, o: Record<string, unknown> = {}) => ({
+	user_id: ME,
+	channel_id: CH,
+	message_id: messageId,
+	guild_id: "800",
+	member: { user: { id: ME, username: "jon", global_name: OWNER_NAME } },
+	emoji: { id: null, name: DEFAULT_REACTION_EMOJI },
+	burst: false,
+	...o,
+});
+const settle = () => new Promise((r) => setTimeout(r, 40));
+const receipts = (rest: ReturnType<typeof fakeRest>) =>
+	sends(rest).filter((c) => c.content?.includes("を OK として受け付けました"));
+const workerEvents = (engine: Engine) => engine.ledger.drain("proj");
+const statusOf = (engine: Engine, id: string) => engine.ledger.attention().find((a) => a.id === id);
+
+test("オーナーの 🙆‍♂️ で、マージ承認が文字の回答と同じ経路（台帳・worker・タスク・✅）で OK になり、受付が1回返る", async () => {
+	const { engine, rest, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1", { pr: "5" });
+	workerEvents(engine);
+	engine.ledger.drain("concierge");
+	reaction(rx(g.message_id));
+	await settle();
+	const a = statusOf(engine, g.attention);
+	assert.equal(a?.status, "resolved");
+	assert.equal(a?.answer, `OK（Discord リアクション: ${OWNER_NAME}）`);
+	const ev = workerEvents(engine);
+	assert.equal(ev.length, 1);
+	assert.deepEqual(ev[0]?.meta, {
+		attention: g.attention,
+		kind: "merge",
+		issue: "1",
+		pr: "5",
+		task: a?.taskId,
+		source: "discord",
+	});
+	assert.match(ev[0]?.content ?? "", new RegExp(`${g.attention}.*への回答が届きました`));
+	assert.match(ev[0]?.content ?? "", /OK（Discord リアクション: jonnity）$/);
+	assert.equal(engine.ledger.task(a?.taskId ?? "")?.status, "ai-working");
+	assert.deepEqual(reacts(rest), [[g.message_id, "✅", CH]]);
+	const r = receipts(rest);
+	assert.equal(r.length, 1);
+	assert.equal(r[0]?.replyTo, g.message_id);
+	assert.ok(r[0]?.content?.includes(`${g.attention} を OK として受け付けました`));
+	const notice = engine.ledger.drain("concierge").filter((e) => e.meta.kind === "notice");
+	assert.equal(notice.length, 1);
+	assert.match(notice[0]?.content ?? "", /attention_answer する必要はありません/);
+});
+
+test("受付の投稿は A-番号の見出しを持たず、別の A の返事先と誤認されない。台帳の答えは worker の OK 判定を満たす", async () => {
+	const { engine, rest, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1");
+	reaction(rx(g.message_id));
+	await settle();
+	const parsed = parsePost({ id: "x", channel_id: CH, content: receipts(rest)[0]?.content ?? "" });
+	assert.ok(parsed);
+	assert.equal(parsed.attention, undefined);
+	assert.ok(isAttentionAnswerOk(statusOf(engine, g.attention)?.answer ?? "", [ME]));
+});
+
+test("表示名の危険な文字は回答に入らない", async () => {
+	const { engine, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1");
+	reaction(rx(g.message_id, { member: { user: { global_name: 'x"; rm -rf $HOME `id`\n<b>' } } }));
+	await settle();
+	assert.doesNotMatch(statusOf(engine, g.attention)?.answer ?? "", /["$`<>\n;]/);
+	assert.match(statusOf(engine, g.attention)?.answer ?? "", /^OK（Discord リアクション: /);
+});
+
+test("分割された承認依頼は、先頭・2通目・最後の1通のどれに付けても受け付ける。messageIds の無い古い形式も受け付ける", async () => {
+	for (const pick of [0, 1, -1]) {
+		const { engine, rest, reaction } = setupEngine();
+		const g = await openGate(engine, "merge-request", "1", { body: "あ".repeat(4500) });
+		const ids = engine.ledger.attention().find((a) => a.id === g.attention)?.messageIds ?? [];
+		assert.ok(ids.length >= 3, `分割された（${ids.length}）`);
+		assert.equal(ids[0], g.message_id);
+		reaction(rx(ids.at(pick) as string));
+		await settle();
+		assert.equal(statusOf(engine, g.attention)?.status, "resolved", `pick=${pick}`);
+		assert.equal(receipts(rest).length, 1);
+	}
+	const { engine, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1");
+	const list = engine.ledger.attention();
+	for (const a of list) delete a.messageIds;
+	writeFileSync(path.join(engine.ledger.dir, "attention.json"), JSON.stringify(list));
+	reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(engine, g.attention)?.status, "resolved");
+});
+
+test("burst（スーパーリアクション）の 🙆‍♂️ も通常と同じに受け付ける。FE0F の無い形も受け付ける", async () => {
+	const { engine, reaction } = setupEngine();
+	const a = await openGate(engine, "merge-request", "1");
+	const b = await openGate(engine, "merge-request", "2");
+	reaction(rx(a.message_id, { burst: true }));
+	reaction(rx(b.message_id, { emoji: { id: null, name: "\u{1F646}\u200D\u2642" } }));
+	await settle();
+	assert.equal(statusOf(engine, a.attention)?.status, "resolved");
+	assert.equal(statusOf(engine, b.attention)?.status, "resolved");
+});
+
+const untouched = async (
+	name: string,
+	mk: (g: { message_id: string }, ctx: ReturnType<typeof setupEngine>) => unknown,
+) => {
+	test(`${name}は台帳・配送・投稿を何も変えない`, async () => {
+		const ctx = setupEngine();
+		const { engine, rest, ready, reaction } = ctx;
+		ready();
+		const g = await openGate(engine, "merge-request", "1");
+		await settle(); // ボードの投稿が落ち着いてから基準を取る
+		const before = JSON.stringify(engine.ledger.attention());
+		const sentBefore = rest.calls.length;
+		workerEvents(engine);
+		const payload = mk(g, ctx);
+		const kind = (payload as { kind?: "add" | "remove" })?.kind ?? "add";
+		const d = (payload as { d?: unknown })?.d ?? payload;
+		reaction(d, kind);
+		await settle();
+		assert.equal(JSON.stringify(engine.ledger.attention()), before);
+		assert.equal(rest.calls.length, sentBefore);
+		assert.deepEqual(workerEvents(engine), []);
+	});
+};
+await untouched("他人の 🙆‍♂️", (g) => rx(g.message_id, { user_id: "555", member: { user: { id: "555" } } }));
+await untouched("bot 自身（botUserId）の 🙆‍♂️（許可リストに入っていても）", (g, ctx) => {
+	// bot の ID が許可リストにあっても、botUserId の判定だけで落ちることを確かめる
+	ctx.engine.config.allowedUserIds.push("999");
+	return rx(g.message_id, { user_id: "999", member: { user: { id: "999", username: "bot" } } });
+});
+await untouched("member.user.bot の 🙆‍♂️", (g) =>
+	rx(g.message_id, { member: { user: { id: ME, bot: true, username: "b" } } }),
+);
+await untouched("✅", (g) => rx(g.message_id, { emoji: { id: null, name: "✅" } }));
+await untouched("👍", (g) => rx(g.message_id, { emoji: { id: null, name: "👍" } }));
+await untouched("独自絵文字", (g) => rx(g.message_id, { emoji: { id: "77", name: "ok" } }));
+await untouched("別チャンネルのリアクション", (g) => rx(g.message_id, { channel_id: "901" }));
+await untouched("A でないメッセージへのリアクション", () => rx("424242"));
+await untouched("🙆‍♂️ を外した（REMOVE）とき", (g) => ({ d: rx(g.message_id), kind: "remove" }));
+await untouched("不正な形のイベント", () => ({ user_id: ME }));
+
+test("reactionEmoji: false ではリアクションでの回答は無効、✅ を設定すると ✅ だけが通る", async () => {
+	const off = setupEngine();
+	(off.engine.config as Config).reactionEmoji = null;
+	const g = await openGate(off.engine, "merge-request", "1");
+	off.reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(off.engine, g.attention)?.status, "open");
+
+	const on = setupEngine();
+	(on.engine.config as Config).reactionEmoji = "✅";
+	const h = await openGate(on.engine, "merge-request", "1");
+	on.reaction(rx(h.message_id));
+	await settle();
+	assert.equal(statusOf(on.engine, h.attention)?.status, "open", "🙆‍♂️ は通らない");
+	on.reaction(rx(h.message_id, { emoji: { id: null, name: "✅" } }));
+	await settle();
+	assert.equal(statusOf(on.engine, h.attention)?.status, "resolved");
+
+	const fe = setupEngine();
+	(fe.engine.config as Config).reactionEmoji = "\u{1F646}\u200D\u2642";
+	const k = await openGate(fe.engine, "merge-request", "1");
+	fe.reaction(rx(k.message_id));
+	await settle();
+	assert.equal(statusOf(fe.engine, k.attention)?.status, "resolved", "設定側の FE0F の有無に依らない");
+});
+
+test("マージ承認以外（要件確認・要対応・設定の確認）への 🙆‍♂️ は無視され、not-eligible がログに残る", async () => {
+	const logs: string[] = [];
+	const { engine, rest, reaction } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	for (const event of ["interview", "blocked", "setup"]) {
+		const g = await openGate(engine, event, "1");
+		await settle();
+		workerEvents(engine);
+		const n = rest.calls.length;
+		reaction(rx(g.message_id));
+		await settle();
+		assert.equal(statusOf(engine, g.attention)?.status, "open", event);
+		assert.equal(rest.calls.length, n, event);
+		assert.deepEqual(workerEvents(engine), [], event);
+		assert.ok(
+			logs.some((l) => l.includes("not-eligible") && l.includes(g.attention)),
+			event,
+		);
+	}
+});
+
+test("対応済み（文字で回答済み・置き換え・☑️ で閉じた）への 🙆‍♂️ は答えを増やさず、受付も出ない", async () => {
+	const logs: string[] = [];
+	const { engine, rest, reaction } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	const text = await openGate(engine, "merge-request", "1");
+	await engine.call(CONCIERGE, "attention_answer", { id: text.attention, answer: "NG: 直して" });
+	const old = await openGate(engine, "merge-request", "2");
+	await openGate(engine, "merge-request", "2");
+	const closed = await openGate(engine, "merge-request", "3");
+	const task = engine.ledger.findTaskByIssue("proj", "3");
+	assert.ok(task);
+	await engine.call(CONCIERGE, "task_update", { id: task.id, status: "done" });
+	await settle();
+	workerEvents(engine);
+	const n = rest.calls.length;
+	for (const g of [text, old, closed]) reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(engine, text.attention)?.answer, "NG: 直して");
+	assert.ok(!statusOf(engine, old.attention)?.answer?.startsWith("OK"));
+	assert.ok(!statusOf(engine, closed.attention)?.answer?.startsWith("OK"));
+	assert.equal(rest.calls.length, n);
+	assert.deepEqual(workerEvents(engine), []);
+	assert.ok(logs.some((l) => l.includes("already-resolved") && l.includes(text.attention)));
+	assert.equal(receipts(rest).length, 0);
+});
+
+test("同じ A への 🙆‍♂️ を続けて流しても、記録・配送・受付は1回。文字の回答との競合も1回で決まる", async () => {
+	const { engine, rest, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1");
+	workerEvents(engine);
+	reaction(rx(g.message_id));
+	reaction(rx(g.message_id));
+	await settle();
+	assert.equal(workerEvents(engine).length, 1);
+	assert.equal(receipts(rest).length, 1);
+	assert.equal(reacts(rest).length, 1);
+
+	const h = await openGate(engine, "merge-request", "2");
+	workerEvents(engine);
+	reaction(rx(h.message_id));
+	await assert.rejects(engine.call(CONCIERGE, "attention_answer", { id: h.attention, answer: "OK" }), /対応済み/);
+	await settle();
+	assert.equal(workerEvents(engine).length, 1);
+	assert.equal(statusOf(engine, h.attention)?.answer, `OK（Discord リアクション: ${OWNER_NAME}）`);
+});
+
+test("受け付けた後の REMOVE・別の絵文字・もう一度の 🙆‍♂️ でも、回答は取り消されず受付も増えない", async () => {
+	const { engine, rest, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1");
+	reaction(rx(g.message_id));
+	await settle();
+	const answer = statusOf(engine, g.attention)?.answer;
+	workerEvents(engine);
+	reaction(rx(g.message_id), "remove");
+	reaction(rx(g.message_id, { emoji: { id: null, name: "👍" } }));
+	reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(engine, g.attention)?.status, "resolved");
+	assert.equal(statusOf(engine, g.attention)?.answer, answer);
+	assert.equal(receipts(rest).length, 1);
+	assert.deepEqual(workerEvents(engine), []);
+});
+
+test("受け付けの前に別の絵文字を付けても、その後の 🙆‍♂️ は受け付ける", async () => {
+	const { engine, reaction } = setupEngine();
+	const g = await openGate(engine, "merge-request", "1");
+	reaction(rx(g.message_id, { emoji: { id: null, name: "👍" } }));
+	await settle();
+	assert.equal(statusOf(engine, g.attention)?.status, "open");
+	reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(engine, g.attention)?.status, "resolved");
+});
+
+test("依頼の投稿中（messageId の保存前）の 🙆‍♂️ は逆引きに当たらず無視される", async () => {
+	const { engine, rest, reaction } = setupEngine();
+	let release: () => void = () => {};
+	rest.hooks.send = () =>
+		new Promise<void>((r) => {
+			release = r;
+		});
+	const opening = openGate(engine, "merge-request", "1");
+	await settle();
+	reaction(rx("1"));
+	await settle();
+	release();
+	const g = await opening;
+	assert.equal(statusOf(engine, g.attention)?.status, "open");
+});
+
+test("受付投稿の失敗でも台帳の回答は残り、engine は落ちない", async () => {
+	const logs: string[] = [];
+	const { engine, rest, reaction } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	const g = await openGate(engine, "merge-request", "1");
+	rest.hooks.send = async () => {
+		throw new Error("500 boom");
+	};
+	reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(engine, g.attention)?.status, "resolved");
+	assert.ok(logs.some((l) => l.includes("受付投稿に失敗")));
+});
+
+test("ハンドラが例外を投げても engine は落ちず、ログを残し、以後のリアクションも処理できる", async () => {
+	const logs: string[] = [];
+	const { engine, reaction } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	const g = await openGate(engine, "merge-request", "1");
+	const original = engine.ledger.attention.bind(engine.ledger);
+	engine.ledger.attention = () => {
+		throw new Error("読めない");
+	};
+	reaction(rx(g.message_id));
+	await settle();
+	assert.ok(logs.some((l) => l.includes("リアクション処理の失敗")));
+	engine.ledger.attention = original;
+	reaction(rx(g.message_id));
+	await settle();
+	assert.equal(statusOf(engine, g.attention)?.status, "resolved");
+});
+
+test("起動ログに、リアクションで OK にする絵文字がコードポイントつきで出る（無効なら無効と出る）", async () => {
+	for (const [value, expected] of [
+		[undefined, "U+1F646 U+200D U+2642 U+FE0F"],
+		[null, "無効"],
+	] as const) {
+		const logs: string[] = [];
+		const { engine } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+		if (value === null) (engine.config as Config).reactionEmoji = null;
+		await engine.start();
+		await engine.stop();
+		assert.ok(
+			logs.some((l) => l.includes("リアクションで OK") && l.includes(expected)),
+			logs.join("\n"),
+		);
 	}
 });

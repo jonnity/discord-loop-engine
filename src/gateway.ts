@@ -1,12 +1,13 @@
 // Discord Gateway（受信用 WebSocket）の最小クライアント。
 // discord.js を使わないのは、このエンジンが「メッセージの中継」しかせず、必要なのが
-// Hello / Identify / Heartbeat / Resume / MESSAGE_CREATE だけだから。依存を増やさず、
-// Node 標準の WebSocket で済ませる。
+// Hello / Identify / Heartbeat / Resume / MESSAGE_CREATE / MESSAGE_REACTION_ADD・REMOVE だけだから。依存を増やさず、
+// Node 標準の WebSocket で済ませる。リアクションは、A-番号の投稿（マージ承認）への 🙆‍♂️ で OK を受けるために要る。
 
 const GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json";
 
-// GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT
-export const INTENTS = (1 << 0) | (1 << 9) | (1 << 12) | (1 << 15);
+// GUILDS | GUILD_MESSAGES | GUILD_MESSAGE_REACTIONS | DIRECT_MESSAGES | DIRECT_MESSAGE_REACTIONS | MESSAGE_CONTENT
+// リアクションの2つは特権ではない（Developer Portal の設定は要らない）
+export const INTENTS = (1 << 0) | (1 << 9) | (1 << 10) | (1 << 12) | (1 << 13) | (1 << 15);
 
 const OP = { DISPATCH: 0, HEARTBEAT: 1, IDENTIFY: 2, RESUME: 6, RECONNECT: 7, INVALID_SESSION: 9, HELLO: 10, ACK: 11 };
 
@@ -34,6 +35,7 @@ type Timer = ReturnType<typeof setTimeout>;
 export interface GatewayOptions {
 	token: string;
 	onMessage?: (d: unknown) => void;
+	onReaction?: (d: unknown, kind: "add" | "remove") => void;
 	onReady?: (user: { id: string; username?: string } | null) => void;
 	onFatal?: (reason: string) => void;
 	log?: (msg: string) => void;
@@ -49,6 +51,7 @@ export interface GatewayOptions {
 export class Gateway {
 	private token: string;
 	private onMessage: (d: unknown) => void;
+	private onReaction: (d: unknown, kind: "add" | "remove") => void;
 	private onReady: (user: { id: string; username?: string } | null) => void;
 	private onFatal: (reason: string) => void;
 	private log: (msg: string) => void;
@@ -74,6 +77,7 @@ export class Gateway {
 	constructor(opts: GatewayOptions) {
 		this.token = opts.token;
 		this.onMessage = opts.onMessage ?? (() => {});
+		this.onReaction = opts.onReaction ?? (() => {});
 		this.onReady = opts.onReady ?? (() => {});
 		this.onFatal = opts.onFatal ?? (() => {});
 		this.log = opts.log ?? (() => {});
@@ -199,6 +203,10 @@ export class Gateway {
 			this.log("gateway: 再開しました");
 		} else if (t === "MESSAGE_CREATE") {
 			this.onMessage(d);
+		} else if (t === "MESSAGE_REACTION_ADD") {
+			this.onReaction(d, "add");
+		} else if (t === "MESSAGE_REACTION_REMOVE") {
+			this.onReaction(d, "remove");
 		}
 	}
 

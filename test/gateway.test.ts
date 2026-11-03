@@ -1,6 +1,7 @@
 // Gateway クライアントが保証すること:
 // - Hello を受けたら必要な intents（Message Content を含む）で Identify する
 // - MESSAGE_CREATE を受信ハンドラへ渡す
+// - リアクション（Guild / DM）の intents を持ち、MESSAGE_REACTION_ADD / REMOVE を発言とは別のハンドラへ渡す
 // - Reconnect 指示や切断のあとは、セッションを再開（Resume）する
 // - トークン不正・intents 不許可の切断では再接続せず、理由を知らせて止まる
 // - 接続そのものに失敗した（error のみ）場合も再接続する
@@ -44,12 +45,14 @@ function setup() {
 	FakeWS.instances = [];
 	const timeouts: (() => void)[] = [];
 	const received: unknown[] = [];
+	const reactions: { d: unknown; kind: string }[] = [];
 	const fatal: string[] = [];
 	const fakeTimer = 0 as unknown as ReturnType<typeof setTimeout>;
 	const gw = new Gateway({
 		token: "T",
 		WebSocketImpl: FakeWS,
 		onMessage: (d) => received.push(d),
+		onReaction: (d, kind) => reactions.push({ d, kind }),
 		onFatal: (r) => fatal.push(r),
 		timers: {
 			setTimeout: (fn) => {
@@ -65,7 +68,7 @@ function setup() {
 	const ws = () => FakeWS.instances.at(-1) as FakeWS;
 	// 最後に積まれたタイマー（バックオフ後の再接続）を進める
 	const fireLast = () => (timeouts.at(-1) as () => void)();
-	return { gw, fireLast, received, fatal, ws };
+	return { gw, fireLast, received, reactions, fatal, ws };
 }
 
 const hello = { op: 10, d: { heartbeat_interval: 41250 } };
@@ -87,6 +90,27 @@ test("Hello → Identify（Message Content intent 込み）→ READY → MESSAGE
 	assert.equal(gw.connected, true);
 	ws().emit({ op: 0, s: 2, t: "MESSAGE_CREATE", d: { id: "m1", content: "hi" } });
 	assert.deepEqual(received, [{ id: "m1", content: "hi" }]);
+});
+
+test("リアクションの intents（Guild・DM）を持ち、特権の intents は足さない", () => {
+	assert.ok(INTENTS & (1 << 10), "GUILD_MESSAGE_REACTIONS");
+	assert.ok(INTENTS & (1 << 13), "DIRECT_MESSAGE_REACTIONS");
+	assert.ok(INTENTS & (1 << 15), "MESSAGE_CONTENT は残る");
+	assert.equal(INTENTS & (1 << 1), 0, "GUILD_MEMBERS（特権）は足さない");
+	assert.equal(INTENTS & (1 << 8), 0, "GUILD_PRESENCES（特権）は足さない");
+});
+
+test("MESSAGE_REACTION_ADD / REMOVE は onReaction に種別つきで渡り、onMessage には渡らない", () => {
+	const { received, reactions, ws } = setup();
+	ws().emit(hello);
+	ws().emit(ready(1));
+	ws().emit({ op: 0, s: 2, t: "MESSAGE_REACTION_ADD", d: { message_id: "m1" } });
+	ws().emit({ op: 0, s: 3, t: "MESSAGE_REACTION_REMOVE", d: { message_id: "m2" } });
+	assert.deepEqual(reactions, [
+		{ d: { message_id: "m1" }, kind: "add" },
+		{ d: { message_id: "m2" }, kind: "remove" },
+	]);
+	assert.deepEqual(received, []);
 });
 
 test("Reconnect 指示のあとは resume_gateway_url に繋ぎ直して Resume する", () => {

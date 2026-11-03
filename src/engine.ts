@@ -40,7 +40,17 @@ import {
 } from "./projects.ts";
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
 import type { DiscordApi } from "./rest.ts";
-import { type DiscordMessage, formatPostChunks, type PostHeading, route } from "./route.ts";
+import {
+	codePoints,
+	DEFAULT_REACTION_EMOJI,
+	type DiscordMessage,
+	formatPostChunks,
+	isOkEmoji,
+	type PostHeading,
+	parseReaction,
+	route,
+	sanitizeUser,
+} from "./route.ts";
 import type { RefreshResult, Supervisor } from "./supervisor.ts";
 import { validateToolArguments } from "./tool-validation.ts";
 import { resolveWorktreeRoot } from "./worktrees.ts";
@@ -145,6 +155,7 @@ export interface EngineOptions {
 	rest: DiscordApi;
 	gatewayFactory: (handlers: {
 		onMessage: (d: unknown) => void;
+		onReaction: (d: unknown, kind: "add" | "remove") => void;
 		onReady: (user: { id: string } | null) => void;
 		onFatal: (reason: string) => void;
 		log: (m: string) => void;
@@ -194,6 +205,9 @@ export class Engine {
 			onMessage: (d) => {
 				this.onDiscordMessage(d as DiscordMessage).catch((e: Error) => this.log(`engine: 受信処理の失敗 ${e.message}`));
 			},
+			onReaction: (d, kind) => {
+				this.onDiscordReaction(d, kind).catch((e: Error) => this.log(`engine: リアクション処理の失敗 ${e.message}`));
+			},
 			onReady: (user) => {
 				this.botUserId = user?.id ?? null;
 				this.writeStatus();
@@ -225,6 +239,8 @@ export class Engine {
 		this.gateway.start();
 		this.writeStatus();
 		this.log(`engine: 待ち受け開始 ${this.config.socketPath}`);
+		const emoji = this.reactionEmoji();
+		this.log(`engine: リアクションで OK: ${emoji === null ? "無効" : `${emoji}（${codePoints(emoji)}）`}`);
 		const c = this.config.concierge.refresh;
 		const w = this.config.worker.refresh;
 		this.log(
@@ -510,6 +526,7 @@ export class Engine {
 		const chunks = formatPostChunks(name, text, opts.heading ?? { icon: "🔔", label: "お知らせ" });
 		let lastMessage: unknown;
 		let firstId: string | null = null;
+		const ids: string[] = [];
 		for (const [i, content] of chunks.entries()) {
 			const res = await this.rest.sendMessage(opts.channelId ?? this.config.defaultChannelId, {
 				content,
@@ -517,9 +534,10 @@ export class Engine {
 				files: i === chunks.length - 1 ? (opts.files ?? []) : [],
 			});
 			firstId ??= res?.id ?? null;
+			if (res?.id) ids.push(res.id);
 			lastMessage = res;
 		}
-		return { firstId, lastMessage };
+		return { firstId, ids, lastMessage };
 	}
 
 	/**
@@ -876,12 +894,16 @@ export class Engine {
 		const { issue, pr, title, url, body } = o;
 		const label = KIND_LABEL[gate.kind];
 		const text = [title, body || null, gate.how(att.id), url ? `<${url}>` : null].filter(Boolean).join("\n");
-		const { firstId: messageId, lastMessage } = await this.postMessages(project, text, {
+		const {
+			firstId: messageId,
+			ids,
+			lastMessage,
+		} = await this.postMessages(project, text, {
 			heading: { icon: gate.icon, label, attention: att.id, ...(issue ? { issue } : {}) },
 			files: o.file ? [o.file] : [],
 		});
 		if (messageId) {
-			this.ledger.setAttentionMessage(att.id, messageId);
+			this.ledger.setAttentionMessage(att.id, messageId, ids);
 			const pending = this.pendingAttentionMarks.get(att.id);
 			this.pendingAttentionMarks.delete(att.id);
 			if (pending) await this.markAttention({ ...att, messageId }, pending);
@@ -1079,6 +1101,46 @@ export class Engine {
 		if (patch.status === "done") await this.onTaskDone(t);
 		this.scheduleBoard();
 		return t;
+	}
+
+	/** 設定の絵文字。未指定は既定、null は無効 */
+	private reactionEmoji(): string | null {
+		return this.config.reactionEmoji === undefined ? DEFAULT_REACTION_EMOJI : this.config.reactionEmoji;
+	}
+
+	/**
+	 * A-番号の投稿（マージ承認）への 🙆‍♂️ を OK として受け付ける。窓口（LLM）は通さず answerAttention に乗せる。
+	 * 外した・別の絵文字・対応済み・対象外は、受け付け済みの回答を取り消さずログだけ残す（猶予も設けない）。
+	 */
+	private async onDiscordReaction(d: unknown, kind: "add" | "remove") {
+		const ev = parseReaction(d);
+		if (!ev) return;
+		// bot が自分で付ける ✅ / ☑️ も届くので、ログを汚さないよう静かに捨てる。READY 前は許可ユーザー判定が落とす
+		if (ev.userId === this.botUserId || ev.isBot) return;
+		if (ev.channelId !== this.config.defaultChannelId) return;
+		const a = this.ledger.attention().find((x) => (x.messageIds ?? [x.messageId]).includes(ev.messageId));
+		if (!a) return;
+		const ignore = (reason: string) =>
+			this.log(`engine: リアクションを無視 ${reason} ${a.id} user=${ev.userId} emoji=${codePoints(ev.emojiName)}`);
+		if (!this.config.allowedUserIds.includes(ev.userId)) return ignore("not-allowed");
+		if (kind === "remove") return ignore("removed");
+		const configured = this.reactionEmoji();
+		if (configured === null || !isOkEmoji({ id: ev.emojiId, name: ev.emojiName }, configured))
+			return ignore("other-emoji");
+		if (a.status !== "open") return ignore("already-resolved");
+		if (a.kind !== "merge") return ignore("not-eligible");
+		// ここから answerAttention の最初の文（同期の resolveAttention）までに await を挟まない。
+		// 挟むと同時の反応や文字の回答と二重に答えうる
+		const user = sanitizeUser(ev.userName, ev.userId);
+		await this.answerAttention(a.id, `OK（Discord リアクション: ${user}）`);
+		this.log(`engine: ${a.id} を OK として受け付けました（リアクション・user=${ev.userId}）`);
+		const notice = `[${a.project}] ${a.id} を Discord のリアクションで OK として受け付けました。あなたから attention_answer する必要はありません`;
+		if (this.deliver("concierge", notice, { kind: "notice", attention: a.id, project: a.project }) !== "held")
+			this.remember(notice);
+		await this.post(a.project, `${a.id} を OK として受け付けました（${user}・Discord リアクション）`, {
+			replyTo: ev.messageId,
+			heading: { icon: "ℹ️", label: "受付" },
+		}).catch((e: Error) => this.log(`engine: ${a.id} の受付投稿に失敗 ${e.message.slice(0, 120)}`));
 	}
 
 	private async answerAttention(id: string, answer: string) {

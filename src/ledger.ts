@@ -49,6 +49,8 @@ export interface Attention {
 	resolvedAt?: string;
 	answer?: string;
 	messageId?: string;
+	/** 分割投稿の全メッセージの ID（送信順）。リアクションの逆引き用。無い古い項目は messageId だけで引く */
+	messageIds?: string[];
 }
 
 export interface AddedAttention {
@@ -418,11 +420,12 @@ export class Ledger {
 		return { attention: a, resolved };
 	}
 
-	setAttentionMessage(id: string, messageId: string) {
+	setAttentionMessage(id: string, messageId: string, messageIds?: string[]) {
 		const list = this.attention();
 		const a = list.find((x) => x.id === id);
 		if (a) {
 			a.messageId = messageId;
+			if (messageIds) a.messageIds = messageIds;
 			this.saveAttention(list);
 		}
 	}
