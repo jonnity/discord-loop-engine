@@ -1,6 +1,7 @@
 // 設定ファイルの読み込みが保証すること:
 // - git の作者は名前とメールが両方そろっているときだけ採用し、それ以外（欠落・片方・空・型違い）は未設定にする
 //   （既存の config.json を壊さず、雛形の空文字は未設定として扱う）
+// - reactionEmoji は未指定で未設定（engine が既定を使う）、文字列でその絵文字、false で無効（null）、それ以外は設定エラー
 import "./isolate.ts";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -115,4 +116,12 @@ test("worker.limit.wakeIntervalMinutes / wakeMaxAttempts は既定 30・5、上�
 	for (const bad of [-1, 1.5, "x", null]) {
 		assert.equal(load({ worker: { limit: { wakeMaxAttempts: bad } } }).worker.limit?.wakeMaxAttempts, 5);
 	}
+});
+
+test("reactionEmoji は未指定で未設定、文字列でその絵文字、false で無効にでき、不正値は設定エラー", () => {
+	assert.equal("reactionEmoji" in load({}), false);
+	assert.equal(load({ reactionEmoji: "✅" }).reactionEmoji, "✅");
+	assert.equal(load({ reactionEmoji: false }).reactionEmoji, null);
+	for (const v of [1, "", "  ", true, null, ["✅"]])
+		assert.throws(() => load({ reactionEmoji: v }), /reactionEmoji/, JSON.stringify(v));
 });

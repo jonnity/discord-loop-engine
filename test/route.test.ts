@@ -4,9 +4,22 @@
 // - 「A-4 OK」のように番号から書き始めても、その A-番号への返事になる
 // - CI（webhook）の通知への返信は、プロジェクトと Issue/PR を付けて渡る
 // - 許可確認の返事は、待っている request_id にだけ結び付く
+// - リアクションは、FE0F の揺れだけを吸収した ZWJ 連結全体の完全一致で 🙆‍♂️ と判定され、表示名は回答に入れても無害な形になる
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chunkText, type DiscordMessage, formatPostChunks, parsePost, route } from "../src/route.ts";
+import {
+	chunkText,
+	codePoints,
+	DEFAULT_REACTION_EMOJI,
+	type DiscordMessage,
+	formatPostChunks,
+	isOkEmoji,
+	normalizeEmoji,
+	parsePost,
+	parseReaction,
+	route,
+	sanitizeUser,
+} from "../src/route.ts";
 
 const ME = "111";
 const CH = "900";
@@ -165,4 +178,64 @@ test("新しい見出しも旧形式も1行目から読み取り、窓口の返�
 	assert.equal(post("🟡 **[k]** 要件確認 A-5\nA-99 と #7")?.attention, "A-5", "他種別の2行目は読まない");
 	assert.equal(post("🟢 **[k]** マージ承認 A-5\n#7")?.issue, undefined);
 	assert.equal(post("**[窓口]** 承知しました。A-3 です")?.attention, "A-3", "旧形式の返信は従来どおり");
+});
+
+const MAN = "\u{1F646}\u200D\u2642";
+const U = (name: string | null, id: string | null = null) => ({ id, name });
+
+test("normalizeEmoji は FE0F の有無と正規化形の違いだけを同じにし、ZWJ は残す", () => {
+	assert.equal(normalizeEmoji(`${MAN}\uFE0F`), normalizeEmoji(MAN));
+	assert.equal(normalizeEmoji("e\u0301"), normalizeEmoji("\u00e9"));
+	assert.ok(normalizeEmoji(MAN).includes("\u200D"));
+});
+
+test("isOkEmoji は 🙆‍♂️（FE0F あり・なし）だけを通し、似た絵文字・独自絵文字は通さない", () => {
+	assert.equal(DEFAULT_REACTION_EMOJI, `${MAN}\uFE0F`);
+	assert.ok(isOkEmoji(U(`${MAN}\uFE0F`), DEFAULT_REACTION_EMOJI));
+	assert.ok(isOkEmoji(U(MAN), DEFAULT_REACTION_EMOJI));
+	assert.ok(isOkEmoji(U(`${MAN}\uFE0F`), MAN), "設定値側の FE0F の有無でも同じ");
+	assert.ok(isOkEmoji(U("✅"), "✅"));
+	for (const name of ["✅", "👍", "\u{1F646}", "\u{1F646}\u200D\u2640\uFE0F", "\u{1F646}\u{1F3FB}\u200D\u2642\uFE0F"])
+		assert.equal(isOkEmoji(U(name), DEFAULT_REACTION_EMOJI), false, codePoints(name));
+	assert.equal(isOkEmoji(U(MAN, "123"), DEFAULT_REACTION_EMOJI), false, "サーバー独自絵文字");
+	assert.equal(isOkEmoji(U(null), DEFAULT_REACTION_EMOJI), false);
+});
+
+test("codePoints は絵文字を U+xxxx の並びで示す", () => {
+	assert.equal(codePoints(`${MAN}\uFE0F`), "U+1F646 U+200D U+2642 U+FE0F");
+	assert.equal(codePoints(null), "-");
+});
+
+test("parseReaction は必要な項目が欠けていれば null、bot・表示名を読む", () => {
+	const base = { user_id: "1", channel_id: "2", message_id: "3", emoji: { id: null, name: "✅" } };
+	assert.equal(parseReaction(null), null);
+	assert.equal(parseReaction({ ...base, user_id: undefined }), null);
+	assert.equal(parseReaction({ ...base, emoji: undefined }), null);
+	assert.deepEqual(parseReaction(base), {
+		userId: "1",
+		channelId: "2",
+		messageId: "3",
+		emojiId: null,
+		emojiName: "✅",
+		isBot: false,
+		userName: "1",
+	});
+	const m = (user: object) => parseReaction({ ...base, guild_id: "g", member: { user } });
+	assert.equal(m({ bot: true })?.isBot, true);
+	assert.equal(m({ username: "u", global_name: "G" })?.userName, "G");
+	assert.equal(m({ username: "u" })?.userName, "u");
+	assert.equal(m({})?.userName, "1");
+	assert.equal(m({})?.guildId, "g");
+});
+
+test("sanitizeUser は改行・引用符・$・バッククォート・<>・--> を含む名前を無害にし、空なら代わりの値を返す", () => {
+	for (const bad of ['a"b', "a'b", "a$b", "a`b", "a<b>", "a\nb", "a-->b", "a;b|c&d"]) {
+		const out = sanitizeUser(bad, "1");
+		assert.doesNotMatch(out, /["'$`<>\n;|&]/, bad);
+		assert.doesNotMatch(out, /-->/, bad);
+	}
+	assert.equal(sanitizeUser("jonnity", "1"), "jonnity");
+	assert.equal(sanitizeUser("田中 太郎", "1"), "田中 太郎");
+	assert.equal(sanitizeUser("   ", "42"), "42");
+	assert.equal(sanitizeUser("a".repeat(100), "1").length, 32);
 });

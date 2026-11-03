@@ -52,6 +52,9 @@ engine は Discord と常時通信するので、Node のセキュリティリ�
 4. Discord の設定 → 詳細設定 → **開発者モード**を有効にし、共通チャンネルを右クリック → 「チャンネル ID をコピー」、
    自分のアイコンを右クリック → 「ユーザー ID をコピー」
 
+Gateway の intents にはリアクション（サーバー・DM のメッセージリアクション）も使います。Message Content のような
+特権 intent ではないので、Developer Portal での追加設定は要りません。
+
 Bot はメッセージを中継するだけです。サーバーは要らず、手元の engine が Discord に繋ぎに行きます。
 
 ### 3. engine を置く
@@ -357,6 +360,7 @@ plugin/engine/worker の更新後、A-番号の承認を得てから窓口が書
 
 | 症状 | 見るところ |
 |---|---|
+| 🙆‍♂️ を付けても進まない | 付けた人が `allowedUserIds` にいるか、マージ承認の投稿か（要件確認・要対応などは文字で返す）、すでに対応済みでないか。engine のログの `リアクションを無視`（理由）と、起動時の `リアクションで OK`（設定の絵文字）を見る。受け付けられた（「OK として受け付けました」が返った）のにマージされないときは、head が動いた・CI が通っていないなど `harness-merge` の検査で止まっている（新しい承認依頼を出し直す）。受け付けた回答は取り消せない |
 | Discord に何も届かない | `dle status` の Discord 欄。`close 4014` なら Message Content Intent が無効、`トークンが無効` なら .env |
 | 「セッションが engine に繋がっていません」と届く | `tmux attach -t dle` で該当ウィンドウを開き、表示されている確認に答える |
 | 「許可の確認で止まっています」と届く | 同じく tmux で答える。よく出るものは、そのリポジトリの `permissions.allow` に足す |
@@ -394,6 +398,18 @@ A-番号の依頼の元メッセージには、Bot がリアクションで状�
 印には Bot の Add Reactions / Read Message History 権限が要ります。付けられなかったときは回答・作業を止めず、
 engine のログに残すだけで、あとから付け直しません。依頼を出したチャンネルを `defaultChannelId` から変えた
 後の古い依頼には付きません。窓口の返信の「（続き）」への返信には A-番号・Issue 番号が付きません。
+
+#### リアクションで OK を返す
+
+許可されたユーザー（`allowedUserIds`）がマージ承認の投稿に 🙆‍♂️ を付けると、文字で「OK」と返したのと同じに
+受け付けられます（長文で分割された投稿は、どのメッセージに付けても効きます。ただし、この機能の導入前に出た旧い依頼は先頭のメッセージだけが効きます）。
+
+- 対象は今のところマージ承認だけです。要件確認・要対応・設定の確認などは文字で返してください（リアクションは無視されます）
+- 受け付けると「A-NNN を OK として受け付けました」が返り、元の投稿に ✅ が付きます。✅ を付けても受け付けません（ダブルタップの誤操作を避けるため）
+- 最初の 🙆‍♂️ だけが有効です。外す・別の絵文字に変える・対応済みの依頼に付けるのは無視されます。**受け付けた回答は取り消せません**。マージ前なら窓口に頼んで worker を止められる場合があります
+- マージの検査（台帳の OK・head の不変・CI）は文字の回答と同じで、リアクションでも緩みません
+- engine が止まっている間のリアクションは拾いません。`defaultChannelId` を変えた後の古い依頼にも効きません
+- 絵文字は設定 `reactionEmoji` で変えられます（`false` で無効）
 
 ### コマンド
 
@@ -537,6 +553,7 @@ DR systemctl --user disable --now dle-runner@<名前>      # 先に止める（�
 | `worker.limit` | `enabled: true` / `tailLines: 12` / `wakeIntervalMinutes: 30` / `wakeMaxAttempts: 5` | `enabled`・`patterns`・`resetPatterns`・`tailLines`・`wakeIntervalMinutes`（正の数）・`wakeMaxAttempts`（0 以上の整数。0 は自動で起こさない）。使用量の上限の表示を画面から探し、止まった worker を固定間隔で起こし直す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
 | `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
+| `reactionEmoji` | 🙆‍♂️ | マージ承認の投稿に付けると OK になる絵文字（Unicode 絵文字1つ。サーバー独自絵文字は不可）。`false` でリアクションでの OK を無効にする。変えたら engine を再起動する |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
 | `retro` | 5 件 / 7 日 / 3 回 | 振り返りの頻度と、仮ルールにする再現回数（仮置き。振り返りで見直す） |
 | `permissionRelay` | `false` | 許可の確認に Discord から `yes <id>` で答えられるようにする |

@@ -184,3 +184,70 @@ export function formatPostChunks(project: string, body: string, heading: PostHea
 		return lines.join("\n");
 	});
 }
+
+// --- リアクション（A-番号の投稿への 🙆‍♂️ で OK を返す） ---------------------------------------
+
+/** 受け付ける既定の絵文字。見た目で壊れないよう、コードポイントで書く（🙆 + ZWJ + ♂ + FE0F） */
+export const DEFAULT_REACTION_EMOJI = "\u{1F646}\u200D\u2642\uFE0F";
+
+export interface ReactionEvent {
+	userId: string;
+	channelId: string;
+	messageId: string;
+	guildId?: string;
+	emojiId: string | null;
+	emojiName: string | null;
+	isBot: boolean;
+	userName: string;
+}
+
+const obj = (v: unknown): Record<string, unknown> | null =>
+	typeof v === "object" && v !== null ? (v as Record<string, unknown>) : null;
+const nonEmpty = (v: unknown): string => (typeof v === "string" ? v : "");
+
+/** MESSAGE_REACTION_ADD / REMOVE の d を読む。必要な項目が欠けていれば null */
+export function parseReaction(d: unknown): ReactionEvent | null {
+	const o = obj(d);
+	if (!o) return null;
+	const emoji = obj(o.emoji);
+	if (typeof o.user_id !== "string" || typeof o.channel_id !== "string" || typeof o.message_id !== "string" || !emoji)
+		return null;
+	const user = obj(obj(o.member)?.user);
+	return {
+		userId: o.user_id,
+		channelId: o.channel_id,
+		messageId: o.message_id,
+		...(typeof o.guild_id === "string" ? { guildId: o.guild_id } : {}),
+		emojiId: typeof emoji.id === "string" ? emoji.id : null,
+		emojiName: typeof emoji.name === "string" ? emoji.name : null,
+		isBot: user?.bot === true,
+		userName: nonEmpty(user?.global_name) || nonEmpty(user?.username) || o.user_id,
+	};
+}
+
+/** NFC にして U+FE0F（異体字セレクタ16）だけを落とす。ZWJ は残す（別の絵文字を同一視しないため） */
+export function normalizeEmoji(s: string): string {
+	return s.normalize("NFC").replaceAll("\uFE0F", "");
+}
+
+/** Unicode 絵文字（サーバー独自絵文字でない）で、設定値と ZWJ 連結全体が一致するか */
+export function isOkEmoji(emoji: { id: string | null; name: string | null }, configured: string): boolean {
+	if (emoji.id !== null || emoji.name === null) return false;
+	return normalizeEmoji(emoji.name) === normalizeEmoji(configured);
+}
+
+/** 絵文字を U+xxxx U+xxxx の形にする（ログで見た目が同じ別の並びに気づくため） */
+export function codePoints(s: string | null): string {
+	if (!s) return "-";
+	return [...s].map((c) => `U+${(c.codePointAt(0) as number).toString(16).toUpperCase().padStart(4, "0")}`).join(" ");
+}
+
+/** 表示名を、回答文面（worker のシェル引数・PR コメント）に入れても無害な形にする */
+export function sanitizeUser(name: string, fallback: string): string {
+	const clean = name
+		.replace(/[^\p{L}\p{N} _.-]/gu, "_")
+		.trim()
+		.slice(0, 32)
+		.trim();
+	return clean || fallback;
+}

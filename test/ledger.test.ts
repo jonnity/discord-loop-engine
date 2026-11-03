@@ -2,6 +2,7 @@
 // - タスクは1件1ファイルで、読み書きしても中身（経緯を含む）が失われない
 // - Issue に対応するタスクは1つにまとまる
 // - あなた待ちは A-番号で採番され、同じタスクの同じ種類は新しい依頼に置き換わる
+// - 依頼の投稿の全メッセージ ID（分割投稿）を任意項目として残せ、持たない古い項目もそのまま読める
 // - worker がいない間の指示は outbox に残り、取り出すと空になる
 // - ボードには「あなた待ち」「作業中」「次に着手」が出る
 import "./isolate.ts";
@@ -145,4 +146,36 @@ test("T18-6: IssueなしPRのmerge Aだけを置換・完了解決し、PRを表
 		l.openAttention().map((a) => a.id),
 		[other.attention.id, setup.attention.id, issue.attention.id],
 	);
+});
+
+test("分割投稿の全メッセージ ID を保存でき、先頭は messageId のまま。渡さなければ項目を作らない", () => {
+	const l = fresh();
+	const base = { taskId: "", project: "k", issue: "1", pr: "5", title: "x", url: "u", summary: "" };
+	const a = l.addAttention({ ...base, kind: "merge" }).attention;
+	const b = l.addAttention({ ...base, issue: "2", kind: "interview" }).attention;
+	l.setAttentionMessage(a.id, "m1", ["m1", "m2", "m3"]);
+	l.setAttentionMessage(b.id, "m9");
+	const back = l.attention();
+	assert.equal(back.find((x) => x.id === a.id)?.messageId, "m1");
+	assert.deepEqual(back.find((x) => x.id === a.id)?.messageIds, ["m1", "m2", "m3"]);
+	assert.equal(back.find((x) => x.id === b.id)?.messageId, "m9");
+	assert.equal("messageIds" in (back.find((x) => x.id === b.id) ?? {}), false);
+});
+
+test("messageIds の無い既存形式の attention.json（messageId だけ）がそのまま読める", () => {
+	const l = fresh();
+	const a = l.addAttention({
+		taskId: "",
+		project: "k",
+		issue: "1",
+		pr: "",
+		title: "x",
+		url: "",
+		summary: "",
+		kind: "merge",
+	}).attention;
+	l.setAttentionMessage(a.id, "m1");
+	const again = new Ledger(l.dir);
+	assert.equal(again.attention()[0]?.messageId, "m1");
+	assert.equal(again.attention()[0]?.messageIds, undefined);
 });
