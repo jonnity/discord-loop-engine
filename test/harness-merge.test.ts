@@ -26,7 +26,7 @@ function setup() {
 			project: "test",
 			worktreeRoot: path.join(dir, "worktrees"),
 			repo: "example/project",
-			owners: ["owner"],
+			owners: ["owner", "jonnity"],
 			hooks: {},
 			notify: { envFiles: [], required: false },
 		}),
@@ -81,7 +81,7 @@ function savedAnswer(dir: string, id = "A-12", answer = "OK", extra = {}) {
 			},
 		]),
 	);
-	writeFileSync(path.join(dir, "state.json"), JSON.stringify({ attentionSeq: 12 }));
+	writeFileSync(path.join(dir, "state.json"), JSON.stringify({ attentionSeq: Math.max(12, Number(id.slice(2))) }));
 }
 const args = ["3", "awaiting-merge", "--pr", "5", "--comment", "理由: 操作のない変更です"];
 for (const projectSource of ["env", "config", "root"]) {
@@ -591,16 +591,17 @@ function diagnostics(stderr: string) {
 		.filter((line) => line.startsWith('{"kind":"chat-rejection"'))
 		.map((line) => JSON.parse(line));
 }
-async function chatFixture() {
+async function chatFixture(attention = "A-12", answer = "OK") {
 	const s = setup();
 	assert.equal((await s.call("harness-phase", args)).code, 0);
 	const state = s.state();
-	state.comments[0].body = state.comments[0].body.replace("attention=none", "attention=A-12");
+	state.comments[0].body = state.comments[0].body.replace("attention=none", `attention=${attention}`);
 	writeFileSync(path.join(s.dir, "gh-state.json"), JSON.stringify(state));
-	savedAnswer(s.dir);
+	savedAnswer(s.dir, attention, answer);
 	return s;
 }
-const chatArgs = ["3", "--chat-approval", "偽の引用", "--attention", "A-12"];
+const chatArgsFor = (attention = "A-12") => ["3", "--chat-approval", "偽の引用", "--attention", attention];
+const chatArgs = chatArgsFor();
 test("T3/T4: 完成前のOKを終了0の後に回収し、台帳原文で1回マージする", async () => {
 	const s = await chatFixture();
 	try {
@@ -623,6 +624,50 @@ test("T3/T4: 完成前のOKを終了0の後に回収し、台帳原文で1回マ
 		assert.equal(log.split("\n").filter((line) => line.startsWith("merge ")).length, 1);
 		assert.match(readFileSync(s.env.POST_BODY, "utf8"), /OK（Discord: jonnity）/);
 		assert.doesNotMatch(readFileSync(s.env.POST_BODY, "utf8"), /偽の引用/);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
+// 実際に落ちた本文。回答先 A と本文の A が対応していることを inbox と即時経路の両方で確かめる
+for (const [attention, answer] of [
+	["A-412", "A-412 ok（Discord: jonnity）"],
+	["A-413", "A-413 OK（Discord: jonnity）"],
+] as const)
+	test(`T3/T4: 落ちた本文 ${answer} は inbox で chat-merge-ok になり、即時経路で1回マージされる`, async () => {
+		const s = await chatFixture(attention, answer);
+		try {
+			const inbox = await s.call("harness-inbox");
+			assert.equal(inbox.code, 0, inbox.stderr);
+			assert.deepEqual(JSON.parse(inbox.stdout), {
+				issue: 3,
+				pr: 5,
+				kind: "chat-merge-ok",
+				attention,
+				body: answer,
+				resolvedAt: "2026-10-27T00:00:05Z",
+				url: s.state().comments[0].html_url,
+			});
+			const result = await s.call("harness-merge", chatArgsFor(attention));
+			assert.equal(result.code, 0, result.stderr);
+			const log = readFileSync(s.env.MEDIA_LOG, "utf8");
+			assert.equal(log.split("\n").filter((line) => line.startsWith("merge ")).length, 1);
+			assert.ok(readFileSync(s.env.POST_BODY, "utf8").includes(answer));
+		} finally {
+			rmSync(s.dir, { recursive: true, force: true });
+		}
+	});
+test("T3/T4: 回答先 A-412 に別の A-411 宛ての本文が付いていたら answer-not-ok", async () => {
+	const s = await chatFixture("A-412", "A-411 ok（Discord: jonnity）");
+	try {
+		const inbox = await s.call("harness-inbox");
+		assert.equal(inbox.code, 0, inbox.stderr);
+		assert.equal(JSON.parse(inbox.stdout).kind, "chat-not-approved");
+		const result = await s.call("harness-merge", chatArgsFor("A-412"));
+		assert.equal(result.code, 1);
+		assert.deepEqual(diagnostics(result.stderr), [
+			{ kind: "chat-rejection", attention: "A-412", reason: "answer-not-ok", url: s.state().comments[0].html_url },
+		]);
+		assert.doesNotMatch(readFileSync(s.env.MEDIA_LOG, "utf8"), /^merge /m);
 	} finally {
 		rmSync(s.dir, { recursive: true, force: true });
 	}
@@ -682,7 +727,7 @@ for (const change of ["delete", "answer", "resolvedAt", "corrupt"])
 			if (change === "delete") rmSync(path.join(s.dir, "attention.json"));
 			else {
 				const items = JSON.parse(readFileSync(path.join(s.dir, "attention.json"), "utf8"));
-				if (change === "answer") items[0].answer = "OK、変更済み";
+				if (change === "answer") items[0].answer = "OK（変更済み）";
 				if (change === "resolvedAt") items[0].resolvedAt = "2026-10-27T00:00:06Z";
 				writeFileSync(path.join(s.dir, "attention.next"), change === "corrupt" ? "{" : JSON.stringify(items));
 				const { renameSync } = await import("node:fs");

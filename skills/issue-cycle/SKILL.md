@@ -727,7 +727,7 @@ Phase 5-4 はフォアグラウンドなので実行中の tick 処理はない�
 
 PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼む、の2つを出口として案内する。
 後者は worker が Phase 5-4 で新 A を発行する。resolved の古い A への再入力や台帳の直接編集は促さない。非 OK だけで毎 tick 新 A を自動発行しない。
-本文は trim 後、owners のリテラルな `<名前> が Discord で回答。` を先頭から1回だけ除き startsWith("OK") で判定する。
+本文は trim 後、owners のリテラルな `<名前> が Discord で回答。` を先頭から1回だけ除き、先頭の `A-<番号>`（回答先と一致するものだけ。違えば非 OK）と区切りを除いたうえで、先頭語が `OK` `ok` `Ok`（全角含む）で直後が空白・`。` `.` `!` `！`・括弧・終端のときだけ OK と読む。`OKではない` `OK、ただし…` `ok? まだ` は非 OK。A 付き・小文字・全角で始まる新規形は、残りが空・`です`・owners と完全一致の署名 `（Discord: <名前>）` だけのときに限る。
 前置きの名前は Discord の表示名で、owners（GitHub login）と完全に一致するときだけ除く。表示名を変えると前置き付き回答は非 OK になり、上記の出口へ回る。
 承認できる人は allowedUserIds で決まり、owners 限定はそれを絞らない。前置きなしの OK は表示名によらず本文判定を通る。
 
@@ -776,7 +776,7 @@ chat_rejection() (
   resolved-at-missing) sentence="台帳に回答時刻が記録されていない" ;;
   invalid-time) sentence="台帳の依頼作成時刻または回答時刻が正しくない" ;;
   answer-before-created) sentence="回答時刻が A-番号の作成時刻より前になっている" ;;
-  answer-not-ok) sentence="本文の先頭が OK ではない" ;;
+  answer-not-ok) sentence="本文が OK と読めない（先頭が OK（または回答先の A-番号に続く OK）でない、OK の直後が区切りでない、別の A-番号宛て）" ;;
   approval-changed) sentence="マージ直前の再確認で依頼または回答が変わった" ;;
   required-checks-unmet) sentence="必須の検査が現在の head で success になっていない（承認依頼の出し直しではなく、検査を通す必要がある。hint があればその指示に従う）" ;;
   required-checks-invalid) sentence="harness.json の merge.requiredChecks / merge.hint の形が正しくない（承認依頼の出し直しではなく、設定を直す必要がある）" ;;

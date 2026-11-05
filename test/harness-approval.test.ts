@@ -186,13 +186,20 @@ test("T3: 回答証拠・厳密時刻・作成境界を確認し、完成時刻�
 				.state,
 			"approved",
 		);
-	const raw = " owner が Discord で回答。OK、ただし NG\n";
+	const raw = " owner が Discord で回答。OK（変更なし）\n";
 	assert.deepEqual(attention([{ ...record, answer: raw }]), {
 		state: "approved",
 		attention: "A-12",
 		body: raw,
 		resolvedAt: record.resolvedAt,
 	});
+	for (const answer of [" owner が Discord で回答。OK、ただし NG\n", "OKではない", "ok? まだ"])
+		assert.deepEqual(attention([{ ...record, answer }]), {
+			state: "not-approved",
+			attention: "A-12",
+			reason: "answer-not-ok",
+			resolvedAt: record.resolvedAt,
+		});
 	assert.deepEqual(
 		evaluate([request(`<!-- harness:pending phase=awaiting-merge issue=3 sha=${head} -->`)]).requestState,
 		"pending",
@@ -251,4 +258,31 @@ test("T3: 現物4件は台帳原文のまま照合し、完成コメント編集
 		if (check.state === "approved") assert.equal(check.body, answers[index]);
 	for (const completedAt of ["2026-10-28T01:00:05Z", "2026-10-29T01:00:05Z"])
 		assert.equal(attention([record], { gate: { ...evaluate().gate, completedAt } }).state, "approved");
+});
+
+test("T3: 実際に落ちた本文 A-412 ok（…）/ A-413 OK（…）は回答先 A が一致するときだけ approved", () => {
+	const at = (id: string, answer: string) =>
+		attention(
+			[{ ...record, id, answer }],
+			{
+				gate: evaluate([request(`<!-- harness:gate phase=awaiting-merge issue=3 sha=${head} attention=${id} -->`)])
+					.gate,
+				owners: ["jonnity"],
+			},
+			413,
+		);
+	for (const [id, answer] of [
+		["A-412", "A-412 ok（Discord: jonnity）"],
+		["A-413", "A-413 OK（Discord: jonnity）"],
+	] as const) {
+		const check = at(id, answer);
+		assert.equal(check.state, "approved");
+		if (check.state === "approved") assert.deepEqual([check.attention, check.body], [id, answer]);
+	}
+	assert.deepEqual(at("A-412", "A-411 ok（Discord: jonnity）"), {
+		state: "not-approved",
+		attention: "A-412",
+		reason: "answer-not-ok",
+		resolvedAt: record.resolvedAt,
+	});
 });

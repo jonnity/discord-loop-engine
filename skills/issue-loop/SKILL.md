@@ -272,7 +272,7 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
       台帳の保存済み回答・最新完成marker・現 head・scope を再検証し、引数の引用だけでは承認しない。meta.attention 欠落は推測しない。
       非0なら stderr の構造化診断を issue-cycle の CHAT_REJECTION_BEGIN〜CHAT_REJECTION_END の共通手順へ渡す。
       pending/復旧は対象 phase の終了値で再分類し、同じ A・reason の通知は1回。CI/mergeable/hook は Issue の待ち理由だけを残す。
-      先頭が OK でないだけの承認風の回答は共通通知へ回す。「非 OK だけを自動で NG と断定して実装を始めない」は tick の chat-not-approved に限る。現在の A や marker 全文は表示せず、拒否した OK の付け替えをしない。
+      OK と読めないだけの承認風の回答は共通通知へ回す。「非 OK だけを自動で NG と断定して実装を始めない」は tick の chat-not-approved に限る。現在の A や marker 全文は表示せず、拒否した OK の付け替えをしない。
       通知を再処理して merge は再実行しない。新 head/新依頼には新回答が必要。
       前置きの名前は Discord の表示名で owners（GitHub login）と完全一致のときだけ除く。表示名変更後の前置き付き回答は非 OK になり出口へ回る。
       承認できる人は allowedUserIds で決まり、owners 限定はそれを絞らない。

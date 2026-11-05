@@ -826,9 +826,9 @@ test("S1/S2/S3: 回収は同tick・head変更前、失敗は復旧仕分けとbl
 	assert.ok(immediate.includes("明示の NG・修正指示なら Phase 6 NG（issue-cycle の ### NG）"));
 	for (const word of [
 		"OK ではない",
-		"OK、ただし NG",
+		"OK、ただし",
 		"OKです",
-		"OKじゃない",
+		"OKではない",
 		"人が承知のうえで選んだ",
 		"allowedUserIds",
 		"Discord の表示名",
@@ -881,7 +881,7 @@ fs.writeFileSync(p,JSON.stringify(comments));
 		for (let i = 0; i < 3; i++) assert.equal((await run()).code, 0);
 		let notifications = readFileSync(path.join(dir, "notifies"), "utf8").trim().split("\n");
 		assert.equal(notifications.length, 1);
-		assert.match(notifications[0] ?? "", /本文の先頭が OK ではない/);
+		assert.match(notifications[0] ?? "", /本文が OK と読めない/);
 		assert.match(notifications[0] ?? "", /窓口に『#3 の承認依頼を出し直して』と頼む/);
 		assert.match(notifications[0] ?? "", /PR に GitHub で『OK』/);
 		assert.equal((await run("A-13")).code, 0);
@@ -964,7 +964,7 @@ fs.writeFileSync(p,JSON.stringify(comments));
 			["resolved-at-missing", "台帳に回答時刻が記録されていない"],
 			["invalid-time", "台帳の依頼作成時刻または回答時刻が正しくない"],
 			["answer-before-created", "回答時刻が A-番号の作成時刻より前になっている"],
-			["answer-not-ok", "本文の先頭が OK ではない"],
+			["answer-not-ok", "本文が OK と読めない"],
 			["approval-changed", "マージ直前の再確認で依頼または回答が変わった"],
 		] as const;
 		for (const [reason, sentence] of sentences) {
@@ -1412,4 +1412,11 @@ test("#50: 起動の入口は PATH の harness-codex を第一にし、無けれ
 	const blocked = section(skill, "## Codex 起動を blocked にする", "## フォールバック");
 	assert.match(blocked, /codex_entry は人向け起動1行の組み立て用/);
 	assert.equal((skill.match(/\$\{CLAUDE_PLUGIN_ROOT:-\}\/bin\/harness-codex/g) ?? []).length, 1);
+});
+
+test("concierge は OK の返事を OK から始めて渡し、別の A や曖昧な返事は包まない", () => {
+	assert.ok(conciergeSkill.includes("`OK（<元の返事>）（Discord: <meta.user>）`"));
+	assert.ok(conciergeSkill.includes("先頭は必ず半角大文字 `OK`"));
+	assert.ok(conciergeSkill.includes("`OK` を前置きせず"));
+	assert.ok(conciergeSkill.includes("`meta.attention` と違うときは `attention_answer` せず"));
 });
