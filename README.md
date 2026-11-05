@@ -247,9 +247,12 @@ CI 待ちだけなら同じ A を保ち、進めない具体的理由は Issue �
 正常な台帳内に A が本当にない場合だけ正式に再依頼します。台帳不通・sequence 不足・scope 不一致は再確認し、自動解消できなければ blocked で人に返します。
 単独運用で保存済み engine 台帳を使わない場合はチャット承認を利用できません。webhook の attention=none は従来の GitHub 承認を使います。engine が停止中、MCP 未接続でも同じホストの保存台帳が読めれば回収できます。
 
-本文は ECMAScript の trim 後、owners の `<名前> が Discord で回答。` に先頭が完全一致する場合だけ1回除いて再度 trim し、`OK` で始まれば承認です。
-大小文字変換・全角化の補正・否定語/後続文の検査はしません。`OK ではない`・`OK、ただし NG`・`OKです`・`OKじゃない` も OK になることは、**人が承知のうえで選んだ**仕様です。
-`ok`・`ＯＫ`・`LGTM`・`A-12 OK` はこの本文判定では非 OK です。台帳原文を変更せず、マージの記録にも原文を使います。
+本文は ECMAScript の trim 後、owners の `<名前> が Discord で回答。` に先頭が完全一致する場合だけ1回除いて再度 trim します。
+続けて先頭の `A-<番号>`（回答先の A と一致するものだけ。別の A を指す回答は非 OK）と区切りを除き、先頭語が `OK` `ok` `Ok`（全角 `ＯＫ` なども含む）で、直後が空白・`。` `.` `!` `！`・括弧・終端のときだけ承認です。
+`OKではない`・`OKです`・`OK、ただし…`・`ok? まだ`・`NG`・`保留`・`LGTM` は非 OK です。
+A 付き・小文字・全角で始まる回答は、OK 語の後ろが空・`です`・`ですね`・owners と完全一致する署名 `（Discord: <名前>）` だけのときに限り承認し、後ろに否定・保留・NG などが続くと非 OK です。
+**従来の半角大文字 `OK`（A なし）で始まる回答は、区切りの後に `OK ではない` のような否定が続いても OK になります**（従来どおり。人が承知のうえで選んだ仕様）。
+台帳原文を変更せず、マージの記録にも原文を使います。
 前置きの名前は Discord の表示名で、owners（GitHub login）と完全に一致するときだけ除きます。表示名を変えると前置き付きの回答は非 OK になり、以下の出口に回ります。
 承認できる人は allowedUserIds で決まり、owners 限定はそれを絞りません。前置きのない `OK（Discord: 任意の名前）` は owners に関係なく本文判定を通ります。
 
@@ -265,7 +268,7 @@ pending の異常や非0終了、完成 marker と復旧ファイルが残って
 `dle attention --answered --json` は resolved の全件（非 OK・置換も含む）、`dle attention --all --json` は存在と回答の照合用の全件を返します。
 新モードは `schemaVersion: 1, items: [...]` の JSON で、DLE_HOME の attention.json を読取り専用で参照します。DLE_CONFIG_HOME は台帳には使いません。
 新モードは --json 必須・併用不可、正常0・読取/形式失敗1・不正引数2です。従来の `dle attention` / `--json` 単独は open 一覧のままです。
-`src/attention-read.ts` は readAttentionSnapshot(home)、readAttentionSequence(home)、stripDiscordAnswerPreamble(answer, owners)、isAttentionAnswerOk(answer, owners) を公開します。
+`src/attention-read.ts` は readAttentionSnapshot(home)、readAttentionSequence(home)、stripDiscordAnswerPreamble(answer, owners)、isAttentionAnswerOk(answer, owners, attention)（attention は回答先の A-番号）を公開します。
 本文判定の boolean だけでは A/head/scope/時刻を保証しません。利用側が対象との結び付きを別途検証してください。
 
 更新後は plugin/CLI と engine の配置・同じ DLE_HOME の読取り権限を確認し、稼働 worker を再起動して新スキルのロード版を確認します。

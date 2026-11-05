@@ -379,7 +379,7 @@ export function evaluateAttention(p: {
 			return denied("resolved-at-missing");
 		if (!validTime(target.createdAt) || !validTime(target.resolvedAt)) return denied("invalid-time");
 		if (Date.parse(target.resolvedAt) < Date.parse(target.createdAt)) return denied("answer-before-created");
-		if (!isAttentionAnswerOk(target.answer, p.owners))
+		if (!isAttentionAnswerOk(target.answer, p.owners, id))
 			return { ...denied("answer-not-ok"), resolvedAt: target.resolvedAt };
 		return { state: "approved", attention: id, body: target.answer, resolvedAt: target.resolvedAt };
 	} catch {

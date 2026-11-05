@@ -2281,7 +2281,7 @@ test("受付の投稿は A-番号の見出しを持たず、別の A の返事�
 	const parsed = parsePost({ id: "x", channel_id: CH, content: receipts(rest)[0]?.content ?? "" });
 	assert.ok(parsed);
 	assert.equal(parsed.attention, undefined);
-	assert.ok(isAttentionAnswerOk(statusOf(engine, g.attention)?.answer ?? "", [ME]));
+	assert.ok(isAttentionAnswerOk(statusOf(engine, g.attention)?.answer ?? "", [ME], g.attention));
 });
 
 test("表示名の危険な文字は回答に入らない", async () => {

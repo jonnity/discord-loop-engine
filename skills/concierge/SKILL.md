@@ -79,8 +79,14 @@ A-番号は engine が worker の「人の判断が要る」報告に付けた�
 1. 返事の中身を読み、その A-番号への回答として成り立っているか確かめる（`meta.attention_status` が
    「対応済み」なら、もう答えが出ていることを伝える）。マージ承認の投稿への 🙆‍♂️ リアクションは
    engine が直接 OK として記録・配送し、`meta.kind=notice` で知らせる。重ねて `attention_answer` しない
-2. `attention_answer`（id・answer）で回答を渡す。answer には本文をそのまま入れ、末尾に
-   「（Discord: <meta.user>）」を付ける。worker が止まっていても起動後に届く
+2. `attention_answer`（id・answer）で回答を渡す。worker が止まっていても起動後に届く。
+   - 返事が明確な OK（`OK` `ok` `Ok` ＋ 区切り。A-番号が前にあってもよいが `meta.attention` と一致するもの。
+     否定・保留・条件が続かない）なら、answer を `OK（<元の返事>）（Discord: <meta.user>）` にする。
+     例: 返事 `A-412 ok` → `OK（A-412 ok）（Discord: jonnity）`。先頭は必ず半角大文字 `OK` にする
+     （判定側が先頭の `OK` を読むため）。包む前に、返事の A が `meta.attention` と一致すること、否定・保留が続かないことを確かめる
+   - OK でない・曖昧な返事（NG・保留・条件付き・OK と読むか迷うもの）は `OK` を前置きせず、本文をそのまま入れて末尾に
+     「（Discord: <meta.user>）」を付ける
+   - 返事の A-番号が `meta.attention` と違うときは `attention_answer` せず、ユーザーに聞き返す
 3. マージ承認の「OK」は、engine が配送した meta.attention を worker が
    Issue の A なら `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` に渡す。
    A の meta.pr が正整数で、その PR の head が branchPrefix+{meta.issue}（既定 `fix/issue-{meta.issue}`。prefix は `harness-config '.branchPrefix' fix/issue-`）でない（`gh pr view {meta.pr} --json headRefName -q .headRefName` で確認）ときだけ `harness-merge {meta.issue} --pr {meta.pr} --chat-approval "<本文>" --attention "{meta.attention}"` を使う。
