@@ -1191,6 +1191,7 @@ test("#31 実装・差し戻しの節は固定の見出しで、項目と上限�
 		/重なりを実測[\s\S]*ready 以外/,
 		/Sonar[\s\S]*await のない async[\s\S]*三項演算子/,
 		/既存コメントを消さない[\s\S]*英語[\s\S]*フォーマッタ/,
+		/bash[\s\S]*local[\s\S]*未使用を残さない/,
 	])
 		assert.match(impl, pattern);
 	const back = section(r.prompt, "差し戻し時の項目（再依頼の指示に含める）:", "プロジェクトの gate");

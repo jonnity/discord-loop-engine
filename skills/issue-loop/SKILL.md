@@ -221,7 +221,7 @@ Phase 1 の質問の答えが **CLAUDE.md に明記された規約**から一意
 
 PR の CI が失敗したら（購読イベント、または tick ごとの `gh pr checks <PR>`）:
 
-**head を変える前に再確認する**。awaiting-merge は inbox を再読取りし、未処理 OK をまず現 head の harness-merge に渡す。CI 待ちだけなら head/A を保持する。衝突や CI red の修正が必要なら、その head で進めない理由を Issue に残してから変更し、修正後は Phase 5-4 の新依頼・新回答を待つ。
+**head を変える前に再確認する**。awaiting-merge は inbox を再読取りし、未処理 OK をまず現 head の harness-merge に渡す。CI 待ちだけなら head/A を保持する。衝突や CI red の修正が必要なら、その head で進めない理由を Issue に残してから変更し、修正後は `(cd "$WT" && harness-gate)` を再実行して結果を現 head のものにしてから、Phase 5-4 の新依頼・新回答を待つ。
 
 1. **仕分ける**。profile に `hooks.onCIRed` があれば `harness-hook onCIRed --issue {n} --pr <PR>` を実行する
    （例: oogiri-doc の `pnpm ci:triage` → INFRA なら `gh run rerun`）。
@@ -236,6 +236,7 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
    `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する（指示には `.harness/prompt-spec-{n}.md` の「差し戻し時の項目」を含める）
    （Claude はコードを直さない。再依頼も共通起動手順で起動を単独の Bash に分け、拒否されたら直ちに blocked）。直ったら `harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
    0なら push、1ならコード検査失敗として差し戻し、2なら設定を修正する。
+   0でも一覧に ⚠（未確認）があれば承認依頼の前に現 head で `harness-gate` を再実行した結果を使う。
    3なら環境不備なので push を止め、Codex へ再差し戻しせず、この失敗は REAL の回数に加算しない。
    自動解消できなければ `harness-phase {n} blocked --comment-file ...` で項目名・失敗理由・必要な環境対応を依頼する。
    環境解消後に gate 全体を再実行して0を確認してから push する
