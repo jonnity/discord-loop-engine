@@ -75,6 +75,34 @@ mkrunner oogiri-doc-1 "$GOOD"; : >"$R/path.log"
 (PATH="$R/pathfake:$PATH" CURLBIN="$R/fake/curl2" start oogiri-doc-1 >/dev/null)
 check "runner-start: PATH の先頭の偽の curl は使われず、DLE_CURL だけが効く" 'grep -q dle_curl "$R/path.log" && ! grep -q path_curl "$R/path.log"'
 
+# run.sh に渡る PATH: 固定のリテラル + getent の HOME_DIR だけ（呼び出し元の PATH・HOME は影響しない）
+mkprobe() { # PATH を記録する偽の run.sh を持つ runner
+	rm -f "$R/root/path-probe/path" # 前回の値で通る偽陽性を防ぐ
+	mkrunner path-probe "$GOOD"
+	printf '#!/bin/sh\nprintf %%s "$PATH" > "$(dirname "$0")/path"\n' >"$R/root/path-probe/run.sh"
+}
+REAL_HOME=$(getent passwd "$(id -un)" | cut -d: -f6)
+EXP="/usr/local/bin:/usr/bin:/bin:$REAL_HOME/.cargo/bin"
+mkprobe
+check "runner-start: run.sh の PATH は /usr/local/bin:/usr/bin:/bin:<HOME_DIR>/.cargo/bin" '[ "$(FAKE_CODE=404 start path-probe)" = 0 ] && [ "$(cat "$R/root/path-probe/path")" = "$EXP" ]'
+mkprobe
+check "runner-start: 環境変数 HOME を変えても run.sh の PATH は同じ" '[ "$(HOME=/nonexistent/fake FAKE_CODE=404 start path-probe)" = 0 ] && [ "$(cat "$R/root/path-probe/path")" = "$EXP" ]'
+mkprobe
+check "runner-start: 呼び出し側の PATH を差し替えても run.sh の PATH は固定で、.cargo/bin が最後" \
+	'(PATH="$R/pathfake:/tmp/evil:$PATH" FAKE_CODE=404 start path-probe >/dev/null); p=$(cat "$R/root/path-probe/path"); [ "$p" = "$EXP" ] && case $p in */.cargo/bin) true ;; *) false ;; esac'
+check "runner-start: 確認処理の PATH は /usr/bin:/bin のまま（広げるのは exec の直前の 1 か所だけ）" \
+	'grep -q "^export PATH=/usr/bin:/bin$" "$START" && [ "$(grep -v "^[[:space:]]*#" "$START" | grep -c "\bPATH=")" = 2 ]'
+# HOME_DIR の検査: getent の行だけ差し替えたコピーで確かめる
+path_with_home() { # $1=HOME_DIR の値
+	sed "s|^HOME_DIR=.*|HOME_DIR='$1'|" "$START" >"$R/start-home.sh"
+	mkprobe
+	DLE_CURL="$R/fake/curl" DLE_RUNNERS_ROOT="$R/root" DLE_INTEROP_FILE="$R/interop-off" FAKE_CODE=404 bash "$R/start-home.sh" path-probe >/dev/null 2>&1
+	cat "$R/root/path-probe/path"
+}
+check "runner-start: HOME_DIR が絶対パスなら末尾に <HOME_DIR>/.cargo/bin" '[ "$(path_with_home /home/dle-runner)" = "/usr/local/bin:/usr/bin:/bin:/home/dle-runner/.cargo/bin" ]'
+check "runner-start: HOME_DIR が相対パスなら .cargo/bin を足さない" '[ "$(path_with_home relative/home)" = "/usr/local/bin:/usr/bin:/bin" ]'
+check "runner-start: HOME_DIR に : を含むなら .cargo/bin を足さない" '[ "$(path_with_home /home/a:b)" = "/usr/local/bin:/usr/bin:/bin" ]'
+
 # --- job-completed.sh ----------------------------------------------------------------------------
 AR="$R/ar"
 mkws() { # 作業ディレクトリと _temp に、消えるはずのファイルを作る
@@ -114,3 +142,10 @@ GITHUB_WORKSPACE="$R/outside" RUNNER_TEMP="$AR/oogiri-doc-1/_work/_temp" bash -e
 rc=$?
 check "job-completed: bash -e で workspace が範囲外でも終了コード 0 で、_temp の掃除は続ける" \
 	'[ "$rc" = 0 ] && [ -z "$(ls -A "$AR/oogiri-doc-1/_work/_temp")" ] && [ -f "$R/outside/f" ]'
+
+# 掃除フックは狭い PATH（/usr/bin:/bin）で足りる
+mkws
+check "job-completed: 環境変数が空・PATH=/usr/bin:/bin でも掃除できる（PATH を広げなくてよい）" \
+	'env -i PATH=/usr/bin:/bin GITHUB_WORKSPACE="$WS" RUNNER_TEMP="$AR/oogiri-doc-1/_work/_temp" /usr/bin/bash "$DONE" "$AR" >/dev/null 2>&1; [ "$?" = 0 ] && [ -z "$(ls -A "$WS")" ] && [ -z "$(ls -A "$AR/oogiri-doc-1/_work/_temp")" ] && [ -f "$AR/oogiri-doc-1/_work/_tool/keep" ]'
+check "job-completed: 使うコマンドは /usr/bin:/bin で解決でき、PATH の固定は変えない" \
+	'PATH=/usr/bin:/bin command -v getent id cut realpath chmod find rm >/dev/null && grep -q "^export PATH=/usr/bin:/bin$" "$DONE"'
