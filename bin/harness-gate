@@ -14,12 +14,23 @@
 # harness.json:
 #   "gate": [ {"name": "types", "run": "npm run typecheck"}, ... ]
 #   "hooks": { "beforePR": ["pnpm ci:local"] }   # gate の後に、リポジトリ独自の PR 前検査として実行する
+#   gate の段に "skipExit": 78 を書くと、その段が終了コード 78 で終わったとき「未確認（⚠）」とする
+#   （検査道具が無くて実行しなかった、という意味。警告だけで gate は通す）。宣言の無い段の 78 は失敗のまま。
+#   "gateSkipPolicy": "warn"（既定）| "fail"   # fail なら未確認があると終了 3
+#
+# 結果は <実行ディレクトリ>/.harness/gate-result.json にも残す（harness-phase awaiting-merge が読む）。
 
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DIR="${1:-$(pwd)}"
+# 結果ファイルの置き場に使うため絶対パスにする（相対のままだと cd 後に別の場所を指す）。
+DIR="$(cd "$DIR" && pwd)" || exit 2
 cd "$DIR" || exit 2
+
+# 古い結果を承認依頼に使わせない。以降の途中終了（終了 2/3・中断）でもファイルを残さない。
+result_file="$DIR/.harness/gate-result.json"
+rm -f -- "$result_file"
 
 # DLE_CONFIG_HOME は設定読取り用。子では他の DLE_* と同様に除去する。
 CONFIG="$("$SCRIPT_DIR/harness-config" --path)"
@@ -43,6 +54,19 @@ if [ -z "$count" ] || [ "$count" = 0 ]; then
 	exit 2
 fi
 
+# skipExit は 78 だけ。通常の失敗コードを通す設定を防ぐため、typo も含めて実行前に止める（Why not: 範囲指定）。
+# 値は jq の数値比較で見る（文字列化すると jq の版ごとに表記が違い、通る値が変わる）。
+bad_skip="$(jq -r '[.gate | to_entries[] | select(.value | type == "object" and .skipExit != null and .skipExit != 78) | .key][0] // empty' "$CONFIG" 2>/dev/null)"
+if [ -n "$bad_skip" ]; then
+	echo "harness-gate: gate[$bad_skip].skipExit は 78 のみ指定できます（exit 2）" >&2
+	exit 2
+fi
+if ! jq -e '.gateSkipPolicy == null or .gateSkipPolicy == "warn" or .gateSkipPolicy == "fail"' "$CONFIG" >/dev/null 2>&1; then
+	echo 'harness-gate: gateSkipPolicy は "warn" か "fail" で指定してください（exit 2）' >&2
+	exit 2
+fi
+skip_policy="$(jq -r '.gateSkipPolicy // "warn"' "$CONFIG")"
+
 # 子が環境や設定を変えても、定義と hook の有無は親が先に確定する。
 preflight_count="$(jq '(.preflight // []) | length' "$CONFIG")"
 hook_count="$(jq '(.hooks.beforePR // []) | length' "$CONFIG" 2>/dev/null || echo 0)"
@@ -50,6 +74,7 @@ pre_names=()
 pre_runs=()
 gate_names=()
 gate_runs=()
+gate_skips=()
 for ((i = 0; i < preflight_count; i++)); do
 	pre_names+=("$(jq -r ".preflight[$i].name" "$CONFIG")")
 	pre_runs+=("$(jq -r ".preflight[$i].run" "$CONFIG")")
@@ -57,6 +82,8 @@ done
 for ((i = 0; i < count; i++)); do
 	gate_names+=("$(jq -r ".gate[$i].name" "$CONFIG")")
 	gate_runs+=("$(jq -r ".gate[$i].run" "$CONFIG")")
+	# 値そのものは bash に持ち込まず 0/1 に落とす（78.0 などの表記を文字列比較に渡さない）。
+	gate_skips+=("$(jq -r ".gate[$i].skipExit == 78 | if . then 1 else 0 end" "$CONFIG")")
 done
 
 gate_tmp=""
@@ -104,17 +131,32 @@ for ((i = 0; i < preflight_count; i++)); do
 	fi
 done
 failed=0
+skipped=()
+failed_names=()
 for i in $(seq 0 $((count - 1))); do
 	name="${gate_names[$i]}"
 	run="${gate_runs[$i]}"
 	echo "=== [$name] $run" >&2
 	start=$(date +%s)
-	if run_isolated "$run"; then
-		results+=("✅ $name ($(($(date +%s) - start))s)")
-	else
+	rc=0
+	run_isolated "$run" || rc=$?
+	elapsed=$(($(date +%s) - start))
+	if [ "$rc" != 0 ]; then
 		[ "$isolation_failed" = 0 ] || exit 3
-		results+=("❌ $name ($(($(date +%s) - start))s)  ← $run")
+	fi
+	if [ "$rc" = 0 ]; then
+		results+=("✅ $name (${elapsed}s)")
+	elif [ "$rc" = 78 ] && [ "${gate_skips[$i]}" = 1 ]; then
+		results+=("⚠ $name (${elapsed}s)  未確認（終了 78。CI で初めて検査される）")
+		skipped+=("$name")
+	elif [ "$rc" = 78 ]; then
+		results+=("❌ $name (${elapsed}s)  ← $run  （終了 78。skipExit 未宣言のため失敗）")
 		failed=1
+		failed_names+=("$name")
+	else
+		results+=("❌ $name (${elapsed}s)  ← $run")
+		failed=1
+		failed_names+=("$name")
 	fi
 done
 
@@ -125,10 +167,43 @@ if [ "$hook_count" != 0 ]; then
 	else
 		results+=("❌ hooks.beforePR ($(($(date +%s) - start))s)")
 		failed=1
+		failed_names+=("hooks.beforePR")
 	fi
 fi
+
+join_skipped() {
+	local n out=""
+	for n in "${skipped[@]}"; do out="${out:+$out, }$n"; done
+	printf '%s' "$out"
+}
+# fail ポリシーの未確認は、失敗が無いときだけ終了 3（環境不備）にする。
+# 終了 1 だと Codex への差し戻しになるが、道具の不在は Codex に直せない。
+exit_code="$failed"
+if [ "$failed" = 0 ] && [ "${#skipped[@]}" != 0 ] && [ "$skip_policy" = fail ]; then
+	results+=("❌ 未確認（gateSkipPolicy=fail）: $(join_skipped)")
+	exit_code=3
+fi
+
+# 結果ファイル。git の作業ツリーでなければ書かない。書けなくても gate の結果は変えない。
+write_result() {
+	local head dirty=false skipped_json failed_json
+	head="$(git -C "$DIR" rev-parse HEAD 2>/dev/null)" || return 0
+	[[ "$head" =~ ^[0-9a-f]{40}$ ]] || return 0
+	[ -z "$(git -C "$DIR" status --porcelain 2>/dev/null)" ] || dirty=true
+	skipped_json="$(jq -nc '$ARGS.positional' --args ${skipped[@]+"${skipped[@]}"})" || return 0
+	failed_json="$(jq -nc '$ARGS.positional' --args ${failed_names[@]+"${failed_names[@]}"})" || return 0
+	mkdir -p -- "$DIR/.harness" || return 0
+	jq -nc --arg head "$head" --argjson dirty "$dirty" --arg policy "$skip_policy" \
+		--argjson skipped "$skipped_json" --argjson failed "$failed_json" \
+		'{version: 1, head: $head, dirty: $dirty, policy: $policy, skipped: $skipped, failed: $failed}' \
+		>"$result_file.tmp" && mv -f -- "$result_file.tmp" "$result_file"
+}
+write_result 2>/dev/null || true
 
 echo "" >&2
 echo "=== harness-gate 結果 ($DIR)" >&2
 printf '%s\n' "${results[@]}" >&2
-exit "$failed"
+if [ "${#skipped[@]}" != 0 ]; then
+	echo "⚠ 未確認: $(join_skipped)（CI で初めて検査される）" >&2
+fi
+exit "$exit_code"

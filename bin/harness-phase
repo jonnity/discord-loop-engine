@@ -162,6 +162,21 @@ compatible_video() {
 	' <<<"$probe_json" >/dev/null 2>&1
 }
 
+# gate が定義されているか（awaiting-merge の承認依頼が、未確認の注記を載せるかの判断に使う）。
+# 探索順は harness-config に任せる。壊れた設定は unreadable にして「不明」を載せる側に倒す。
+GATE_DEFINED=0
+if [ "$PHASE" = awaiting-merge ]; then
+	GATE_CONFIG="$("$SCRIPT_DIR/harness-config" --path)"
+	if [ -f "$GATE_CONFIG" ]; then
+		gate_rc=0
+		jq -e '(.gate | type == "array") and (.gate | length > 0)' "$GATE_CONFIG" >/dev/null 2>&1 || gate_rc=$?
+		case "$gate_rc" in 0) GATE_DEFINED=1 ;; 1) GATE_DEFINED=0 ;; *) GATE_DEFINED=unreadable ;; esac
+	fi
+fi
+# 注記は要約の先頭に足されるため、gate 定義ありのときだけ本文の上限を注記ぶん（500+2）下げる。
+SUMMARY_MAX=3500
+[ "$GATE_DEFINED" = 0 ] || SUMMARY_MAX=2998
+
 # 要約は UTF-8 の文字単位で切る。位置の説明は切り出しの後に付ける。
 if [ -z "$SUMMARY" ] && [ -n "$COMMENT" ]; then
 	SUMMARY="$(printf '%s' "$COMMENT" | jq -Rrs '.[0:300]')"
@@ -203,13 +218,13 @@ if [ "$PHASE" = awaiting-merge ] && [ -n "$FILE" ]; then
 		|| video_error "最終動画が添付上限を超えています。短い録画を用意してください"
 	node "$SCRIPT_DIR/../src/notification-receipt.ts" fingerprint "$FILE" >"$media_tmp/fingerprint.json" || video_error "fingerprint 失敗"
 	location="動画: この通知の Discord メッセージに添付（ファイル名 demo-$ISSUE-h264.mp4）。長文で分かれる場合は最後の投稿にあります。"
-	SUMMARY="$(jq -nr --arg text "$SUMMARY" --arg location "$location" '$text[0:(3500 - ($location | length) - 2)] + "\n\n" + $location')"
+	SUMMARY="$(jq -nr --arg text "$SUMMARY" --arg location "$location" --argjson max "$SUMMARY_MAX" '$text[0:($max - ($location | length) - 2)] + "\n\n" + $location')"
 fi
 if [ "$PHASE" = awaiting-merge ]; then
 	[ -n "$media_tmp" ] || media_tmp="$(mktemp -d)"
 	printf '%s' "$COMMENT" >"$media_tmp/comment.md"
 	printf '%s' "$SUMMARY" >"$media_tmp/summary.md"
-	node "$SCRIPT_DIR/../src/harness-request.ts" "$ISSUE" "$PR" "$media_tmp/comment.md" "$media_tmp/summary.md" "$FILE" "$media_tmp" &
+	node "$SCRIPT_DIR/../src/harness-request.ts" "$ISSUE" "$PR" "$media_tmp/comment.md" "$media_tmp/summary.md" "$FILE" "$media_tmp" "$GATE_DEFINED" &
 	convert_pid=$!
 	rc=0
 	wait "$convert_pid" || rc=$?

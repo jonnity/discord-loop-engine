@@ -201,6 +201,24 @@ self-hosted の対象ラベル・オンライン台数・API 権限は onboard �
 連動するエコシステムの依存名・版の整合・manifest/lockfile の確認方法は notes に記します。
 既存プロジェクトは自動で設定を書き換えません。再調査/設定見直しで追加できます。
 
+### 未確認（skip）の扱い（`skipExit`・`gateSkipPolicy`）
+
+検査道具が無くて実行できなかった段（例: shellcheck 未導入）を、成功の ✅ と区別します。
+gate の段に `"skipExit": 78` を書くと、その段が終了コード 78 で終わったときだけ「未確認」として `⚠` で一覧に出し、
+末尾に `⚠ 未確認: <検査名>（CI で初めて検査される）` を要約します。`skipExit` に書けるのは 78 だけで、ほかの値は終了2です。
+`skipExit` を書いていない段の 78 は今までどおり失敗で、書いた段でも 78 以外の非0は失敗です。`preflight` と `hooks.beforePR` には効きません。
+`skipExit: 78` を書く段は、`exit 78` を意図した分岐の 1 箇所だけで返し、外部ツールの終了コードをそのまま返さないでください。
+
+```json
+{"name": "shellcheck", "skipExit": 78, "run": "if command -v shellcheck >/dev/null; then shellcheck -S warning bin/*; else echo 'shellcheck が無い'; exit 78; fi"}
+```
+
+既定は警告のみで gate は通します（終了0）。トップレベルの `"gateSkipPolicy": "fail"` にすると、失敗が無く未確認があるときは終了3（環境不備。他に失敗があれば終了1）にします。`"warn"` か `"fail"` 以外は終了2です。
+`harness-gate` は結果を `<実行ディレクトリ>/.harness/gate-result.json` に残します。承認依頼（`harness-phase … awaiting-merge`）は、
+その結果が PR の現在の head のものであるときだけ、未確認の検査を本文と Discord の要約に自動で載せます。
+gate が定義されているのに現在の head の結果が無い（gate を回していない・head が動いた）ときは、「未確認の有無は不明」と載せます。
+載せるのは表示だけで、マージの判定は変えません。gate を定義していないプロジェクトの出力は変わりません。
+
 ### 承認依頼の動画
 
 demo 設定があり UI・操作を変える場合、要件確認で「どこからどこまで」を決めます。
@@ -332,7 +350,7 @@ done
 )
 ```
 
-check:ci は format と lint の両方。shellcheck 不在は skip と記録し CI で確認します。
+check:ci は format と lint の両方。shellcheck 不在は、`skipExit` を宣言した gate 定義の場合は未確認として警告し、CI で確認します。
 socket/spawn が EPERM なら失敗テスト名・メッセージを残し、制限のない環境で全体を再実行します。
 
 ### 更新する

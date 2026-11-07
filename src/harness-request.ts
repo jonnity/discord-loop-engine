@@ -6,7 +6,8 @@ import { resolveHarnessProject } from "./harness-project.ts";
 import { object, verifyMedia } from "./notification-receipt.ts";
 
 const bin = path.resolve(import.meta.dirname, "../bin");
-const [issue = "", pr = "", commentFile = "", summaryFile = "", file = "", temp = ""] = process.argv.slice(2);
+const [issue = "", pr = "", commentFile = "", summaryFile = "", file = "", temp = "", gateDefinedArg = ""] =
+	process.argv.slice(2);
 const states = new Set([path.resolve(".harness", `merge-recovery-${issue}.json`)]);
 let stage = "静的通知先検査",
 	attention = "不明",
@@ -15,7 +16,74 @@ let stage = "静的通知先検査",
 	commentId = 0,
 	pending = "",
 	login = "",
-	head = "";
+	head = "",
+	note = "";
+// harness-gate が残す結果ファイル。承認依頼に未確認の検査（skipExit 宣言の段の終了 78）を載せるために読む。
+type GateResult = {
+	version: 1;
+	head: string;
+	dirty: boolean;
+	policy: "warn" | "fail";
+	skipped: string[];
+	failed: string[];
+};
+// harness-phase から渡す「gate が定義されているか」。無い・空は未定義と同じ。想定外の値は「不明」側に倒す。
+type GateDefined = "1" | "0" | "unreadable";
+const NOTE_MAX = 500;
+const gateDefined: GateDefined =
+	gateDefinedArg === "" || gateDefinedArg === "0" ? "0" : gateDefinedArg === "1" ? "1" : "unreadable";
+const isStrings = (v: unknown): v is string[] => Array.isArray(v) && v.every((x) => typeof x === "string");
+function isGateResult(v: unknown): v is GateResult {
+	if (typeof v !== "object" || v === null || Array.isArray(v)) return false;
+	const r = v as Record<string, unknown>;
+	return (
+		r.version === 1 &&
+		typeof r.head === "string" &&
+		/^[a-f0-9]{40}$/.test(r.head) &&
+		typeof r.dirty === "boolean" &&
+		(r.policy === "warn" || r.policy === "fail") &&
+		isStrings(r.skipped) &&
+		isStrings(r.failed)
+	);
+}
+const cpLength = (s: string) => Array.from(s).length;
+// 未確認の注記。表示のみで、承認や merge は止めない。コードポイントで NOTE_MAX 以内に収める。
+async function gateNote(currentHeadSha: string): Promise<string> {
+	if (gateDefined === "0") return "";
+	const rerun = "`harness-gate` を再実行してください";
+	const noResult = `⚠ 現在の head の gate 結果が無く、未確認の有無は不明です。${rerun}`;
+	let raw: string;
+	try {
+		raw = await readFile(path.resolve(".harness", "gate-result.json"), "utf8");
+	} catch {
+		return noResult;
+	}
+	let data: unknown;
+	try {
+		data = JSON.parse(raw);
+	} catch {
+		data = undefined;
+	}
+	if (!isGateResult(data)) return `⚠ gate の結果ファイルを読めないため、未確認の検査の有無は不明です。${rerun}`;
+	if (data.head !== currentHeadSha || data.dirty) return noResult;
+	if (data.failed.length) return `⚠ gate が失敗した結果しかありません。未確認の有無は不明です。${rerun}`;
+	if (!data.skipped.length) return "";
+	// 名前は任意文字列なので、marker を作れる記号と改行を空白にする。
+	const names = data.skipped.map((n) =>
+		n
+			.replace(/<!--|-->/g, " ")
+			.replace(/\s+/g, " ")
+			.trim(),
+	);
+	const build = (n: number) => {
+		const rest = names.length - n;
+		return `⚠ 未確認の検査: ${names.slice(0, n).join(", ")}${rest > 0 ? ` …他 ${rest} 件` : ""}（CI で初めて検査される）`;
+	};
+	let n = names.length;
+	while (n > 0 && cpLength(build(n)) > NOTE_MAX) n--;
+	if (n > 0) return build(n);
+	return Array.from(build(0)).slice(0, NOTE_MAX).join("");
+}
 async function rememberRecovery() {
 	for (const state of states) {
 		await mkdir(path.dirname(state), { recursive: true });
@@ -91,16 +159,19 @@ async function main() {
 	login = await gh("api", "user", "--jq", ".login");
 	if (!login) throw Error("login 不正");
 	head = await currentHead();
+	note = await gateNote(head);
 	const title = await gh("issue", "view", issue, "--json", "title", "-q", ".title");
 	const comment = await readFile(commentFile, "utf8"),
-		summary = await readFile(summaryFile, "utf8");
+		summaryText = await readFile(summaryFile, "utf8");
+	// Discord は先頭 3500 文字で切るため、注記は要約の先頭に置く。要約は切らない（切るのは harness-phase の 1 か所）。
+	const summary = note ? `${note}\n\n${summaryText}` : summaryText;
 	stage = "開始ラベル";
 	code = 5;
 	await rememberRecovery();
 	await resetLabels();
 	stage = "仮POST";
 	code = 1;
-	pending = `${comment}\n\n${file ? "動画: Discord メッセージリンクを作成中です。" : "通知確認中。"}承認依頼は未完了です。\n\n<!-- harness:pending phase=awaiting-merge issue=${issue} sha=${head} -->`;
+	pending = `${comment}\n\n${file ? "動画: Discord メッセージリンクを作成中です。" : "通知確認中。"}承認依頼は未完了です。${note ? `\n\n${note}` : ""}\n\n<!-- harness:pending phase=awaiting-merge issue=${issue} sha=${head} -->`;
 	const postFile = path.join(temp, "post.json");
 	await writeFile(postFile, JSON.stringify({ body: pending }), { mode: 0o600 });
 	const posted = object(
@@ -148,7 +219,7 @@ async function main() {
 		media = `\n\n動画: [デモ動画を開く（Discord）](${object(receipt.discord).url})\n${verified.filename} / ${verified.bytes} bytes / SHA-256: ${verified.sha256} / 再取得照合済み`;
 	}
 	if ((await currentHead()) !== head) throw Error("head 変更");
-	const body = `${comment}${media}${attention === "none" ? "\n\nこの通知は A-番号がないため、承認は GitHub の OK/Approve 等で回答してください。" : ""}\n\n<!-- harness:gate phase=awaiting-merge issue=${issue} sha=${head} attention=${attention} -->`;
+	const body = `${comment}${media}${attention === "none" ? "\n\nこの通知は A-番号がないため、承認は GitHub の OK/Approve 等で回答してください。" : ""}${note ? `\n\n${note}` : ""}\n\n<!-- harness:gate phase=awaiting-merge issue=${issue} sha=${head} attention=${attention} -->`;
 	// PATCH の応答喪失やプロセス終了でも、後続の merge は停止したままにする。
 	await rememberRecovery();
 	stage = "完成PATCH";

@@ -1,8 +1,17 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+	existsSync,
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -365,6 +374,247 @@ test("G16: 実行homeを差し替えても設定homeの定義を順に実行し�
 		assert.equal((await h.run(extra)).code, 2);
 		assert.deepEqual(readdirSync(h.env.TMPDIR), []);
 		assert.ok(existsSync(h.env.DLE_CONFIG_HOME));
+	} finally {
+		h.close();
+	}
+});
+
+// --- 未確認（skipExit: 78）---
+function gitInit(dir: string) {
+	for (const args of [
+		["init", "-q"],
+		["commit", "-q", "--allow-empty", "-m", "init"],
+	])
+		execFileSync("git", args, {
+			cwd: dir,
+			env: {
+				...process.env,
+				GIT_AUTHOR_NAME: "t",
+				GIT_AUTHOR_EMAIL: "t@t",
+				GIT_COMMITTER_NAME: "t",
+				GIT_COMMITTER_EMAIL: "t@t",
+			},
+		});
+	// 実運用では .harness/ は info/exclude で無視される。
+	writeFileSync(path.join(dir, ".git/info/exclude"), ".harness/\n");
+	return execFileSync("git", ["rev-parse", "HEAD"], { cwd: dir }).toString().trim();
+}
+const lastLine = (s: string) => s.trim().split("\n").at(-1) ?? "";
+test("G-S1: skipExit を宣言した段の終了 78 は ⚠ 未確認で、全件実行し終了 0", async () => {
+	const h = setup();
+	try {
+		const rec = path.join(h.dir, "rec");
+		h.put({
+			gate: [
+				{ name: "sc", run: "echo skipped; exit 78", skipExit: 78 },
+				{ name: "ok", run: `echo ran >${shq(rec)}` },
+			],
+		});
+		const r = await h.run();
+		assert.equal(r.code, 0, r.stderr);
+		assert.match(r.stderr, /⚠ sc .*未確認.*CI で初めて検査される/);
+		assert.match(r.stderr, /✅ ok/);
+		assert.ok(!/✅ sc/.test(r.stderr));
+		assert.ok(lastLine(r.stderr).startsWith("⚠ 未確認: sc"));
+		assert.equal(readFileSync(rec, "utf8"), "ran\n");
+	} finally {
+		h.close();
+	}
+});
+test("G-S2/S3: gateSkipPolicy=fail は終了 3、失敗が混在すれば 1。未指定・null・warn は終了 0", async () => {
+	const h = setup();
+	try {
+		const sc = { name: "sc", run: "exit 78", skipExit: 78 };
+		h.put({ gate: [sc], gateSkipPolicy: "fail" });
+		const r = await h.run();
+		assert.equal(r.code, 3);
+		assert.match(r.stderr, /❌ 未確認（gateSkipPolicy=fail）/);
+		h.put({ gate: [sc, { name: "bad", run: "exit 1" }], gateSkipPolicy: "fail" });
+		assert.equal((await h.run()).code, 1);
+		for (const policy of [undefined, null, "warn"]) {
+			h.put({ gate: [sc], gateSkipPolicy: policy });
+			assert.equal((await h.run()).code, 0);
+		}
+	} finally {
+		h.close();
+	}
+});
+test("G-S4/S7: gateSkipPolicy・skipExit の不正値は実行前に終了 2", async () => {
+	const h = setup();
+	try {
+		const rec = path.join(h.dir, "rec");
+		const mark = { name: "m", run: `echo x >>${shq(rec)}` };
+		const bad: string[] = [];
+		for (const v of ['""', '"FAIL"', "true", "1", "[]", "{}"])
+			bad.push(`{"gate":[${JSON.stringify(mark)}],"gateSkipPolicy":${v}}`);
+		for (const v of ["1e2", '"78"', "true", "false", "0", "1", "2", "127", "255", "256", "-1", "78.5", "[]", "{}"])
+			bad.push(`{"gate":[${JSON.stringify(mark)},{"name":"s","run":"exit 78","skipExit":${v}}]}`);
+		for (const text of bad) {
+			writeFileSync(h.file, text);
+			const r = await h.run();
+			assert.equal(r.code, 2, text);
+			assert.equal(r.stdout, "");
+			assert.ok(!existsSync(rec), text);
+		}
+		for (const v of ["null", "78.0", "7.8e1"]) {
+			writeFileSync(h.file, `{"gate":[{"name":"s","run":"exit 78","skipExit":${v}}]}`);
+			const r = await h.run();
+			assert.equal(r.code, v === "null" ? 1 : 0, v);
+			assert.equal(/⚠ s /.test(r.stderr), v !== "null", v);
+		}
+		writeFileSync(h.file, '{"gate":[{"name":"s","run":"exit 1","skipExit":78.0}]}');
+		assert.equal((await h.run()).code, 1);
+	} finally {
+		h.close();
+	}
+});
+test("G-S5/S6: 宣言なしの 78 は失敗のまま。78 以外の非 0 は宣言があっても失敗。preflight・beforePR には効かない", async () => {
+	const h = setup();
+	try {
+		h.put({
+			gate: [
+				{ name: "x", run: "exit 78" },
+				{ name: "y", run: "true" },
+			],
+		});
+		let r = await h.run();
+		assert.equal(r.code, 1);
+		assert.match(r.stderr, /❌ x.*skipExit 未宣言のため失敗/);
+		assert.ok(!r.stderr.includes("⚠"));
+		assert.match(r.stderr, /✅ y/);
+		for (const code of [0, 1, 2, 77, 79, 255]) {
+			h.put({ gate: [{ name: "x", run: `exit ${code}` }] });
+			assert.equal((await h.run()).code, code === 0 ? 0 : 1, String(code));
+		}
+		for (const code of [1, 127, 255]) {
+			h.put({ gate: [{ name: "x", run: `exit ${code}`, skipExit: 78 }] });
+			r = await h.run();
+			assert.equal(r.code, 1, String(code));
+			assert.ok(!r.stderr.includes("⚠"));
+		}
+		h.put({ preflight: [{ name: "p", run: "exit 78", skipExit: 78 }], gate: [{ name: "g", run: "true" }] });
+		assert.equal((await h.run()).code, 3);
+		h.put({ gate: [{ name: "g", run: "true" }], hooks: { beforePR: ["exit 78"] } });
+		r = await h.run();
+		assert.equal(r.code, 1);
+		assert.match(r.stderr, /❌ hooks.beforePR/);
+	} finally {
+		h.close();
+	}
+});
+test("G-S8: 結果ファイルは現 HEAD で書かれ、設定不備・preflight 失敗では残らない", async () => {
+	const h = setup();
+	try {
+		const head = gitInit(h.main);
+		const resultPath = path.join(h.main, ".harness/gate-result.json");
+		const read = () => JSON.parse(readFileSync(resultPath, "utf8"));
+		const sc = { name: "sc", run: "exit 78", skipExit: 78 };
+		h.put({ gate: [sc] });
+		await h.run();
+		assert.deepEqual(read(), { version: 1, head, dirty: false, policy: "warn", skipped: ["sc"], failed: [] });
+		h.put({ gate: [sc], gateSkipPolicy: "fail" });
+		assert.equal((await h.run()).code, 3);
+		assert.equal(read().policy, "fail");
+		h.put({ gate: [sc, { name: "bad", run: "exit 1" }], hooks: { beforePR: ["exit 1"] } });
+		assert.equal((await h.run()).code, 1);
+		assert.deepEqual([read().skipped, read().failed], [["sc"], ["bad", "hooks.beforePR"]]);
+		writeFileSync(path.join(h.main, "new.txt"), "x");
+		h.put({ gate: [sc] });
+		await h.run();
+		assert.equal(read().dirty, true);
+		for (const config of [
+			{ gate: [sc], gateSkipPolicy: "x" },
+			{ gate: [sc], preflight: [{ name: "p", run: "exit 1" }] },
+		]) {
+			h.put({ gate: [sc] });
+			await h.run();
+			assert.ok(existsSync(resultPath));
+			h.put(config);
+			assert.notEqual((await h.run()).code, 0);
+			assert.ok(!existsSync(resultPath));
+		}
+	} finally {
+		h.close();
+	}
+});
+test("G-S8b: git でない作業ツリーでは結果ファイルを作らず、終了コードも変わらない", async () => {
+	const h = setup();
+	try {
+		h.put({ gate: [{ name: "sc", run: "exit 78", skipExit: 78 }] });
+		assert.equal((await h.run()).code, 0);
+		assert.ok(!existsSync(path.join(h.main, ".harness/gate-result.json")));
+	} finally {
+		h.close();
+	}
+});
+test("G-S9: shellcheck の有無で分岐する実コマンドが、無ければ ⚠、あれば ✅ になる", async () => {
+	const h = setup();
+	try {
+		const bin = path.join(h.dir, "bin");
+		const bin2 = path.join(h.dir, "bin2");
+		mkdirSync(bin);
+		mkdirSync(bin2);
+		for (const cmd of [
+			"bash",
+			"env",
+			"jq",
+			"git",
+			"dirname",
+			"basename",
+			"mktemp",
+			"rm",
+			"seq",
+			"date",
+			"cat",
+			"mkdir",
+			"mv",
+			"sed",
+		])
+			symlinkSync(
+				execFileSync("bash", ["-c", `command -v ${cmd}`])
+					.toString()
+					.trim(),
+				path.join(bin, cmd),
+			);
+		writeFileSync(path.join(bin2, "shellcheck"), "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
+		h.put({
+			gate: [
+				{
+					name: "shellcheck",
+					skipExit: 78,
+					run: "if command -v shellcheck >/dev/null; then shellcheck x; else echo 'shellcheck が無い'; exit 78; fi",
+				},
+			],
+		});
+		const exec = (p: string) =>
+			spawnSync("env", ["-i", `PATH=${p}`, `HOME=${h.dir}`, `HARNESS_CONFIG=${h.file}`, "bash", gate, h.main], {
+				encoding: "utf8",
+			});
+		const none = spawnSync(`${bin}/bash`, ["-c", "command -v shellcheck"], { env: { PATH: bin } });
+		assert.notEqual(none.status, 0);
+		const a = exec(bin);
+		assert.equal(a.status, 0, a.stderr);
+		assert.match(a.stderr, /⚠ shellcheck/);
+		const b = exec(`${bin2}:${bin}`);
+		assert.equal(b.status, 0, b.stderr);
+		assert.match(b.stderr, /✅ shellcheck/);
+	} finally {
+		h.close();
+	}
+});
+test("G-S8c: 親ディレクトリから相対パスで呼んでも、結果ファイルは対象に書かれ古い結果は消える", async () => {
+	const h = setup();
+	try {
+		const head = gitInit(h.main);
+		h.put({ gate: [{ name: "sc", run: "exit 78", skipExit: 78 }] });
+		const resultPath = path.join(h.main, ".harness/gate-result.json");
+		mkdirSync(path.dirname(resultPath), { recursive: true });
+		writeFileSync(resultPath, JSON.stringify({ stale: true }));
+		const r = spawnSync(gate, [path.basename(h.main)], { cwd: h.dir, env: h.env, encoding: "utf8" });
+		assert.equal(r.status, 0, r.stderr);
+		const got = JSON.parse(readFileSync(resultPath, "utf8"));
+		assert.equal(got.head, head);
+		assert.deepEqual(got.skipped, ["sc"]);
 	} finally {
 		h.close();
 	}

@@ -67,7 +67,7 @@ preflight/gate は自分で全 DLE_*/DISCORD_* を除去し、一時 home/socket
 
 - `project` / `repo` / `baseBranch` / `owners`
 - `maxParallel`（既定 3）/ `worktreeRoot`（省略時は `${DLE_HOME}-worktrees/<登録名>`。相対値は main 基準、絶対値も可）/ `branchPrefix`（既定 `fix/issue-`）
-- `gate`: PR 前ゲート `[{name, run}]`（CI と同じ検査を同じ順で）
+- `gate`: PR 前ゲート `[{name, run, skipExit?: 78}]`（CI と同じ検査を同じ順で）。`skipExit: 78` を書いた段だけ、終了 78 を「未確認（⚠）」と読む。`gateSkipPolicy`（`warn` 既定 / `fail`）で未確認を失敗にできる
 - `hooks`: リポジトリ固有の手順の差し込み口（`harness-hook <phase>` が実行。どれもコマンドの配列で、最初の失敗で止まる。
   `{n}` `{pr}` `{worktree}` `{main}` を置換）
   - `afterWorktree`: worktree 作成直後（依存のインストール、`.env` の symlink など）。以前の `setup` もここで先に実行される
@@ -337,6 +337,7 @@ cat >> "$WT/.harness/prompt-spec-{n}.md" <<'CHECKLIST'
   共通の fixture で揃える。両側で状態を持つ処理は、結合テストを必須にする。
 - 新しい UI は、近くの固定・浮動 UI との重なりを実測し、ready 以外の状態も描画テストする。
 - Sonar の代表ルール（await のない async・入れ子の三項演算子）を避ける。
+- bash（bin/・tests/・hooks/）を変えるときは、local 宣言・変数に未使用を残さない（shellcheck の SC2034 は CI で初めて落ちる。ローカルに shellcheck が無いと gate では未確認になる）。
 - 既存コメントを消さない・英語にしない・フォーマッタの整形を巻き込まない。
 
 差し戻し時の項目（再依頼の指示に含める）:
@@ -560,6 +561,7 @@ D="<echo で得た絶対パス>"; P="<無害化済みのプロジェクト名>"
 gate_rc=0
 (cd "$WT" && harness-gate) || gate_rc=$?
 # 0=成功、1=コード検査失敗、2=設定不備、3=環境不備。非0ならこのブロックを止める。
+# 0 でも一覧に ⚠ が出ていれば未確認の検査がある（CI で初めて検査される）。承認依頼にも harness-phase が自動で載せる。
 if [ "$gate_rc" -ne 0 ]; then exit "$gate_rc"; fi
 git -C "$WT" push -u origin "$(harness-config '.branchPrefix' fix/issue-){n}"
 gh pr create --base "$(harness-config '.baseBranch' main)" --head "$(harness-config '.branchPrefix' fix/issue-){n}" \
@@ -583,6 +585,8 @@ REAL 3回より優先する。失敗しているチェック・実ログの根�
 対象以外の CI red は従来どおりとし、**CI が green になってから**承認依頼を出す。
 
 ### 5-4. 承認依頼（必ず harness-phase で）
+
+head が 5-3 の後に変わった（衝突解消・CI 赤の修正・rebase の push）ときは、承認依頼の前に `(cd "$WT" && harness-gate)` を再実行して結果を現 head のものにする（そうしないと承認依頼に「未確認の有無は不明」が載る）。
 
 動画を使う場合、合意した範囲を映した現 head の実アプリの録画を `--file` に指定する。
 UI 非変更や demo=null の全案件には録画を強制しない。長い変換には Bash timeout を延ばす（例600000 ms）。
@@ -633,7 +637,7 @@ blocked 通知失敗も成功にしない。原因解消後は動画準備から
 - 動画で見せる範囲: {開始状態→操作順→終了状態、含めないもの}
 - 判定: ✅ 完了 / 受け入れ条件: 1. ✅ … 2. ✅ …
 - レビュー: 敵対的検証 OK（壊せなかった点: …）
-- ゲート: harness-gate 全 ✅ / CI green
+- ゲート: harness-gate 全 ✅（⚠ 未確認があれば検査名。harness-phase も末尾に自動で追記する）/ CI green
 - 人間に確認してほしいこと（humanChecks）: …（普通の箇条書きで結果/未確認を記す）
 - 変更概要: …
 
