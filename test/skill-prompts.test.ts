@@ -1220,7 +1220,7 @@ test("T18-8: PR監視・回答・枠・明示retry・承認操作の入口を定
 test("issue-loop: 心拍は空キューでも張り、engine 配下では削除せず緩めて保持する。承認記録なしのマージはしない", () => {
 	const loop = readFileSync(path.resolve(import.meta.dirname, "../skills/issue-loop/SKILL.md"), "utf8");
 	assert.match(loop, /早期終了せず必ず実行する/);
-	assert.match(loop, /`DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `\*\/60` に緩めて保持/);
+	assert.match(loop, /`DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `0 \*\/2 \* \* \*` に緩めて保持/);
 	assert.match(loop, /engine 無しの単体実行 → 心拍を `CronDelete`/);
 	assert.match(loop, /承認記録が無ければマージしない/);
 	assert.ok(
@@ -1500,4 +1500,54 @@ test("concierge は OK の返事を OK から始めて渡し、別の A や曖�
 	assert.ok(conciergeSkill.includes("先頭は必ず半角大文字 `OK`"));
 	assert.ok(conciergeSkill.includes("`OK` を前置きせず"));
 	assert.ok(conciergeSkill.includes("`meta.attention` と違うときは `attention_answer` せず"));
+});
+
+test("T3: 起動・毎tick・clear・終了は同じ心拍表と実INTERVALを使う", () => {
+	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+	const boot = section(loop, "## 起動時", "## 毎 tick");
+	const policy = section(loop, "## 心拍の選択", "## 毎 tick");
+	assert.match(boot, /心拍の選択/);
+	assert.ok(boot.includes('cron: "*/15 * * * *"'));
+	assert.ok(!boot.includes('cron: "0 */2 * * *"'));
+	assert.match(boot, /空キュー・人間待ち.*表/);
+	for (const phrase of [
+		"*/15 * * * *",
+		"0 * * * *",
+		"0 */2 * * *",
+		"状態取得に失敗",
+		"現在の間隔を維持",
+		"blocked",
+		"未処理",
+		"Dependabot",
+		"120min",
+		"初回",
+		"15min",
+		"CronList",
+		"作成に失敗",
+		"既存を残す",
+		"1件",
+	])
+		assert.ok(policy.includes(phrase), phrase);
+	assert.match(policy, /未処理のdispatch[^\n]+`\*\/15 \* \* \* \*`[^\n]+`15min`/);
+	assert.match(policy, /人間待ちだけ[^\n]+`0 \* \* \* \*`[^\n]+`0 \*\/2 \* \* \*`[^\n]+`60min`[^\n]+`120min`/);
+	assert.match(policy, /Dependabot監視だけ[^\n]+`0 \* \* \* \*`[^\n]+`0 \*\/2 \* \* \*`/);
+	assert.match(policy, /engine配下worker[^\n]+`0 \*\/2 \* \* \*`[^\n]+`120min`/);
+	assert.match(policy, /状態取得に失敗[^\n]+現在の間隔を維持/);
+	assert.doesNotMatch(loop, /\*\/60|\*\/120/);
+	assert.match(loop, /prompt: "\/discord-loop-engine:issue-loop", recurring: true, durable: true/);
+	assert.match(loop, /毎 tick[\s\S]*?CronList/);
+	assert.match(section(loop, "### 0. heartbeat", "### 1."), /同じBash呼び出し内.*INTERVAL/);
+	assert.doesNotMatch(section(loop, "### 0. heartbeat", "### 1."), /INTERVAL:-15min/);
+	const manage = section(loop, "## コンテキスト管理", "## `.harness/handoff.md`");
+	assert.match(manage, /心拍の選択/);
+	assert.match(manage, /`0 \* \* \* \*`[\s\S]*`0 \*\/2 \* \* \*`/);
+	assert.match(manage, /`\*\/15 \* \* \* \*`/);
+	const end = section(loop, "## 終了条件");
+	assert.match(end, /60分.*`0 \* \* \* \*`.*120分.*`0 \*\/2 \* \* \*`/);
+	assert.match(end, /読取り失敗.*現在の間隔を維持/);
+	assert.match(end, /blocked.*未完了/);
+	assert.match(end, /engine 無しの単体実行 → 心拍を `CronDelete`/);
+	assert.match(end, /ユーザーが止めるよう言った → 心拍・one-shot を全部消す/);
+	assert.match(loop, /heartbeat_interval.*15min.*60min.*120min/);
+	assert.match(loop, /承認記録が無ければマージしない/);
 });

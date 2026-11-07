@@ -35,8 +35,9 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
    `次にやること`（`next`）があれば、再起動直後（使用量の上限でアカウントを替えた `dle restart` の後など）は
    そこから続ける。GitHub の状態と食い違えば GitHub を優先する
 2. **心拍**: 手順 1 の結果がキュー空・アクティブなしでも、ここで早期終了せず必ず実行する。
-   `CronList` にこのループの心拍が無ければ張る（engine 配下で再起動した worker は、空キューでも心拍なしの idle になりやすい）。プロンプトは**スキル呼び出し単体**に固定し、
-   複合プロンプト（`/clear` を混ぜる等）にしない（oogiri-doc で心拍が無言で空振りし続けた事故がある）:
+   下の「心拍の選択」を使い、`CronList` にこのループの心拍が無ければ選んだ間隔で張る（engine 配下で再起動した worker は、空キューでも心拍なしの idle になりやすい）。プロンプトは**スキル呼び出し単体**に固定し、
+   複合プロンプト（`/clear` を混ぜる等）にしない（oogiri-doc で心拍が無言で空振りし続けた事故がある）。
+   以下は起動直後の既定15分の例。空キュー・人間待ちの間隔は「心拍の選択」の表から選ぶ:
    ```
    CronCreate({ cron: "*/15 * * * *", prompt: "/discord-loop-engine:issue-loop", recurring: true, durable: true })
    ```
@@ -46,16 +47,40 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 3. **PR の購読**（`subscribe_pr_activity` がある環境のみ）: `awaiting-merge` / `impl-review` で PR が
    ある Issue を購読する。購読済みは `.harness/handoff.md` の `subscribed_prs` に記録して重複させない。
 
+## 心拍の選択
+
+起動時・毎 tick・clear 後・終了時は次の優先順を共用する。空判定は候補Issueの0件だけでは決めず、
+`harness-status` / `harness-inbox`、tasks/attention、Codex/CI、`harness-pr inbox` / `harness-pr scan` の取得成功と結果を確認する。
+
+| 状態 | 予約式 | INTERVAL |
+|---|---|---|
+| 明示停止 | 心拍・one-shotを削除 | 記録終了 |
+| 状態取得に失敗 | 現在の間隔を維持し、空と扱わない | 既存記録を維持 |
+| 未処理のdispatch/回答、Codex/CI実行、実行可能なIssue/PR作業 | `*/15 * * * *` | `15min` |
+| 人間待ちだけ、Codex/CI停止 | `0 * * * *` → 無変化2時間で `0 */2 * * *` | `60min` → `120min` |
+| キュー空・通常Issue完了・Dependabot監視だけ | `0 * * * *` → 無変化2時間で `0 */2 * * *` | `60min` → `120min` |
+| キュー空、blockedを含む未完了Issue/PR・Dependabot監視なし、engine配下worker | そのtickから `0 */2 * * *` | `120min` |
+| 同じ全完了状態、engine無し単体 | 心拍を削除 | 記録終了 |
+
+保存済み回答を先に処理する。状態取得失敗は無変化時間に加算せず、進行再開を確認できたときだけ15分へ戻す。
+状態不明ではCronListの既存式を優先し、消失時は既存heartbeat_intervalから復元する。
+双方とも無く状態も不明な初回だけ、従来の起動既定 `*/15 * * * *` / `15min` を使う（空判定はしない）。
+式を変えるときだけ対象心拍を張り替える。先に新しい予約の作成成功を確認し、作成に失敗したら既存を残す。
+他用途のジョブを触らず対象心拍を1件にする。Cron確認不能では既存記録を維持し、変更成功と書かない。
+毎 tick CronListで生存を確認し、無ければ同じ表の式で張り直す。6日ごとの再作成や期限管理項目は追加しない。
+実予約を確認した `15min` / `60min` / `120min` をINTERVALとhandoffのheartbeat_intervalに使う。
+
 ## 毎 tick の処理
 
 ### 0. heartbeat の記録
 
 ```bash
 ROOT=$(harness-config --root); mkdir -p "$ROOT/.harness"
-printf 'last_tick_at=%s\nheartbeat_interval=%s\n' "$(date -u +%FT%TZ)" "${INTERVAL:-15min}" \
+printf 'last_tick_at=%s\nheartbeat_interval=%s\n' "$(date -u +%FT%TZ)" "${INTERVAL:?実予約を確認した間隔を設定する}" \
   > "$ROOT/.harness/loop-heartbeat.tmp" && mv "$ROOT/.harness/loop-heartbeat.tmp" "$ROOT/.harness/loop-heartbeat"
 ```
 
+先にCronListと「心拍の選択」で実予約を確認し、上の記録コマンドと同じBash呼び出し内でINTERVALを設定する（例: 予約が15分なら冒頭に `INTERVAL=15min` を置く）。別のBash呼び出しの変数は引き継がれない。確認不能ならこの書込みを行わず既存記録を維持する。
 `harness-status` はこれを見て「待機中」と「止まっている」を区別する。
 
 ### 1. Codex のシェパード（サブエージェントに丸ごと任せる）
@@ -317,17 +342,18 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 ## コンテキスト管理
 
 コンテキストの `/clear` は engine が行う。cron による自己 clear・自己 resume は予約しない。
-clear 後は「起動時」の状態把握からやり直し、`CronList` で心拍を確認して、無ければ張り直す。
+clear 後は「起動時」の状態把握と「心拍の選択」からやり直し、`CronList` で心拍を確認して、無ければ張り直す。
 
 1. **本体を薄く保つ（根本策）**: 本体で直接やるのは、ループ判断・`harness-*` コマンド・`handoff.md` の
    読み書き・cron 管理・Codex 起動・人間ゲートだけ。ソース調査・tmux ログ・CI ログ・diff・大きな `gh`
    出力はサブエージェントに読ませて結論だけ受け取る。`gh` は `--json`/`-q` で必要な項目に絞る
 2. **人間待ちだけのときは心拍を緩める**: アクティブが全部 `interview` / `awaiting-merge` / `blocked` で、
-   Codex も CI も動いていなければ、心拍を `*/60` に張り替える（2時間変化が無ければ `*/120`）。
-   Codex・CI が動き出すか人間の返事でフェーズが進んだら `*/15` に戻す。
+   Codex も CI も動いていなければ、「心拍の選択」に従い、心拍を `0 * * * *` に張り替える（2時間変化が無ければ `0 */2 * * *`）。
+   Codex・CI が動き出すか人間の返事でフェーズが進んだら `*/15 * * * *` に戻す。
    ※ Issue コメントでの返事はセッションを起こさないので、緩めた分だけ取り込みが遅れる
    （PR の購読イベントは即時に起こす）。discord-loop-engine で起動したセッションなら、Discord での
-   返信がその場でセッションを起こすので遅れない
+   返信は既存engineの起こしを主な契機にする。busy/不明では再試行するため即時処理は保証しない。
+   wake無効時はdispatch・回答も次の心拍まで120分超遅れ得る
 
 ## `.harness/handoff.md`（ローカル・gitignore・無くても動く）
 
@@ -344,15 +370,15 @@ clear 後は「起動時」の状態把握からやり直し、`CronList` で心
 ```
 
 フェーズや決定事項はここに書かない（GitHub が正）。このファイルは1件1行・現在値だけを保ち、
-完了した Issue の行は消す。
+完了した Issue の行は消す。heartbeat_intervalは実予約と同じ15min/60min/120minにする。
 
 ## 終了条件
 
-- Dependabot の監視対象なら、Issue キューが空でも心拍を60分、無変化2時間後120分で保持する。
+- Dependabot の監視対象なら、Issue キューが空でも心拍を60分 `0 * * * *`、無変化2時間後120分 `0 */2 * * *`で保持する。
   キュー完了通知は「Issue キュー完了・Dependabot PR の監視は継続」と1回だけ補足する。
-  両方の監視条件が無くなれば PR 監視用心拍を削除する。読取り失敗では削除しない。
-- キューが空で、アクティブも全部終わり、Dependabot の監視対象でもない:
-  - `DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `*/60` に緩めて保持する（engine の起こしが取りこぼしたときの
+  両方の監視条件が無くなれば PR 監視用心拍は次の全完了判定へ移す。読取り失敗では削除せず現在の間隔を維持する。
+- キューが空で、blockedを含む未完了Issue/PRがなく、アクティブも全部終わり、Dependabot の監視対象でもない（「心拍の選択」で取得成功を確認）:
+  - `DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `0 */2 * * *` に緩めて保持する（engine の起こしが取りこぼしたときの
     最後の安全網にする）。`harness-notify --event info` の「キュー完了」は1回だけ（心拍を残しても繰り返さない）
   - engine 無しの単体実行 → 心拍を `CronDelete` し、`harness-notify --event info` で「キュー完了」を1回だけ通知して終える
 - ユーザーが止めるよう言った → 心拍・one-shot を全部消す
