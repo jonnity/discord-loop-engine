@@ -624,6 +624,105 @@ worker が idle（status idle・画面が静止して入力欄が空・直前の
 送る文字列はこの定数だけで、回答文や Issue の中身は入力しない。マージは従来どおり承認記録がなければ行われない。
 `worker.wake.enabled: false` で無効にできる。
 
+### 自動整理の診断
+
+自動整理の診断は `DLE_HOME/refresh/decisions/YYYY-MM-DD.jsonl`、対象と実効設定は
+`DLE_HOME/refresh/coverage/YYYY-MM-DD.jsonl` に保存する（UTC日付、ディレクトリ0700・ファイル0600）。
+coverage には inactive・native・onboard・設定無効・起動エラーも含む。native は独自ループ、onboard は導入中のため整理対象外。
+接続断とウィンドウ欠落は decision に記録する。ソースの fingerprint は `implementationHash` で照合できるが、
+実際に読み込まれた worker/plugin の版・認証・配布元は運用者が別に確認する。
+
+decision は通常の巡回につき最大1件、同じ対象の量読取は30秒に最大1回で重ねない。
+busy 中も最新 usage を独立して読み、`overThreshold` と、実際の見送り順に従う `primaryReason`、
+独立観測で分かった併存理由 `blockers` を記録する。量不明は `null`、未読は `notObserved`、
+内部ファイルの読取結果は `readReasons` で表す。`source` は transcript / screen / unknown。
+割合しか読めない場合は token 値に換算しない。観測は整理の許可に使わず、失敗・2秒の timeout でも通常の判定を続ける。
+通常 idle の整理は worker の保存応答を待たず、既存の再開プロンプトを送る。
+
+同じ session・理由の連続記録は `count`・`firstAt`・`lastAt`・`maxTokens`・`overThresholdCount`・`unknownCount` に集約し、
+理由変更・整理結果・5分経過・正常終了（INT/TERM/HUP）で保存する。journal は理由の変化だけを短く記録し、Discord 通知は増やさない。
+本文・回答・絶対パスは診断へ保存しない。`count × 30秒` は正確な阻害時間ではなく、クラッシュ直前の未保存区間は欠測になる。
+証拠の自動削除は行わない。比較完了まで必要な入力と診断を私有の永続領域へ保全し、容量・保持期間・バックアップは運用者が管理する。
+
+### 文脈整理の基準取得と比較
+
+`src/usage-summary.ts` は Node 標準ライブラリだけの単一ファイルで、私有領域へコピーして実行できる。
+Claude の `projects` 配下の本体・subagent JSONLを集計し、assistant usage を `message.id` で重複除外する集計仕様案。
+Codex 使用量は含めない。期間は絶対時刻の `[from, until)`、終了済みの各7×24時間を指定する。
+同じ id・usage・帰属・UTC日の重複は1件とし、競合、id欠損、読取不能、途中末尾行は `complete:false` にする。
+role/project は JSONLの明示的な `dleRole` / `project` を使い、なければ unknown として数える。
+パス名から役割を推測しない。比較対象の範囲、帰属、重複競合、期間境界は元の計測規則と同一入力で照合してから運用比較へ使う。
+
+1. 診断・原因修正の導入前に、実設定・版・対象とログの権限/容量を確認する。停止・ローテーション等で対象JSONLの書込みを確定させる。
+2. 次の Bash で私有の永続runを作り、診断導入前の時刻Bと前窓を固定して取得する。既存の出力先は上書きできない。
+
+```bash
+umask 077
+MEASURE_ROOT="${DLE_MEASURE_ROOT:-${XDG_STATE_HOME:-$HOME/.local/state}/discord-loop-engine/context-measure}"
+[[ "$MEASURE_ROOT" = /* && ! -L "$MEASURE_ROOT" ]] || exit 1
+mkdir -p "$MEASURE_ROOT" && chmod 700 "$MEASURE_ROOT" || exit 1
+MEASURE_DIR=$(mktemp -d "$MEASURE_ROOT/run.XXXXXX") || exit 1
+export MEASURE_DIR
+cp src/usage-summary.ts "$MEASURE_DIR/usage-summary.ts" || exit 1
+node --input-type=module <<'JS' || exit 1
+import { writeFileSync } from "node:fs";
+import path from "node:path";
+const end = new Date();
+writeFileSync(path.join(process.env.MEASURE_DIR, "window.json"), JSON.stringify({
+  beforeFrom: new Date(end.getTime() - 7 * 86400000).toISOString(),
+  beforeUntil: end.toISOString(), deploymentAt: null, afterUntil: null
+}, null, 2) + "\n", { mode: 0o600 });
+JS
+BEFORE_FROM=$(jq -r .beforeFrom "$MEASURE_DIR/window.json") || exit 1
+BEFORE_UNTIL=$(jq -r .beforeUntil "$MEASURE_DIR/window.json") || exit 1
+node "$MEASURE_DIR/usage-summary.ts" snapshot --claude-home "$HOME/.claude" \
+  --from "$BEFORE_FROM" --until "$BEFORE_UNTIL" --out "$MEASURE_DIR/before" || exit 1
+jq -e '.complete == true and .schemaVersion == 1' "$MEASURE_DIR/before/summary.json" >/dev/null || exit 1
+printf '%s\n' "$MEASURE_DIR"
+```
+
+3. summary/manifest/report と選択JSONLの私有コピー（input）の bytes・hash・形式を確認する。
+   `complete:false` は終了3、引数不正は2、I/O失敗は1、完備した集計は0。欠測を0として比較しない。
+   総量と project/role/model/UTC日別の input・cache creation・cache read・output・call数・平均文脈を summary に保存する。
+   原因修正を導入する場合だけ、通常の承認・配布手順を経て、導入時刻T・版・設定・同時変更を同runの deployment.json に記録する。
+   診断のみなら基準と証拠を保全し、効果計測へ進まない。診断導入〜原因修正導入の移行区間は前後窓から除外する。
+4. 原因修正の導入確認時に次を一度実行し、Tと後窓を固定する。別シェルでは表示済みの絶対runパスを `MEASURE_DIR` に設定する。
+
+```bash
+export MEASURE_DIR
+node --input-type=module <<'JS' || exit 1
+import { readFileSync, renameSync, writeFileSync } from "node:fs";
+import path from "node:path";
+const file = path.join(process.env.MEASURE_DIR, "window.json");
+const window = JSON.parse(readFileSync(file, "utf8"));
+if (window.deploymentAt !== null) throw new Error("導入時刻は記録済み");
+const start = new Date();
+window.deploymentAt = start.toISOString();
+window.afterUntil = new Date(start.getTime() + 7 * 86400000).toISOString();
+writeFileSync(file + ".tmp", JSON.stringify(window, null, 2) + "\n", { mode: 0o600 });
+renameSync(file + ".tmp", file);
+JS
+```
+
+5. T+7日後、同じコピーを使って比較する。7日未経過はCLIが拒否する。
+
+```bash
+DEPLOYMENT_AT=$(jq -r .deploymentAt "$MEASURE_DIR/window.json") || exit 1
+AFTER_UNTIL=$(jq -r .afterUntil "$MEASURE_DIR/window.json") || exit 1
+node "$MEASURE_DIR/usage-summary.ts" snapshot --claude-home "$HOME/.claude" \
+  --from "$DEPLOYMENT_AT" --until "$AFTER_UNTIL" --out "$MEASURE_DIR/after" || exit 1
+node "$MEASURE_DIR/usage-summary.ts" compare --before "$MEASURE_DIR/before/summary.json" \
+  --after "$MEASURE_DIR/after/summary.json" --out "$MEASURE_DIR/comparison" || exit 1
+jq -e '.comparable == true' "$MEASURE_DIR/comparison/summary.json" >/dev/null || exit 1
+cat "$MEASURE_DIR/comparison/report.md"
+```
+
+6. 元集計と整合する各7日・合計・差・率・call数・モデル/対象/日別配分・欠測・同時変更を照合し、効果報告を行う。
+   差は after−before、削減率は (before−after)/before。before=0 は率null、表示だけ小数1桁の%にする。
+   CLIには投稿機能がなく、減少だけで因果を断定しない。実装の検証と7日間の効果確認は別に扱う。
+7. 比較・報告後、必要な成果物を私有保管先へコピーして hash/bytes を再確認してから、所有するrunだけを掃除する。
+   元のClaudeログ・journal・台帳は消さない。永続領域を用意できない場合は計測を開始せず、一時領域へ自動fallbackしない。
+
 ### 使用量の上限で止まったとき
 
 engine は30秒ごとに各 worker の画面の末尾（`worker.limit.tailLines` 行）を読み、`worker.limit.patterns` に合う行があれば

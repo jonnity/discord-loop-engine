@@ -30,6 +30,7 @@ import { Gateway } from "./gateway.ts";
 import { Ledger, type Project } from "./ledger.ts";
 import { registerProject } from "./projects.ts";
 import { dleHome, type EngineMessage, lineReader, PROTOCOL_VERSION, send } from "./protocol.ts";
+import { RefreshDiagnostics } from "./refresh.ts";
 import { Rest } from "./rest.ts";
 import { parseRestartArgs } from "./restart-args.ts";
 import { cmdRunner } from "./runner.ts";
@@ -125,6 +126,7 @@ async function cmdStart() {
 	const rest = new Rest({ token });
 	const ledger = new Ledger(home);
 	let engine: Engine | null = null;
+	const diagnostics = new RefreshDiagnostics(home, (text) => ledger.journal(text), log);
 	const supervisor = new Supervisor({
 		tmuxSession: config.tmuxSession,
 		targets: () => engine?.targets() ?? [],
@@ -134,6 +136,10 @@ async function cmdStart() {
 		activity: (n) => engine?.activity(n) ?? { events: 0, lastAt: 0 },
 		onRefresh: (n, phase, result) => engine?.onRefresh(n, phase, result),
 		onRefreshSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
+		onRefreshDecision: (decision) => {
+			void diagnostics.record(decision);
+		},
+		diagnosticTmux: tmuxRunner(2000),
 		onWakeSkipped: (n, reason) => ledger.journal(`[${n}] ${reason}`),
 		limit: config.worker.limit,
 		onLimit: (entries) => engine?.limitNotice(entries),
@@ -143,7 +149,20 @@ async function cmdStart() {
 	engine = new Engine({ config, rest, ledger, supervisor, log, gatewayFactory: (h) => new Gateway({ token, ...h }) });
 	await engine.start();
 	writeFileSync(path.join(home, "engine.pid"), `${process.pid}\n`);
-	const tick = () => supervisor.tick().catch((e: Error) => log(`supervisor: ${e.message}`));
+	let shuttingDown = false;
+	const recordCoverage = () => {
+		try {
+			void diagnostics.coverage(engine?.refreshCoverage() ?? []);
+		} catch {
+			log("refresh: 対象の診断に失敗しました（欠測）");
+		}
+	};
+	const tick = () => {
+		if (shuttingDown) return Promise.resolve();
+		recordCoverage();
+		return supervisor.tick().catch((e: Error) => log(`supervisor: ${e.message}`));
+	};
+	recordCoverage();
 	// channel の再接続を待ってから起動判定する（engine 再起動時に既存セッションを二重起動しない）
 	setTimeout(tick, 15_000);
 	setInterval(tick, 30_000);
@@ -159,12 +178,17 @@ async function cmdStart() {
 	}, 60 * 60_000);
 	engine.scheduleBoard();
 	const shutdown = async () => {
+		if (shuttingDown) return;
+		shuttingDown = true;
 		log("engine: 停止します");
 		await engine?.stop();
+		await supervisor.flushRefreshDiagnostics();
+		await diagnostics.close();
 		process.exit(0);
 	};
 	process.on("SIGINT", shutdown);
 	process.on("SIGTERM", shutdown);
+	process.on("SIGHUP", shutdown);
 }
 
 async function cmdUp() {

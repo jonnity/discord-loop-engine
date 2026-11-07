@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Config, DLE_TOOLS_RULE, expandHome, PLUGIN_SPEC } from "./config.ts";
 import type { Ledger, Project } from "./ledger.ts";
+import type { RefreshCoverage } from "./refresh.ts";
 import { type SessionTarget, shq } from "./supervisor.ts";
 
 import { resolveWorktreeRoot } from "./worktrees.ts";
@@ -292,6 +293,75 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 			};
 		});
 	return [concierge, ...workers];
+}
+
+/** 起動対象から落ちたprojectも記録する。command/prompt/cwdは私有診断にも複製しない。 */
+export function refreshCoverage(
+	cfg: Config,
+	projects: Project[],
+	targets: SessionTarget[],
+	ledger?: Ledger,
+): RefreshCoverage[] {
+	const settings = (r: NonNullable<SessionTarget["refresh"]>): NonNullable<RefreshCoverage["settings"]> => ({
+		maxTokens: r.maxTokens,
+		maxEvents: r.maxEvents,
+		contextPercent: r.contextPercent,
+		idleSeconds: r.idleSeconds,
+		cooldownMinutes: r.cooldownMinutes,
+		codexIgnoreAfterMinutes: r.codexIgnoreAfterMinutes,
+		waitForCodex: r.waitForCodex,
+	});
+	const concierge = targets.find((t) => t.name === "concierge");
+	return [
+		{
+			project: "concierge",
+			reason: cfg.concierge.refresh.enabled ? "eligible" : "refresh-disabled",
+			enabled: cfg.concierge.refresh.enabled,
+			settings: concierge?.refresh
+				? settings(concierge.refresh)
+				: {
+						maxTokens: cfg.concierge.refresh.maxTokens,
+						maxEvents: cfg.concierge.refresh.maxEvents,
+						contextPercent: cfg.concierge.refresh.contextPercent,
+						idleSeconds: 180,
+						cooldownMinutes: 30,
+						codexIgnoreAfterMinutes: 120,
+						waitForCodex: false,
+					},
+		},
+		...projects.map((p): RefreshCoverage => {
+			const t = targets.find((t) => t.name === p.name);
+			const ready = ledger ? ledger.isReady(p) : true;
+			return {
+				project: p.name,
+				mode: p.mode,
+				ready,
+				enabled: cfg.worker.refresh.enabled,
+				reason: !p.active
+					? "inactive"
+					: p.mode === "native"
+						? "native"
+						: t?.startupError
+							? "startup-error"
+							: !ready
+								? "not-ready"
+								: !cfg.worker.refresh.enabled
+									? "refresh-disabled"
+									: "eligible",
+				settings: t?.refresh
+					? settings(t.refresh)
+					: {
+							maxTokens: cfg.worker.refresh.maxTokens,
+							maxEvents: 0,
+							contextPercent: cfg.worker.refresh.contextPercent,
+							idleSeconds: cfg.worker.refresh.idleSeconds,
+							cooldownMinutes: cfg.worker.refresh.cooldownMinutes,
+							codexIgnoreAfterMinutes: cfg.worker.refresh.codexIgnoreAfterMinutes,
+							waitForCodex: true,
+						},
+			};
+		}),
+	];
 }
 
 const HARNESS_LABELS = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "bin", "harness-labels");

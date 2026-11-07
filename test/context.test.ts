@@ -77,3 +77,29 @@ test("サブエージェントの活動が読めない場合は画面へのフ�
 		await rm(home, { recursive: true, force: true });
 	}
 });
+
+test("診断readerは読取不能の固定理由と出所を返し、既存readerの値を変えない", async () => {
+	const home = await mkdtemp(path.join(os.tmpdir(), "dle-context-detail-"));
+	try {
+		const reader = contextReader(home);
+		assert.deepEqual(await reader.inspectSession("123"), {
+			value: null,
+			reason: "session-missing",
+			source: "session-file",
+		});
+		await mkdir(path.join(home, "sessions"));
+		await writeFile(path.join(home, "sessions/123.json"), "{}");
+		assert.equal((await reader.inspectSession("123")).reason, "session-invalid");
+		const session = { sessionId: "s", cwd: "/fixture", status: "busy", updatedAt: 0 };
+		const missing = await reader.inspectTranscript(session);
+		assert.equal(missing.reason, "transcript-missing");
+		assert.deepEqual(missing.value, await reader.readTranscript(session));
+		const dir = path.join(home, "projects/-fixture/s");
+		await mkdir(dir, { recursive: true });
+		await writeFile(path.join(dir, "subagents"), "not a directory");
+		assert.equal((await reader.inspectTranscript(session)).reason, "subagent-unreadable");
+		assert.equal(await reader.readTranscript(session), null);
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});

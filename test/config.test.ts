@@ -54,6 +54,20 @@ test("refresh の既定値は有効・100k・180秒・30分、Codex の待機上
 		cooldownMinutes: 30,
 		codexIgnoreAfterMinutes: 120,
 	});
+	assert.deepEqual(CONFIG_TEMPLATE.concierge.refresh, {
+		enabled: true,
+		maxTokens: 100000,
+		maxEvents: 40,
+		contextPercent: 15,
+	});
+	assert.deepEqual(CONFIG_TEMPLATE.worker.refresh, {
+		enabled: true,
+		maxTokens: 100000,
+		contextPercent: 15,
+		idleSeconds: 180,
+		cooldownMinutes: 30,
+		codexIgnoreAfterMinutes: 120,
+	});
 });
 
 test("旧 maxEvents: 0 は全無効を保ち、enabled の明示を優先する", () => {

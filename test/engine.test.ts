@@ -1978,6 +1978,76 @@ function wakeStub(engine: Engine) {
 	return log;
 }
 
+test("refresh OFFでも配送・回答・phase・outbox再接続の業務動作を維持する", async () => {
+	let queued: number[] = [];
+	const { engine, home, discord } = setupEngine(5, async () => ({
+		ok: true,
+		stdout: JSON.stringify(queued.map((number) => ({ number }))),
+		stderr: "",
+	}));
+	engine.config.worker.refresh.enabled = false;
+	engine.config.concierge.refresh.enabled = false;
+	mkdirSync(path.join(home, ".claude"));
+	writeFileSync(path.join(home, ".claude/harness.json"), "{}");
+	await engine.start();
+	engine.ledger.upsertProject({ name: "k", repo: "x/k", path: home, active: true, mode: "harness" });
+	const log = wakeStub(engine);
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	let w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "k" });
+	try {
+		await until(() => engine.sessions.has("concierge") && engine.sessions.has("k"));
+		assert.ok(engine.targets().every((t) => t.refresh === undefined));
+		discord(msg("OFFでも届く", { id: "off-message" }));
+		assert.equal(
+			(await c.event((p) => (p.meta as Record<string, string>).message_id === "off-message")).content,
+			"Discord で jonnity からメッセージが届きました:\nOFFでも届く",
+		);
+		await c.tool("dispatch", { project: "k", text: "指示" });
+		assert.match((await w.event((p) => String(p.content).includes("指示"))).content, /指示/);
+		assert.ok(log.includes("request k dispatch"));
+		const { attention } = engine.ledger.addAttention({
+			project: "k",
+			kind: "interview",
+			title: "確認",
+			url: "",
+			issue: "1",
+			pr: "",
+			taskId: "",
+			summary: "",
+		});
+		await c.tool("attention_answer", { id: attention.id, answer: "続ける" });
+		assert.match(
+			(await w.event((p) => (p.meta as Record<string, string>).attention === attention.id)).content,
+			/続ける/,
+		);
+		assert.ok(log.includes(`request k 回答 ${attention.id}`));
+		await engine.call({ role: "cli", name: "" }, "notify", {
+			event: "phase",
+			project: "k",
+			issue: "1",
+			phase: "designing",
+		});
+		assert.equal(engine.ledger.findTaskByIssue("k", "1")?.phase, "designing");
+		w.stop();
+		await until(() => !engine.sessions.has("k"));
+		engine.deliver("k", "保留内容", { kind: "fixture" });
+		assert.match(readFileSync(path.join(home, "outbox/k.jsonl"), "utf8"), /保留内容/);
+		w = startChannel(home, { DLE_ROLE: "worker", DLE_PROJECT: "k" });
+		assert.match((await w.event((p) => (p.meta as Record<string, string>).kind === "fixture")).content, /保留内容/);
+		await until(() => log.includes("request k outbox"));
+		assert.equal(readFileSync(path.join(home, "outbox/k.jsonl"), "utf8"), "");
+		await engine.queueTick();
+		queued = [1];
+		await engine.queueTick();
+		assert.ok(log.includes("request k queued #1"));
+		assert.ok(!log.some((s) => /refresh|clear|checkpoint|resumed/.test(s)));
+	} finally {
+		w.stop();
+		c.stop();
+		await engine.stop();
+	}
+});
+
 test("dispatch と A-番号の回答は worker を起こし（tick ではなく wakeTick）、窓口宛には呼ばない", async () => {
 	const { engine, home } = setupEngine();
 	await engine.start();
