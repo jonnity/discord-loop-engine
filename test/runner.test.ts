@@ -13,6 +13,7 @@ import {
 	cmdRunner,
 	compareVersions,
 	countRecentLogs,
+	defaultDeps,
 	diskWarning,
 	type Exec,
 	type ExecResult,
@@ -29,6 +30,7 @@ import {
 	renderStatus,
 	renderStopCommands,
 	renderUpdateCommands,
+	renderUpdateFetchScript,
 	renderUpdateSwapScript,
 	resolveTargets,
 	runWithTimeout,
@@ -729,6 +731,210 @@ test("更新: 表示する手順は、メンバーを名指しして展開せず
 	assert.ok(!/token|TOKEN/.test(s));
 	assert.throws(() => renderUpdateCommands("../x", "2.338.3", "1001", "/h"));
 	assert.throws(() => renderUpdateCommands("a-1", "2.338.3; rm", "1001", "/h"));
+});
+
+// --- 更新手順の絶対パス・DLE_RUNNERS_DIR・README の手順 ----------------------------------------------
+
+const BAD_PATHS = [
+	"",
+	"relative",
+	"~/runner",
+	"/tmp/a b",
+	"/tmp/x';echo x",
+	"/tmp/x\n",
+	"/tmp/$x",
+	"/tmp/a\0b",
+	"/",
+	"/tmp/日本",
+];
+
+test("更新: DL と d は渡した home からの絶対パスで、~ を含まない", () => {
+	for (const home of ["/home/dle-runner", "/srv/dle-runner"]) {
+		const s = renderUpdateCommands("runner-1", "2.338.3", "1001", home);
+		assert.equal(s.includes("~"), false);
+		const lines = s.split("\n");
+		assert.equal(
+			lines.find((l) => l.startsWith("DL=")),
+			`DL=${home}/actions-runners/.dl`,
+		);
+		assert.equal(
+			lines.find((l) => l.startsWith("d=")),
+			`d=${home}/actions-runners/$N`,
+		);
+		assert.ok(s.includes(`pgrep -af '^${home}/actions-runners/runner-1/bin/Runner'`));
+	}
+});
+
+test("更新: 取得スクリプトの d は N と合わせた実パスになり、bash -n を通る", () => {
+	const dir = tmp();
+	try {
+		const home = path.join(dir, "runner-home");
+		const fetch = renderUpdateFetchScript("2.338.3", "runner-1", home);
+		const file = path.join(dir, "fetch.sh");
+		fs.writeFileSync(file, fetch);
+		assert.equal(fs.readFileSync(file, "utf8"), fetch);
+		assert.ok(fs.statSync(file).size > 0);
+		execFileSync("bash", ["-n", file]);
+		const pick = fetch.split("\n").filter((l) => /^(DL|d)=|^V=/.test(l));
+		const out = execFileSync("bash", ["-c", `${pick.join("\n")}\nprintf '%s\\n' "$DL" "$d"`], { encoding: "utf8" });
+		assert.equal(out, `${home}/actions-runners/.dl\n${home}/actions-runners/runner-1\n`);
+		assert.equal(fs.readdirSync(dir).includes("runner-home"), false, "何も作らない");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("更新: home が絶対パスでない・許可外の文字を含むときは、どちらの入口も拒否する", () => {
+	for (const home of BAD_PATHS) {
+		assert.throws(
+			() => renderUpdateCommands("runner-1", "2.338.3", "1001", home),
+			/ホームのパス/,
+			JSON.stringify(home),
+		);
+		assert.throws(() => renderUpdateFetchScript("2.338.3", "runner-1", home), /ホームのパス/, JSON.stringify(home));
+	}
+	assert.throws(() => renderUpdateFetchScript("2.338.3; rm", "runner-1", "/h"));
+	assert.throws(() => renderUpdateFetchScript("2.338.3", "../x", "/h"));
+});
+
+test("DLE_RUNNERS_DIR: 未指定と空文字は既定、絶対パスはそのまま、相対値と不正値は読み取り前に拒否する", async () => {
+	const calls: string[] = [];
+	const fake: Exec = async (cmd) => {
+		calls.push(cmd);
+		return cmd === "getent"
+			? { ok: true, stdout: "dle-runner:x:1001:1001::/srv/dle-runner:/bin/bash\n", stderr: "", timedOut: false }
+			: { ok: true, stdout: "1001\n", stderr: "", timedOut: false };
+	};
+	const saved = process.env.DLE_RUNNERS_DIR;
+	const withEnv = async <T>(v: string | undefined, f: () => Promise<T>): Promise<T> => {
+		if (v === undefined) delete process.env.DLE_RUNNERS_DIR;
+		else process.env.DLE_RUNNERS_DIR = v;
+		try {
+			return await f();
+		} finally {
+			if (saved === undefined) delete process.env.DLE_RUNNERS_DIR;
+			else process.env.DLE_RUNNERS_DIR = saved;
+		}
+	};
+	for (const v of [undefined, ""]) {
+		const d = await withEnv(v, () => defaultDeps(fake));
+		assert.equal(d.home, "/srv/dle-runner");
+		assert.equal(d.runnersDir, "/srv/dle-runner/actions-runners");
+	}
+	const ok = await withEnv("/tmp/fixture-runners", () => defaultDeps(fake));
+	assert.equal(ok.runnersDir, "/tmp/fixture-runners");
+	calls.length = 0;
+	for (const v of [
+		"relative/runners",
+		"./runners",
+		"../runners",
+		"~/runners",
+		"C:\\runners",
+		" ",
+		"/a b",
+		"/a;b",
+		"/a$b",
+		"/a`b",
+		"/a\n",
+		"/",
+		"/tmp/日本",
+	]) {
+		await withEnv(v, () => assert.rejects(() => defaultDeps(fake), /DLE_RUNNERS_DIR.*絶対パス/, JSON.stringify(v)));
+	}
+	assert.equal(calls.length, 0, "置き場の情報を読む前に止まる");
+});
+
+test("DLE_RUNNERS_DIR 未指定: getent の home が不正・取得不能なら従来どおり /home/dle-runner", async () => {
+	const saved = process.env.DLE_RUNNERS_DIR;
+	delete process.env.DLE_RUNNERS_DIR;
+	try {
+		for (const field of ["relative", "/a'b", ""]) {
+			const fake: Exec = async (cmd) =>
+				cmd === "getent"
+					? { ok: true, stdout: `dle-runner:x:1001:1001::${field}:/bin/bash\n`, stderr: "", timedOut: false }
+					: { ok: true, stdout: "1001\n", stderr: "", timedOut: false };
+			const d = await defaultDeps(fake);
+			assert.equal(d.home, "/home/dle-runner");
+			assert.equal(d.runnersDir, "/home/dle-runner/actions-runners");
+		}
+		const failing: Exec = async () => ({ ok: false, stdout: "", stderr: "x", timedOut: false });
+		assert.equal((await defaultDeps(failing)).home, "/home/dle-runner");
+	} finally {
+		if (saved !== undefined) process.env.DLE_RUNNERS_DIR = saved;
+	}
+});
+
+test("dle runner status: DLE_RUNNERS_DIR が相対値なら終了 1・stderr にだけ理由を出す", () => {
+	const dir = tmp();
+	try {
+		const r = spawnSync("bash", [path.join(ROOT, "bin/dle"), "runner", "status", "--json"], {
+			encoding: "utf8",
+			env: {
+				...process.env,
+				DLE_HOME: dir,
+				DLE_SOCKET: path.join(dir, "engine.sock"),
+				DLE_RUNNERS_DIR: "relative/runners",
+			},
+			timeout: 30_000,
+		});
+		assert.equal(r.status, 1);
+		assert.match(r.stderr, /DLE_RUNNERS_DIR.*絶対パス/);
+		assert.equal(r.stdout, "");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+// README の runner 手順は、貼り付けた 1 ブロックだけで動く（別ブロックの H・N・DR に頼らない）。目印コメントで選ぶ
+function runnerReadmeBlocks(): Map<string, string> {
+	const out = new Map<string, string>();
+	for (const m of read("README.md").matchAll(/```bash\n([\s\S]*?)```/g)) {
+		const body = m[1] ?? "";
+		const t = /^# \[dle-runner-block:([a-z-]+)\]\n/.exec(body);
+		if (t?.[1]) out.set(t[1], body);
+	}
+	return out;
+}
+
+test("README: runner の手順ブロックは単独で構文が通り、H と N を自分で定義・検証する", () => {
+	const blocks = runnerReadmeBlocks();
+	assert.deepEqual([...blocks.keys()], ["expand", "register", "baseline", "start", "restart", "remove"]);
+	const dir = tmp();
+	try {
+		for (const [name, b] of blocks) {
+			const f = path.join(dir, `${name}.sh`);
+			fs.writeFileSync(f, b);
+			execFileSync("bash", ["-n", f]);
+			assert.ok(b.includes("H=$(getent passwd dle-runner"), `${name}: H の定義`);
+			assert.ok(b.includes("^[a-z0-9][a-z0-9-]*$"), `${name}: N の検証`);
+			const hCheck = b.indexOf('[[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]]');
+			assert.ok(hCheck > b.indexOf("H=$(getent passwd dle-runner"), `${name}: H の検証行が定義の後に無い`);
+			const nCheck = b.indexOf("^[a-z0-9][a-z0-9-]*$");
+			assert.ok(nCheck > hCheck, `${name}: N の検証は H の検証の後`);
+			// 検証が、H・N を使う最初の位置より前（そのブロックに現れるものだけ）
+			for (const use of ["$H/actions-runners/$N", 'd="$H', "dle-runner@$N", '"$B/$N.sha256"', '--name "dle-$N"']) {
+				const at = b.indexOf(use);
+				if (at >= 0) assert.ok(nCheck < at, `${name}: 検証が ${use} の使用より前`);
+			}
+			assert.ok(!b.includes("<名前>"), `${name}: <名前> が残る`);
+			assert.ok(!/(?<!=)~/.test(b), `${name}: ~ が残る（正規表現の =~ は除く）`);
+			assert.ok(!/\bDR\b/.test(b), `${name}: 別ブロックの DR に頼る`);
+		}
+		const expand = blocks.get("expand") ?? "";
+		const exists = expand.indexOf('[[ ! -e "$H/actions-runners/$N" ]]');
+		assert.ok(exists > 0 && exists < expand.indexOf("install -d"), "展開先が既にあるときは install -d の前に止まる");
+		const base = blocks.get("baseline") ?? "";
+		const show = base.indexOf('printf \'%s\\n\' "$R_SUMS" "$H_SUMS"');
+		const ask = base.indexOf("yes: ");
+		const save = base.indexOf("sudo tee");
+		assert.ok(show > 0 && show < ask && ask < save, "基準値は保存前に表示し、yes で確認してから保存する");
+		const reg = blocks.get("register") ?? "";
+		assert.match(reg, /sudo -H -u dle-runner bash -s/);
+		assert.match(reg, /--name "dle-\$N" --work "\$d\/_work"/);
+		assert.ok(reg.includes("--labels dle </dev/null"), "config.sh は標準入力を受け継がない");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
 });
 
 // --- テンプレート ----------------------------------------------------------------------------------

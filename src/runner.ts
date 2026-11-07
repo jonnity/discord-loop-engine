@@ -698,27 +698,43 @@ export function renderUpdateSwapScript(): string {
 	].join("\n");
 }
 
-/** 更新の取得（bash）。sha256 が取れない・一致しないときは、何も変更せずに中止する */
-export function renderUpdateFetchScript(version: string, name: string): string {
+/**
+ * 絶対パスで、許可文字（英数字・.・_・/・-）だけのとき真。文字列の形だけを見る（展開・正規化・I/O はしない）。
+ * 否定形（許可外の文字が 1 つも無い）で書くのは、isAbsolute などの条件と並べて読みやすくするため。判定の結果は肯定形と変わらない
+ */
+function isSafeAbsolutePath(value: string): boolean {
+	return path.isAbsolute(value) && value.length > 1 && !/[^A-Za-z0-9._/-]/.test(value);
+}
+
+const HOME_PATH_ERROR = "ホームのパスは許可された文字の絶対パスで指定してください";
+
+/**
+ * 更新の取得（bash）。sha256 が取れない・一致しないときは、何も変更せずに中止する。
+ * 出力は dle runner update が表示し、利用者が貼り付けて実行する。`~` は実行した子シェルの HOME で決まる
+ * （sudo -H の有無で変わる）ので使わず、検証済みの home を埋め込む
+ */
+export function renderUpdateFetchScript(version: string, name: string, home: string): string {
 	if (!VERSION_RE.test(version)) throw new Error(`バージョンの書式が違います: ${sanitize(version)}`);
 	if (!NAME_RE.test(name)) throw new Error(`名前の書式が違います: ${sanitize(name)}`);
+	if (!isSafeAbsolutePath(home)) throw new Error(HOME_PATH_ERROR);
 	return [
 		"set -euo pipefail",
 		`V=${version}; N=${name}`,
 		'SHA=$(curl -fsSL "https://api.github.com/repos/actions/runner/releases/tags/v$V" \\',
 		"  | sed -n 's/.*BEGIN SHA linux-x64 -->\\([0-9a-f]\\{64\\}\\)<!-- END SHA linux-x64.*/\\1/p' | head -1)",
 		'test -n "$SHA" || { echo "sha256 が取れないので中止（何も変更していない）" >&2; exit 1; }',
-		"DL=~/actions-runners/.dl",
+		`DL=${home}/actions-runners/.dl`,
 		'F="$DL/actions-runner-linux-x64-$V.tar.gz"',
 		'mkdir -p "$DL"',
 		'curl -fsSL -o "$F" "https://github.com/actions/runner/releases/download/v$V/actions-runner-linux-x64-$V.tar.gz"',
 		'echo "$SHA  $F" | sha256sum -c - >&2 || { echo "sha256 が一致しないので中止（何も変更していない）" >&2; exit 1; }',
-		"d=~/actions-runners/$N",
+		`d=${home}/actions-runners/$N`,
 	].join("\n");
 }
 
 /** オーナーが実行する更新の手順（1 つの runner 分） */
 export function renderUpdateCommands(name: string, version: string, uid: string, home: string): string {
+	if (!isSafeAbsolutePath(home)) throw new Error(HOME_PATH_ERROR);
 	const stop = systemctlCommand(uid, "stop", name);
 	const start = systemctlCommand(uid, "start", name);
 	return [
@@ -726,7 +742,7 @@ export function renderUpdateCommands(name: string, version: string, uid: string,
 		stop,
 		`pgrep -af '^${home}/actions-runners/${name}/bin/Runner'   # 空であること（孤児が残っていない）`,
 		`sudo -H -u ${RUNNER_USER} bash -s <<'EOF'`,
-		renderUpdateFetchScript(version, name),
+		renderUpdateFetchScript(version, name, home),
 		renderUpdateSwapScript(),
 		"EOF",
 		start,
@@ -737,9 +753,15 @@ export function renderUpdateCommands(name: string, version: string, uid: string,
 // --- dle runner の本体 --------------------------------------------------------------------------
 
 export async function defaultDeps(exec: Exec = runWithTimeout): Promise<StatusDeps & { uid: string | null }> {
+	// 相対値などを既定へ戻すと、指定した置き場でなく本物の runner 置き場を調べてしまうので、読み取りの前に止める
+	// （空文字は従来どおり未指定と同じ）
+	const override = process.env.DLE_RUNNERS_DIR;
+	if (override && !isSafeAbsolutePath(override)) {
+		throw new Error("DLE_RUNNERS_DIR は許可された文字（英数字・.・_・/・-）の絶対パスで指定してください");
+	}
 	const g = await exec("getent", ["passwd", RUNNER_USER], 5_000);
 	const homeField = g.ok ? g.stdout.trim().split(":")[5] : undefined;
-	const home = homeField && /^\/[A-Za-z0-9._/-]+$/.test(homeField) ? homeField : `/home/${RUNNER_USER}`;
+	const home = homeField && isSafeAbsolutePath(homeField) ? homeField : `/home/${RUNNER_USER}`;
 	const id = await exec("id", ["-u", RUNNER_USER], 5_000);
 	const uid = id.ok && /^\d+$/.test(id.stdout.trim()) ? id.stdout.trim() : null;
 	return {
@@ -748,7 +770,7 @@ export async function defaultDeps(exec: Exec = runWithTimeout): Promise<StatusDe
 		uid,
 		// DLE_RUNNERS_DIR はテスト用に runner の置き場所を変える。jonnity の環境変数なので job には届かない
 		// （status が信用するのは dle-runner の領域の中身であって、この変数ではない）
-		runnersDir: process.env.DLE_RUNNERS_DIR || path.join(home, "actions-runners"),
+		runnersDir: override || path.join(home, "actions-runners"),
 		baselineDir: "/usr/local/libexec/dle/baseline",
 		now: Date.now(),
 		interopFile: "/proc/sys/fs/binfmt_misc/WSLInterop",
