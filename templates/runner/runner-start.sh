@@ -17,12 +17,15 @@
 #   ユニットの UnsetEnvironment= で、manager の環境からは引き継がない。
 #
 # PATH: 確認処理（getent・stat・sed・head・curl）は /usr/bin:/bin のまま。run.sh に exec する直前だけ、
-#   固定の /usr/local/bin:/usr/bin:/bin:<home>/.cargo/bin を渡す（job が pwsh・rustup を使えるように）。
-#   値は固定のリテラルと getent の結果だけで組み立て、呼び出し元の PATH・DLE_*・ユニットの Environment=PATH は見ない。
+#   固定の /usr/local/bin:/usr/bin:/bin:<runner>/.cargo/bin を渡す（job が pwsh・rustup を使えるように）。
+#   値は固定のリテラルと getent の結果を基にした runner の場所から組み立て、呼び出し元の PATH・ユニットの Environment=PATH は見ない。
+# Why not HOME_DIR だけで判定: 実際の値は ROOT/name から組むため、差し替え先にも相対パスや : が入りうる。
+#   DLE_RUNNERS_ROOT はテスト用で、ユニットでは UnsetEnvironment= により消えるが、直接起動でも不正な PATH を作らない。
 # Why not 冒頭の PATH を広げる: 確認処理が /usr/local/bin のコマンドの差し替えに影響される。
 # Why not 環境変数の HOME: manager 経由で入りうる。getent の結果（HOME_DIR）を使う。
 # .cargo/bin を最後に置く理由: dle-runner が書ける場所なので、system ディレクトリのコマンドを同名で隠させない。
-# HOME_DIR が相対パスや : 入りのときは .cargo/bin を足さない（cd "$dir" の後に相対要素が PATH に入る・要素が分割される）。
+# dir が相対パスや : 入りのときは .cargo/bin を足さない（cd "$dir" の後に相対要素が PATH に入る・要素が分割される）。
+# 同じ場合は Rust の2 homeも注入せず、既存どおり呼出元の値を引き継ぐ。正常時だけ runner ごとの値へ置き換える。
 
 set -u
 export PATH=/usr/bin:/bin
@@ -66,7 +69,13 @@ case $code in
 404)
 	cd "$dir" || exit 75
 	run_path=/usr/local/bin:/usr/bin:/bin
-	case $HOME_DIR in /*:* | [!/]*) ;; *) run_path=$run_path:$HOME_DIR/.cargo/bin ;; esac
+	case $dir in
+	/*:* | [!/]*) ;;
+	*)
+		export CARGO_HOME="$dir/.cargo" RUSTUP_HOME="$dir/.rustup"
+		run_path=$run_path:$CARGO_HOME/bin
+		;;
+	esac
 	PATH="$run_path" exec "$dir/run.sh"
 	;;
 200) exit 71 ;;

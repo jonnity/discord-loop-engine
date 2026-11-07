@@ -371,6 +371,34 @@ test("状態: 全て正常なら終了コード 0。表に runner・リポジト
 	assert.equal(r.runners[0]?.private, true);
 });
 
+test("状態: 個別Rustを追加しても基準値・表・JSON・警告・_workだけの容量を変えない", async () => {
+	const fx = fixture(["oogiri-doc-1"], { listening: ["oogiri-doc-1"] });
+	try {
+		const before = await buildStatus(fx.deps);
+		addRustFiles(fx.dir("oogiri-doc-1"));
+		const after = await buildStatus(fx.deps);
+		assert.deepEqual(after, before);
+		for (const json of [false, true]) assert.equal(renderStatus(after, json), renderStatus(before, json));
+
+		assert.deepEqual(
+			fx.calls.filter((c) => c[0] === "du"),
+			[
+				["du", "-sk", path.join(fx.dir("oogiri-doc-1"), "_work")],
+				["du", "-sk", path.join(fx.dir("oogiri-doc-1"), "_work")],
+			],
+		);
+		for (const f of [".env", ".path"]) {
+			fs.writeFileSync(path.join(fx.dir("oogiri-doc-1"), f), "CARGO_HOME=/old/shared\n");
+			assert.deepEqual((await buildStatus(fx.deps)).runners[0]?.warnings, ["設定の改変の疑い"]);
+			fs.rmSync(path.join(fx.dir("oogiri-doc-1"), f));
+		}
+		fs.mkdirSync(path.join(fx.home, ".config/systemd/user/dle-runner@.service.d"));
+		assert.deepEqual((await buildStatus(fx.deps)).global, ["設定の改変の疑い"]);
+	} finally {
+		fs.rmSync(fx.root, { recursive: true, force: true });
+	}
+});
+
 test("状態: 無効化した runner の停止は警告にならず終了コード 0、enabled のまま Listener がいなければ異常停止", async () => {
 	const stopped = fixture(["oogiri-doc-1"], { enabled: [] });
 	const r1 = await buildStatus(stopped.deps);
@@ -648,6 +676,19 @@ function makeArchive(opts: { listener?: boolean } = {}): { file: string; dir: st
 	return { file, dir };
 }
 
+const RUST_FILES = [".cargo/bin/rustup", ".rustup/settings.toml", ".rustup/toolchains/stable/bin/rustc"];
+
+function addRustFiles(d: string) {
+	for (const f of RUST_FILES) {
+		fs.mkdirSync(path.dirname(path.join(d, f)), { recursive: true });
+		fs.writeFileSync(path.join(d, f), `keep ${f}`);
+	}
+}
+
+function rustHashes(d: string) {
+	return RUST_FILES.map((f) => sha(path.join(d, f)));
+}
+
 function runnerDir(): string {
 	const d = path.join(tmp(), "oogiri-doc-1");
 	fs.mkdirSync(path.join(d, "bin"), { recursive: true });
@@ -658,6 +699,7 @@ function runnerDir(): string {
 	for (const f of ["run.sh", "env.sh", "config.sh"]) fs.writeFileSync(path.join(d, f), `old ${f}`); // run-helper.sh.template は旧版に無い
 	for (const f of [".runner", ".env", ".path", ".credentials"]) fs.writeFileSync(path.join(d, f), `keep ${f}`);
 	fs.writeFileSync(path.join(d, "_work", "job"), "keep");
+	addRustFiles(d);
 	return d;
 }
 
@@ -670,6 +712,7 @@ function swap(d: string, archive: string, env: NodeJS.ProcessEnv = {}) {
 
 test("更新: メンバー名が ./ 付きのアーカイブで差し替えが通り、設定と作業は触られない", () => {
 	const d = runnerDir();
+	const rustBefore = rustHashes(d);
 	const a = makeArchive();
 	const r = swap(d, a.file);
 	assert.equal(r.status, 0, r.stderr);
@@ -679,6 +722,7 @@ test("更新: メンバー名が ./ 付きのアーカイブで差し替えが�
 	for (const f of [".runner", ".env", ".path", ".credentials"])
 		assert.equal(fs.readFileSync(path.join(d, f), "utf8"), `keep ${f}`);
 	assert.equal(fs.readFileSync(path.join(d, "_work", "job"), "utf8"), "keep");
+	assert.deepEqual(rustHashes(d), rustBefore);
 	assert.deepEqual(fs.readdirSync(r.dl), []); // 一時ディレクトリが残らない
 });
 
@@ -704,6 +748,7 @@ test("更新: tar が失敗しても一時ディレクトリを残さず、何�
 
 test("更新: 差し替えの途中で失敗したら、退避から戻し、新規に置いたものと一時ディレクトリを消す", () => {
 	const d = runnerDir();
+	const rustBefore = rustHashes(d);
 	const a = makeArchive();
 	// env.sh を新しいものに替える mv だけを失敗させる（run-helper.sh.template は env.sh より先に新規で置かれる）
 	const bashEnv = path.join(a.dir, "bash_env");
@@ -718,6 +763,7 @@ test("更新: 差し替えの途中で失敗したら、退避から戻し、新
 	assert.ok(!fs.existsSync(path.join(d, "bin.dle-bak")));
 	assert.deepEqual(fs.readdirSync(r.dl), [], "一時ディレクトリも消す");
 	for (const f of [".runner", ".env", ".path"]) assert.equal(fs.readFileSync(path.join(d, f), "utf8"), `keep ${f}`);
+	assert.deepEqual(rustHashes(d), rustBefore);
 });
 
 test("更新: 表示する手順は、メンバーを名指しして展開せず、書式違反の名前・バージョンを拒否する", () => {
@@ -891,14 +937,20 @@ function runnerReadmeBlocks(): Map<string, string> {
 	for (const m of read("README.md").matchAll(/```bash\n([\s\S]*?)```/g)) {
 		const body = m[1] ?? "";
 		const t = /^# \[dle-runner-block:([a-z-]+)\]\n/.exec(body);
-		if (t?.[1]) out.set(t[1], body);
+		if (t?.[1]) {
+			assert.ok(!out.has(t[1]), `${t[1]} の marker が重複している`);
+			out.set(t[1], body);
+		}
 	}
 	return out;
 }
 
 test("README: runner の手順ブロックは単独で構文が通り、H と N を自分で定義・検証する", () => {
 	const blocks = runnerReadmeBlocks();
-	assert.deepEqual([...blocks.keys()], ["expand", "register", "baseline", "start", "restart", "remove"]);
+	assert.deepEqual(
+		[...blocks.keys()],
+		["expand", "register", "baseline", "start", "restart", "rust-before", "rust-bootstrap", "rust-after", "remove"],
+	);
 	const dir = tmp();
 	try {
 		for (const [name, b] of blocks) {
@@ -924,6 +976,9 @@ test("README: runner の手順ブロックは単独で構文が通り、H と N 
 		const exists = expand.indexOf('[[ ! -e "$H/actions-runners/$N" ]]');
 		assert.ok(exists > 0 && exists < expand.indexOf("install -d"), "展開先が既にあるときは install -d の前に止まる");
 		const base = blocks.get("baseline") ?? "";
+		const targets = /R_SUMS=\$\(for f in ([^;]+); do/.exec(base)?.[1]?.trim().split(/\s+/) ?? [];
+		assert.ok(targets.length > 0);
+		for (const target of targets) assert.ok(RUNNER_BASELINE_FILES.includes(target), target);
 		const show = base.indexOf('printf \'%s\\n\' "$R_SUMS" "$H_SUMS"');
 		const ask = base.indexOf("yes: ");
 		const save = base.indexOf("sudo tee");
@@ -932,6 +987,184 @@ test("README: runner の手順ブロックは単独で構文が通り、H と N 
 		assert.match(reg, /sudo -H -u dle-runner bash -s/);
 		assert.match(reg, /--name "dle-\$N" --work "\$d\/_work"/);
 		assert.ok(reg.includes("--labels dle </dev/null"), "config.sh は標準入力を受け継がない");
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("README: Rust の記録・導入・配布・環境照合・rollbackを安全な順序で案内する", () => {
+	const blocks = runnerReadmeBlocks();
+	const before = blocks.get("rust-before") ?? "";
+	const bootstrap = blocks.get("rust-bootstrap") ?? "";
+	const after = blocks.get("rust-after") ?? "";
+	const ordered = (body: string, parts: string[]) => {
+		let pos = -1;
+		for (const part of parts) {
+			const next = body.indexOf(part);
+			assert.ok(next > pos, `${part} が無いか順序が違う`);
+			pos = next;
+		}
+	};
+	ordered(before, ["u=$(id -u dle-runner)", "pgrep -af", 'mkdir -p "$E"', "systemctl --user stop"]);
+	ordered(before, ["pgrep -af", "rc=$?", '[[ "$rc" -eq 1 ]]']);
+	assert.ok(before.includes(`worker_re=\${d//./\\\\.}`), "pgrep のパターンで . をエスケープする");
+	assert.ok(before.includes('sha256sum "$E/runner-start.before.sh" "$E/unit.before" > "$E/before.sha256"'));
+	assert.ok(before.includes('cat "$E/before.sha256"'), "before の期待ハッシュを所有者が別途保持できるよう表示する");
+	for (const body of [before, after]) {
+		ordered(body, ['O=$(getent passwd "$(id -un)"', '[[ "$O" =~', 'E="$O/.local/state/dle-runner-rust/$N"']);
+		assert.ok(body.includes("sudo -H -u dle-runner"));
+	}
+	for (const part of [
+		'[[ ! -e "$d/.cargo" && ! -L "$d/.cargo" ]]',
+		'[[ ! -e "$d/.rustup" && ! -L "$d/.rustup" ]]',
+		"I=$(mktemp)",
+		"trap 'rm -f -- \"$I\"' EXIT",
+		'HOME="$H"',
+		'CARGO_HOME="$d/.cargo" RUSTUP_HOME="$d/.rustup"',
+		"--no-modify-path --profile minimal --default-toolchain none",
+		'sudo -H -u dle-runner test -x "$d/.cargo/bin/rustup"',
+	])
+		assert.ok(bootstrap.includes(part), part);
+	for (const part of [
+		'PID=$(ps -eo pid=,args= | awk -v exe="$d/bin/Runner.Listener"',
+		'cat "/proc/$PID/environ"',
+		'"HOME=$H"',
+		'"CARGO_HOME=$d/.cargo"',
+		'"RUSTUP_HOME=$d/.rustup"',
+		'"PATH=/usr/local/bin:/usr/bin:/bin:$d/.cargo/bin"',
+	])
+		assert.ok(after.includes(part), part);
+	ordered(after, [
+		"umask 077",
+		'mkdir -p "$E"',
+		"systemctl --user show",
+		'cat "/proc/$PID/environ"',
+		'grep -Fxq -- "PATH=/usr/local/bin:/usr/bin:/bin:$d/.cargo/bin"',
+		'if test -s "$E/usage.before"; then',
+		'du -s -B1 "$d/.cargo" "$d/.rustup"',
+		'cat "$E/usage.before"',
+		'diff -u "$E/df.before" "$E/df.after"',
+		"else",
+		"fi",
+	]);
+	assert.ok(!after.includes("-p Environment"));
+	assert.ok(!after.slice(0, after.indexOf('if test -s "$E/usage.before"; then')).includes('test -s "$E/usage.before"'));
+	const doc =
+		read("README.md").split("#### Rust の分離・導入・復旧")[1]?.split("#### 実機で確認していないこと")[0] ?? "";
+	assert.ok(doc.length > 0);
+	for (const m of doc.matchAll(/```bash\n([\s\S]*?)```/g)) {
+		const body = m[1] ?? "";
+		assert.ok(body.trim().length > 0);
+		const r = spawnSync("bash", ["-n"], { input: body, encoding: "utf8" });
+		assert.equal(r.status, 0, r.stderr);
+	}
+	const rollbacks = [...read("README.md").matchAll(/```bash\n(# \[dle-runner-rollback\]\n[\s\S]*?)```/g)];
+	assert.equal(rollbacks.length, 1);
+	const rollback = rollbacks[0]?.[1] ?? "";
+	ordered(rollback, [
+		"R=/absolute/path/to/discord-loop-engine",
+		'[[ "$R" =~',
+		"C=レビューした40桁のコミットID",
+		'[[ "$C" =~',
+		"S=事前確認した64桁のSHA256",
+		'[[ "$S" =~',
+		'git -C "$R" show "$C:templates/runner/runner-start.sh" > "$I"',
+		'"$S" "$I" | sha256sum -c -',
+		'bash -n "$I"',
+		"sudo install",
+		'"$S" /usr/local/libexec/dle/runner-start.sh | sudo sha256sum -c -',
+	]);
+	assert.ok(!rollback.includes("$E/"));
+
+	assert.ok(!/\bA-\d|回答待ち|\.harness\/|rust-inspect|2026-11-/.test(doc));
+	assert.match(renderUpdateSwapScript(), /FILES="bin externals run.sh run-helper.sh.template env.sh config.sh"/);
+});
+
+test("README: 新規登録の rust-after は容量記録なしで4環境値を照合し、不一致なら失敗する", () => {
+	const dir = tmp();
+	try {
+		const home = path.join(dir, "runner-home");
+		const owner = path.join(dir, "owner");
+		const evidence = path.join(owner, ".local/state/dle-runner-rust/oogiri-doc-1");
+		const body = runnerReadmeBlocks().get("rust-after") ?? "";
+		const fake = `
+getent() { if [ "$2" = dle-runner ]; then printf 'runner:x:1001:1001::%s:/bin/bash\\n' "$TEST_HOME"; else printf 'owner:x:1000:1000::%s:/bin/bash\\n' "$TEST_OWNER"; fi; }
+id() { if [ "$1" = -un ]; then echo owner; else echo 1001; fi; }
+test() { if [ "$*" = '-s /usr/local/libexec/dle/baseline/oogiri-doc-1.sha256' ]; then return 0; else builtin test "$@"; fi; }
+ps() { printf '123 %s/actions-runners/oogiri-doc-1/bin/Runner.Listener run\\n' "$TEST_HOME"; }
+sudo() {
+  [[ "$1 $2 $3" = '-H -u dle-runner' ]] || return 99
+  shift 3
+  case "$1" in
+    test) return 0 ;;
+    env) printf 'ActiveState=active\\nMainPID=123\\n' ;;
+    cat)
+      [[ "$2" = /proc/123/environ ]] || return 99
+      printf '%s\\0' "HOME=$TEST_EXEC_HOME" "CARGO_HOME=$TEST_CARGO" "RUSTUP_HOME=$TEST_RUSTUP" "PATH=$TEST_PATH"
+      ;;
+    *) return 99 ;;
+  esac
+}
+df() { echo '容量を測定してはいけない' >&2; return 99; }
+`;
+		const d = `${home}/actions-runners/oogiri-doc-1`;
+		const expected = {
+			TEST_HOME: home,
+			TEST_EXEC_HOME: home,
+			TEST_CARGO: `${d}/.cargo`,
+			TEST_RUSTUP: `${d}/.rustup`,
+			TEST_PATH: `/usr/local/bin:/usr/bin:/bin:${d}/.cargo/bin`,
+		};
+		for (const mismatch of [null, "TEST_EXEC_HOME", "TEST_CARGO", "TEST_RUSTUP", "TEST_PATH"]) {
+			fs.rmSync(evidence, { recursive: true, force: true });
+			const r = spawnSync("bash", ["-s"], {
+				input: fake + body,
+				encoding: "utf8",
+				env: {
+					PATH: "/usr/bin:/bin",
+					TEST_OWNER: owner,
+					...expected,
+					...(mismatch ? { [mismatch]: "/wrong" } : {}),
+				},
+			});
+			assert.equal(r.status, mismatch ? 1 : 0, r.stderr);
+			assert.equal(fs.existsSync(path.join(evidence, "usage.after")), false);
+			assert.equal(fs.existsSync(path.join(evidence, "df.after")), false);
+			assert.equal(fs.existsSync(path.join(evidence, "exec-env.after")), true);
+		}
+	} finally {
+		fs.rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("README: rust-before の busy・確認失敗では E を作らず sudo も呼ばない", () => {
+	const dir = tmp();
+	try {
+		const home = path.join(dir, "runner.home");
+		const owner = path.join(dir, "owner");
+		fs.mkdirSync(path.join(home, "actions-runners/oogiri-doc-1"), { recursive: true });
+		fs.mkdirSync(owner);
+		const body = runnerReadmeBlocks().get("rust-before") ?? "";
+		const fake = `
+getent() { if [ "$2" = dle-runner ]; then printf 'runner:x:1001:1001::%s:/bin/bash\\n' "$TEST_HOME"; else printf 'owner:x:1000:1000::%s:/bin/bash\\n' "$TEST_OWNER"; fi; }
+id() { if [ "$1" = -un ]; then echo owner; else echo 1001; fi; }
+pgrep() {
+  [[ "$TEST_HOME/actions-runners/oogiri-doc-1/bin/Runner.Worker spawn" =~ $2 ]] || exit 99
+  [[ ! "\${TEST_HOME//./x}/actions-runners/oogiri-doc-1/bin/Runner.Worker spawn" =~ $2 ]] || exit 99
+  return "$TEST_PGREP_RC"
+}
+sudo() { echo 'sudo を呼んではいけない' >&2; exit 99; }
+`;
+		for (const rc of [0, 2]) {
+			const r = spawnSync("bash", ["-s"], {
+				input: fake + body,
+				encoding: "utf8",
+				env: { PATH: "/usr/bin:/bin", TEST_HOME: home, TEST_OWNER: owner, TEST_PGREP_RC: String(rc) },
+			});
+			assert.equal(r.status, rc === 0 ? 1 : 2, r.stderr);
+			assert.ok(!r.stderr.includes("sudo を呼んではいけない"));
+			assert.ok(!fs.existsSync(path.join(owner, ".local/state/dle-runner-rust/oogiri-doc-1")));
+		}
 	} finally {
 		fs.rmSync(dir, { recursive: true, force: true });
 	}
@@ -956,6 +1189,7 @@ test("ユニット: ラッパー・再起動・停止・差し替え変数・サ
 	has("InaccessiblePaths=-/run/WSL");
 	has("InaccessiblePaths=-/mnt/wslg");
 	has("WantedBy=default.target");
+	assert.ok(!lines.some((l) => /^Environment=.*(?:CARGO_HOME|RUSTUP_HOME)=/.test(l)));
 	for (const bad of [
 		"Restart=on-failure",
 		"KillMode=process",
