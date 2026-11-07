@@ -233,7 +233,156 @@ esac
 # AUTH_PROBE_END
 ```
 
+## 実 diff の分類と軽い経路
+
+Phase 1 の本文・要件メモ・context・notes の確認は全件行う。既存 PR/branch の WT があれば、
+worker が既存の fetch 手順で base を更新してから次を実行する。新規 Issue は Phase 2 で WT を作り、
+空 diff は normal のまま設計・設計レビューへ進む。予定ファイル名や作者から light を推測しない。
+この節の分類を実装/レビュー前後・コミット後・gate 前後・PR 更新を見た tick・CI 修正後・rebase 後・
+承認依頼直前・merge 呼出直前にも実行する。既存 PR は毎回 `ROUTE_PR` に番号を渡す。
+
+`ROUTE_HISTORY_KNOWN=1` は、新規着手または認証投稿者の GitHub 進捗と現 diff を照合して昇格歴が
+ないと確認した場合だけ設定する。消失・破損・別 project/issue のローカル記録から履歴を推測しない。
+復元不能なら通常へ固定して再レビュー。JSON は改ざん耐性のない記録で、人の OK の代わりにはならない。
+
+```bash
+# ROUTE_CHECK_BEGIN
+route_args=()
+[ -z "${ROUTE_PR:-}" ] || route_args=(--pr "$ROUTE_PR")
+route_rc=0
+route_json="$(harness-gate --classify "${route_args[@]}" -- "$WT")" || route_rc=$?
+[ "$route_rc" = 0 ] || exit "$route_rc"
+if ! jq -e 'type == "object" and .version == 1 and .policyVersion == 1 and
+  (.route == "light" or .route == "normal") and (.project | type == "string" and length > 0) and
+  (.fingerprint | type == "string" and length > 0) and (.headOid | type == "string" and length > 0) and
+  (.baseOid | type == "string" and length > 0) and (.dirty | type == "boolean")' <<<"$route_json" >/dev/null; then exit 3; fi
+route_file="$WT/.harness/route-{n}.json"
+route_previous='{}'
+route_history=false
+if [ -f "$route_file" ] && [ ! -L "$route_file" ] && jq -e --argjson issue {n} --arg project "$(jq -r .project <<<"$route_json")" \
+  '.version == 1 and .policyVersion == 1 and .issue == $issue and .project == $project and
+   (.route == "light" or .route == "normal") and (.promoted | type == "boolean")' "$route_file" >/dev/null 2>&1; then
+  route_previous="$(cat "$route_file")"
+  route_history=true
+elif [ "${ROUTE_HISTORY_KNOWN:-0}" = 1 ] && [ ! -e "$route_file" ]; then
+  route_history=true
+fi
+route_json="$(jq -c --argjson issue {n} --argjson previous "$route_previous" --argjson known "$route_history" '
+  .issue = $issue |
+  .promoted = (($known | not) or ($previous.promoted == true) or ($previous.route == "light" and .route == "normal")) |
+  if .promoted then .route = "normal" else . end
+' <<<"$route_json")" || exit 3
+route_tmp="$(mktemp "$WT/.harness/route-{n}.XXXXXX")" || exit 3
+trap 'rm -f -- "$route_tmp"' EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+printf '%s\n' "$route_json" > "$route_tmp" && mv -f -- "$route_tmp" "$route_file" || exit 3
+trap - EXIT HUP INT TERM
+ROUTE="$(jq -r .route <<<"$route_json")"
+# ROUTE_CHECK_END
+```
+
+非0・不正 JSON・API/履歴取得不能の時は承認依頼/merge を呼ばない。理由を記録し、解消不能なら
+既存 `harness-phase {n} blocked --comment-file ...` を使う。normal は品質検査の失敗ではない。
+一度 light を採用した後 normal になれば、その Issue は通常へ固定する。変更を戻しても light へ戻さない。
+`harness-phase {n} designing` → 現 diff の設計 → Phase 3 の二段階レビュー → 必要な実装修正 →
+通常実装二段階レビューへ戻す。実装済みを理由に設計レビューを飛ばさず、元の diff も消さない。
+空 diff のため初めから normal だった Issue は昇格固定と区別し、実装後の light 判定を認める。
+
+初回分類が light なら以降の設計作成/設計レビューは生成せず、次の依頼を作る。
+既に終わった設計は履歴として残し、省略回数に数えない。追加実装不要ならそのまま軽い実装レビューへ。
+
+````bash
+# LIGHT_REQUEST_BEGIN
+[ "$ROUTE" = light ] || exit 3
+light_gate="$(harness-config '.gate' '')" || exit 3
+jq -e 'type == "array" and length > 0' <<<"$light_gate" >/dev/null || exit 3
+cat > "$WT/.harness/prompt-impl-{n}.md" <<EOF
+.harness/issue-{n}.md の本文・要件メモと .harness/notes.md に従って実装してください。
+先に $(harness-config '.context | join(", ")' AGENTS.md) を読んでください。
+テストを先に書き、既存テストを壊さないこと。
+完了したら .harness/impl/{n}.md に変更ファイル・受け入れ条件ごとの確認方法・humanChecks・合意項目・未実装の制限を書いてください。
+下記チェックリストの「実装依頼の項目」を満たし、非該当なら理由をサマリに書いてください。
+Issue と無関係な差分は元の内容に戻し、戻せなければサマリで worker へ報告してください。
+Codex は git add/commit/push/checkout/stash 等の git 操作をしないこと。書込みはこの WT 内だけ。
+EOF
+cat >> "$WT/.harness/prompt-impl-{n}.md" <<'LIGHT_CHECKLIST'
+
+設計品質チェックリスト（正本。レビューと再依頼でもこの依頼ファイルを参照する）:
+
+常に確かめる項目:
+- 先頭に人向けの要約と Issue 本文の受け入れ条件の逐語引用を置く。番号を復元・推定しない。
+  要件メモの回答と引用元は別記する。入力に本文がなければ harness-issue-md または GitHub の読取りで
+  再取得し、取得できなければ不足を明記して確定設計にしない。
+  解釈を含む具体化（文言・式・数値例など）は「確定要件」とせず「解釈」と明記する。
+- 現状の各記述には `path:line` の根拠を付け、新しい提案と区別する。lockfile・テストランナーの探索/除外等の
+  挙動を前提にする場合は安全な一時ディレクトリで一度実行し、コマンド・終了コード・結果・実ファイルの検証を記す。
+- 添付されたプロジェクトの gate が非空の配列なら、そのコマンド列・順序を実装後の確認手順に明示する。
+  format / lint / test / build など、gate にある検査を省略しない。新しいテストファイルがその対象に入るか、
+  glob・除外設定・呼び出し元も確かめる。gate 未定義・空・配列以外は未確認として記し、CI との対応を確認する手順を残す。
+- 実装環境で道具の存在と機能を確認して検証手順を選ぶ。ログだけで成功にせず、成果物ファイルの
+  存在・サイズ・内容/形式を調べる。シェル例の `$VAR` や `$(...)` も実際の環境で使える形にする。
+- 環境の前提（認証の疎通・self-hosted ランナー）を先に確認し、受け入れ条件ごとのテスト/確認手順と
+  自動では確認できない humanChecks、未確認の前提を明記する。
+
+該当するときだけの項目（非該当なら理由を書く）:
+- 要素・フロー・画面・出力を廃止する場合は、その要素のためだけにあった表示（UI・CLI の出力・通知の文面）を
+  洗い出し、残すか消すかを設計に書く。
+- 動画利用時は要件メモの開始状態・操作順・終了状態・含めないものを、設計シナリオ・試験・humanChecks に
+  全て対応させる。未決範囲は Phase 1 へ戻し、「最小」「実装者判断」で確定しない。
+- リポジトリに憲章・規約のレビューゲートがある場合は、そのファイルと該当節を挙げ、節ごとに満たす確認を
+  自動テストまたは humanChecks に対応付ける。
+- 設定ファイルを変える Issue では、スキーマ検証に加え、要件で指定された値を期待値との assert で確かめる。
+  型や形式が正しいだけで、異なる値が通る確認にしない。
+- 外部ツール・API は公式資料または使うラッパーの実装/README の URL・確認日・既知の制限を調べ、
+  最小プローブで実効性を確かめる。ツールのメジャー版を上げる場合は、連携するツール/セットアップ手段の対応版を
+  一次情報で確かめる。未実行なら理由・影響・後の確認手順を未確定事項に残す。
+  確かめられない環境依存は「PR CI の実ログを根拠に 1 回だけ直し、だめなら blocked で人に返す」停止ルールを
+  検証計画に含める。対象の環境依存・未確認理由・CI で確かめる手順を特定し、停止計画は実装完了サマリにも引き継ぐ。
+- 連動するエコシステムは notes/context から依存名・版の対応・双方の manifest/lockfile・更新時の検証を
+  列挙する。該当しなければ非該当と理由を書く。
+- 録画・プロセス起動・タイミング依存には数値の N と独立した試行の初期化・成果物条件を決め、
+  N 回連続成功を完了条件にする。中途失敗で連続回数を数え直す。SIGHUP・親の終了・プロセスグループの
+  中断・孤児と一時ファイルの回収を扱う。
+  長時間動く子プロセスを持つ CLI では、利用者が実際に叩く経路（パッケージマネージャー/スクリプトランナー経由
+  〔例: pnpm〕・パイプ）での異常系を設計する。子を直接終了する試験だけで代用しない。
+- はみ出し・表示崩れの修正では、対象のボタン名・要素を列挙し、各状態での viewport（幅・高さ）と
+  確認方法・期待結果を対応付ける。
+- 仕様の読みが割れる点は決定せず、未確定事項に挙げる（解釈の明記だけで済ませない）。
+- docs に、A-番号・「回答待ち」などの時点依存の文言と、gitignore 対象（.harness/）へのリンクを書かない。
+- 依存の用途を書くときは、package.json の scripts と scripts/ 配下の import も確かめる（devDependencies だけで判断しない）。
+- 手順は、出力先と順序（変更前の取得→変更→変更後の比較→掃除）を一本の手順として書き、通しで実行可能かを見直す。
+  追跡外ファイル（基準画像・生成物）も差分の確認に含める。
+- 同じ値を2か所で数える設計は、丸め規則を揃えるテストを入れる。OS 固有の意味論に依る処理は、方式の選択肢と前提を書く。
+
+実装依頼の項目（該当するときだけ。非該当なら理由を実装完了サマリに書く）:
+- 設定フラグで挙動を分ける機能は、OFF の全経路が origin/main と同じことのテストを入れる。
+- ID を削除・無効化する機能は、参照する全ての場所を列挙して掃除する。TS と Rust など二重に検証する値は、
+  共通の fixture で揃える。両側で状態を持つ処理は、結合テストを必須にする。
+- 新しい UI は、近くの固定・浮動 UI との重なりを実測し、ready 以外の状態も描画テストする。
+- Sonar の代表ルール（await のない async・入れ子の三項演算子）を避ける。
+- bash（bin/・tests/・hooks/）を変えるときは、local 宣言・変数に未使用を残さない（shellcheck の SC2034 は CI で初めて落ちる。ローカルに shellcheck が無いと gate では未確認になる）。
+- 既存コメントを消さない・英語にしない・フォーマッタの整形を巻き込まない。
+
+差し戻し時の項目（再依頼の指示に含める）:
+- 指摘の行だけでなく、同じ節の要求全体と、同種の箇所の横展開を指示に含める。
+- 「未確定」と書く前に、設計書の該当節を引用させる。
+LIGHT_CHECKLIST
+printf '\nプロジェクトの gate（列・順序を維持して全部実行）:\n```json\n%s\n```\n' "$light_gate" >> "$WT/.harness/prompt-impl-{n}.md"
+harness-phase {n} implementing || exit 1
+# LIGHT_REQUEST_END
+````
+
+準備後の Codex 起動・監視・NG 差戻し・認証時代行は共通起動手順を使う。light の再依頼/代行には
+この `prompt-impl-{n}.md` を直接渡し、未作成の設計書/設計依頼/candidate を要求しない。
+チェックリストと最新 gate を保持し、指摘箇所と同じ節の要求全体・同種入口/復帰も修正対象にする。
+再開時は現 diff/履歴/記録を照合して分類し直す。
+
 ## Phase 2: 設計書生成（Codex・並列）
+
+既存 WT/branch からの再開や通常昇格時は、新規 worktree add/branch 作成を繰り返さず現 diff を保持する。
+入力/チェックリスト/最新 gate を更新し、設計は現在の全 diff を前提にする。
 
 ````bash
 ROOT="$(harness-config --root)" || exit 1
@@ -431,9 +580,25 @@ T5 は gate 取得の非0を stub で注入する単体検証であり、不正 
 - 同じ依頼で2回失敗 → 依頼を具体化（対象ファイル・期待出力）して再依頼
 - 3回失敗 → `harness-phase {n} blocked --comment-file ...`（状況と必要な対応を書く）
 
+### Agent の役割モデル（通常・light・再依頼・復帰・代行共通）
+
+Agent 起動前に `harness-config --models` の要求値・出典・warnings と起動時設定版を照合する。
+profile の選択先が sessionTargets と違う診断や設定版変更があれば、設定を揃えて restart する。
+`harness-config --agent-model <role>` を呼び、成功した alias だけを Agent の `model` 引数に指定する。
+通常設計レビューの懐疑役/検証役と通常実装の懐疑役は `tick`、通常実装の最終 verifier と
+light の verifier は `review`、設計代行は `spec`、実装代行/CI 仕分けは `tick` を使う。
+通常設計は引き続き Codex で、Claude Opus への担当変更や二重設計は行わない。
+
+旧 full ID などで `ok=false`（helper が非0）の場合は、role・設定値・理由と
+「model 引数を省略し親モデルを継承して同じ作業を起動する」旨を gate 実行の記録/レビュー記録と
+warnings に残す。Agent の model 引数を省略して同じ作業を起動し、工程の停止やレビュー省略はしない。
+設定取得/JSON 自体の破損はこのフォールバックと混同せず、診断して設定を直す。
+全懐疑役・verifier・設計/実装代行の初回/再依頼/復帰で同じ手順を使い、full ID を推測で alias へ変換しない。
+`extraArgs` の明示 model/agents は保持し、要求モデルと実際の採用モデルは別に確認する。
+
 ## レビュー共通: 二段階の敵対的検証
 
-Phase 3・5 のレビューは、成果物を作った文脈から切り離した **fresh なサブエージェント2体**で行う。
+通常経路の Phase 3・5 のレビューは、成果物を作った文脈から切り離した **fresh なサブエージェント2体**で行う。軽い実装レビューは後述の独立 verifier 1 段を使う。
 
 1. **懐疑役**: 「問題がある」前提で反証を試みる。良い点は書かない。候補指摘を
    `$D/{P}-{n}-review-{spec|impl}-candidate.md`（絶対パスで渡す）に書いて終わる。1行目は
@@ -523,6 +688,9 @@ sleep 5; tmux capture-pane -t "$(cat "$WT/.harness/codex-impl-{n}.id")" -p -S -3
 
 ### 5-1. 敵対的検証
 
+最初に全 diff を再分類する。light なら「軽い実装レビュー」の verifier 1 段だけを実行し、
+以下の通常懐疑役/検証役の起動は行わない。normal は以下の従来の二段階を維持する。
+
 懐疑役・検証役には `$WT`・spec・impl サマリ・Issue ファイル・生成済みの `prompt-spec-{n}.md` のパスを渡し、
 `git -C $WT diff origin/<base>...` と未コミット差分を対象に、spec との乖離・境界値・失敗経路・回帰・
 規約違反・スコープ外変更を壊しに行かせる（可能ならテスト・最小再現を実行させる）。
@@ -535,6 +703,50 @@ gate の列・順序と終了値、新規テストの探索/除外/呼び出し�
 この時点では実 CI ログ・修正回数を要求せず、その判定は PR 作成後の 5-3 に置く。
 
 - **NG**（取り違え NG は除く。レビュー共通に従い懐疑役を作り直す）→ 指摘を添えて `codex-impl-{n}` を共通起動手順で `harness-codex start` により再起動（軽微でも Claude は直さない）。指示には .harness/prompt-spec-{n}.md の「差し戻し時の項目」を含める。
+
+### 軽い実装レビュー
+
+Phase 4 終了後に全 diff を再分類し、light かつ通常固定されていないときだけ、**fresh verifier 1 体だけ**を
+起動する。懐疑役や空 candidate は作らない。Agent model は `review` を解決し、上記の省略フォールバックを使う。
+実 diff・Issue 本文/要件メモ・context・notes・impl サマリ・生成依頼のチェックリスト/gate を渡し、
+依存対の全 entry の整合、回帰・失敗経路を実証する。設計書が未作成なら要求しない。
+結果は先頭 OK/NG・根拠・反証を試みたが壊せなかった点を通常ファイルへ保存する。
+NG は共通起動手順で Codex へ差戻し、再分類/再レビューする。normal 化は通常固定の復帰手順を使う。
+
+verifier OK の時、レビュー前後の snapshot 一致を確認し、worker が `.harness/review-{n}.json` に
+`version:1, project, issue, fingerprint, route, model, reviewer:"verifier", verdict:"OK", artifact` を
+同じディレクトリの mktemp→rename で atomic 保存する。中断時は所有一時ファイルだけを回収する。
+通常ファイル/非空・版・project/issue/fingerprint・route・verdict と実レビュー成果物を照合する。
+ローカル OK だけでは省略せず、GitHub 正本の認証投稿者の進捗にも project/issue/route/policy/base/head/
+fingerprint/contentFingerprint/verifier/省略段階/通常固定履歴を記す。消失時は進捗と現 diff を照合し、
+復元不能は再レビュー、昇格歴不明は通常へ倒す。旧 head/不明版/破損を再利用しない。
+
+依頼/merge 呼出直前は分類を更新した後、light なら次の照合も通す。失敗なら新しい verifier のレビューを行い、
+全 gate/CI/新依頼/人の新 OK を揃える。分類が normal へ昇格した場合は先に通常の設計・レビューへ戻る。
+
+```bash
+# LIGHT_REVIEW_CHECK_BEGIN
+[ "$(jq -r .dirty <<<"$route_json")" = false ] || exit 3
+if [ "$(jq -r .route <<<"$route_json")" = light ]; then
+  review_file="$WT/.harness/review-{n}.json"
+  [ -f "$review_file" ] && [ ! -L "$review_file" ] && [ -s "$review_file" ] || exit 3
+  jq -e --argjson snapshot "$route_json" '.version == 1 and .project == $snapshot.project and
+    .issue == $snapshot.issue and .route == $snapshot.route and .fingerprint == $snapshot.fingerprint and
+    .reviewer == "verifier" and .verdict == "OK" and (.model | type == "string" and length > 0) and
+    (.artifact | type == "string" and startswith("/"))' "$review_file" >/dev/null || exit 3
+  review_artifact="$(jq -r .artifact "$review_file")" || exit 3
+  [ -f "$review_artifact" ] && [ ! -L "$review_artifact" ] && [ -s "$review_artifact" ] || exit 3
+fi
+# LIGHT_REVIEW_CHECK_END
+```
+
+コミット前の dirty レビューは provisional。worker のコミット後に分類し直し、`contentFingerprint` が
+レビュー時と同じことを照合する。内容 tree が違えば再レビュー。同じでも新 head/base/policy/fingerprint を
+進捗へ記録する。head/base/policy の変更は旧レビュー記録を失効させ、light 継続なら verifier をやり直す。
+レビュー後は全 gate→push/PR→CI green→再判定→既存 harness-phase awaiting-merge→人の新 OK→
+呼出直前の再判定→既存 harness-merge の順。CI 待ちだけで同じ head の新依頼を増やさない。
+依頼/merge 前は clean WT/index・HEAD=PR head・現 remote base/head/policy・新しい有効レビューを要求する。
+分類失敗/不一致なら呼ばない。merge 呼出後の base 移動を原子的に防ぐ保証は追加しない。
 
 ### 5-2. 実動作の確認（UI 変更のとき）
 
@@ -553,7 +765,7 @@ gate の列・順序と終了値、新規テストの探索/除外/呼び出し�
 git -C "$WT" status                     # スコープ外の差分が無いか確認し、あれば checkout で戻す
 # 設計記録（specRecordDir が null でなければ）
 REC=$(harness-config '.specRecordDir' '')
-if [ -n "$REC" ]; then mkdir -p "$WT/$REC"; { cat "$WT/.harness/spec/{n}.md"; \
+if [ -n "$REC" ]; then mkdir -p "$WT/$REC"; { if [ -f "$WT/.harness/spec/{n}.md" ]; then cat "$WT/.harness/spec/{n}.md"; fi; \
   printf '\n\n---\n\n# 実装完了サマリ\n\n'; cat "$WT/.harness/impl/{n}.md"; } > "$WT/$REC/{n}.md"; fi
 git -C "$WT" add <変更ファイルを列挙> ${REC:+$REC/{n}.md}   # .harness/ は絶対に add しない
 git -C "$WT" commit -m "<Why が分かるメッセージ>"
@@ -585,6 +797,9 @@ REAL 3回より優先する。失敗しているチェック・実ログの根�
 対象以外の CI red は従来どおりとし、**CI が green になってから**承認依頼を出す。
 
 ### 5-4. 承認依頼（必ず harness-phase で）
+
+承認依頼直前と merge 呼出直前は「実 diff の分類と軽い経路」の分類を PR 番号付きで実行し、記録と照合する。
+分類取得失敗なら呼ばず、変更時は旧レビューを失効し再レビュー/全 gate/CI/新依頼/新 OK を揃える。
 
 head が 5-3 の後に変わった（衝突解消・CI 赤の修正・rebase の push）ときは、承認依頼の前に `(cd "$WT" && harness-gate)` を再実行して結果を現 head のものにする（そうしないと承認依頼に「未確認の有無は不明」が載る）。
 
@@ -636,7 +851,7 @@ blocked 通知失敗も成功にしない。原因解消後は動画準備から
 ## マージ承認のお願い（#{n} {タイトル}）
 - 動画で見せる範囲: {開始状態→操作順→終了状態、含めないもの}
 - 判定: ✅ 完了 / 受け入れ条件: 1. ✅ … 2. ✅ …
-- レビュー: 敵対的検証 OK（壊せなかった点: …）
+- レビュー: 通常は敵対的検証 OK / light は verifier 1 段 OK（壊せなかった点: …、実際の設計省略有無: …）
 - ゲート: harness-gate 全 ✅（⚠ 未確認があれば検査名。harness-phase も末尾に自動で追記する）/ CI green
 - 人間に確認してほしいこと（humanChecks）: …（普通の箇条書きで結果/未確認を記す）
 - 変更概要: …
@@ -945,7 +1160,9 @@ exit 10 一律ではなく reason と監視結果で、次の場合だけ「Code
 3. 設計・実装を `harness-implementer` サブエージェント（このプラグインの agent）に委譲する。
    渡すのは Issue 番号・`$WT`・入出力ファイルのパスだけ。
    設計時は生成済みの `$WT/.harness/prompt-spec-{n}.md` も必ず渡し、同じ依頼とチェックリストに従わせる。
-   実装時は `$WT/.harness/prompt-impl-{n}.md` と `$WT/.harness/prompt-spec-{n}.md` の両方を渡す
+   通常実装時は `$WT/.harness/prompt-impl-{n}.md` と `$WT/.harness/prompt-spec-{n}.md` の両方を渡す。
+   light の実装代行/再依頼は直接参照の prompt-impl だけで不足なく渡し、存在しない spec は要求しない。
+   Agent の役割モデルの手順で設計は spec、実装は tick を指定し、full ID の省略フォールバックも適用する
 4. レビューは引き続き別のサブエージェントで行う（書いた agent に自己採点させない）
 5. 確認ゲート・承認依頼・マージ条件は一切緩めない。`git add / commit / push` は implementer にも任せない
 6. 次の Phase を始める前に `harness-codex-status check` を見て、0 ならその Phase から Codex に戻す

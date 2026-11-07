@@ -1,4 +1,5 @@
 {
+	"models": { "window": "sonnet", "tick": "sonnet", "spec": "opus", "review": "opus" },
 	"$comment": "kishimen-tool（Tauri + React の採点ツール）向けに調査した結果の例。engine 側に置く形。",
 	"baseBranch": "main",
 	"owners": ["jonnity"],

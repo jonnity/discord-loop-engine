@@ -598,7 +598,7 @@ DR systemctl --user disable --now dle-runner@<名前>      # 先に止める（�
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
 | `worker.limit` | `enabled: true` / `tailLines: 12` / `wakeIntervalMinutes: 30` / `wakeMaxAttempts: 5` | `enabled`・`patterns`・`resetPatterns`・`tailLines`・`wakeIntervalMinutes`（正の数）・`wakeMaxAttempts`（0 以上の整数。0 は自動で起こさない）。使用量の上限の表示を画面から探し、止まった worker を固定間隔で起こし直す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
-| `worker.model` / `worker.extraArgs` | — | worker のモデルと追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
+| `worker.model` / `worker.extraArgs` | `sonnet` / — | worker のモデル（未指定・null は `sonnet`。`models` で上書き可）と追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `reactionEmoji` | 🙆‍♂️ | マージ承認の投稿に付けると OK になる絵文字（Unicode 絵文字1つ。サーバー独自絵文字は不可）。`false` でリアクションでの OK を無効にする。変えたら engine を再起動する |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
@@ -997,3 +997,86 @@ hook が0件なら fetch/一時 worktree を作りません。実行上限180秒
 
 実 GitHub/Discord の認証・権限、auto_merge 応答、Approve/rebase/削除、対象保護・queue と hook の適合は
 fake 試験と区別して実環境で確認してください。この repo の read-only CI だけでは実効性を証明できません。
+
+### 実 diff による軽微判定
+
+`harness-gate --classify [--pr N] [--] [dir]` は分類だけを JSON で返します。品質コマンド・hook・通知・
+phase・gate-result・経路記録は変更しません。light/normal は終了0、引数/設定不正は2、取得不能は3です。
+通常の `harness-gate [dir]` は従来の検査を全部行い、その前後に分類結果を標準エラーへ記録します。
+先頭が `-` のディレクトリは `harness-gate -- -docs` / `harness-gate --classify -- -docs` で指定できます。
+
+対象は merge-base からの累積差分と index・作業ツリー・未追跡。classifier は fetch や ref 更新を行わず、
+worker が更新した origin/base の鮮度を読取り専用の ls-remote で照合します。PR 指定時は GitHub の現在の
+head/base を固定し、同一 repo の OPEN と local HEAD 一致を確認します。履歴不足や不明点は省略の根拠にしません。
+NUL 区切りで path を解析し、rename の両側、削除元、全変更層を検査します。
+分類では実行ビットを検査し、assume-unchanged/sparse など index の除外フラグがある場合は通常へ倒します。
+
+初期の light 候補は通常の `.md` と docs 内 `.txt`、または同じディレクトリの `package.json` と
+`package-lock.json` の依存変更対です。bin/hooks/skills/agents/templates/.github、dot 設定や指示文書、コード、
+symlink/submodule・実行権・binary・不正 UTF-8・空 diff は通常へ倒します。上限は blob 10 MiB・全体50 MiBです。
+manifest は dependencies/devDependencies/peerDependencies/optionalDependencies だけの意味上の変更を許可し、
+新規 runtime dependency、片側だけの変更、重複 JSON キー、lock v1/v2/workspace/link は通常です。
+版範囲は exact/caret/tilde の数値3成分、lock 全 entry は npm registry の HTTPS tarball と単一 sha512 が必要です。
+既存 entry も検査します。dev/peer/optional 追加は候補のままにし、hasInstallScript による追加制限は導入しません。
+取得済み tarball 自体の真正性は classifier では保証せず、依存準備・verifier・gate・CI を維持します。
+
+実 diff がある入口で light なら以降の設計作成/設計レビューを省き、実装レビューは独立 verifier 1 段です。
+新規 Issue の空 diff は通常の設計を行い、実装後だけ1段化できます。既に終わった設計を省略回数には数えません。
+light から normal に変われば、その Issue は設計・設計二段階レビュー・実装修正・実装二段階レビューへ戻り、
+通常へ固定します。実装後・コミット後・gate 前後・PR 更新・CI 修正後・rebase 後・承認依頼/merge 呼出直前に再判定します。
+head/base/policy/fingerprint が変われば旧レビューを失効させ、light 継続でも verifier をやり直します。
+dirty レビューは仮の記録で、コミット後の内容 tree も照合します。経路/レビュー JSON と GitHub の進捗を照合し、
+不明な履歴は通常へ倒します。ローカル JSON は承認の証拠ではありません。
+全 gate・CI green・現 head の新しい人の OK・harness-phase・guard・Codex の git 禁止と WT 範囲は維持します。
+merge 呼出後の base 移動を原子的に防ぐ保証は追加しません。Issue 無し Dependabot の既存経路も維持します。
+
+### 役割モデルと移行
+
+engine の config.json と選択 harness.json に `models` の部分上書きを指定できます。
+
+```json
+{ "models": { "window": "sonnet", "tick": "sonnet", "spec": "opus", "review": "opus" } }
+```
+
+既定 < 旧 concierge.model/worker.model < global models < project models の順で役割ごとに解決します。
+worker null/欠落/空の有効値も Sonnet、空は警告です。新 models は既知 role と非空文字列を検証し、
+full ID は起動時に保持します。`extraArgs` の model/agents は警告付きで保持し、model が明示されれば
+resolver の --model は追加しません。既存の引数順序や agents 定義は変えません。
+`harness-config --models` は要求値/出典/warnings、`--model <role>` は起動文字列、
+`--agent-model <role>` は完全一致する sonnet/opus/haiku の Agent alias を返します。
+full ID が Agent で未対応の場合は理由付き非0です。worker は理由を gate/レビュー記録と warnings に残し、
+model 引数を省略して親モデルを継承し同じ作業を起動します。工程やレビューは省略しません。
+
+window は共有窓口、tick は native/harness の日常 worker と通常設計レビュー/実装懐疑役、review は
+最終実装 verifier、spec は設計代行へ接続します。通常の設計担当は Codex を維持し、設定上の spec=opus を
+実際の設計担当モデルと混同しません。project.window が異なる場合の共有窓口の委譲方式は未決です。
+監視の haiku と advisor の opus は現状を維持します。Agent full ID の変換も推測で追加しません。
+
+1. 更新前の有効設定・出典・full ID/extraArgs/native の例外と稼働版を保存します。
+2. gate/CI 後、engine/plugin/CLI を同じ版に揃え、他項目を保持した完全な profile を提案し、人の OK 後に activate します。
+3. global は engine/窓口/worker、profile は対象 worker を restart します。hot reload は行いません。
+4. helper と sessionTargets の探索先を照合します。不一致は診断されるので restart して揃えます。
+   各役割を独立した新 session で3回連続確認し、要求値・実応答モデル・処理を照合します。
+   fake 起動や依頼文のテストは実 Agent の採用/課金モデルの証明にはなりません。
+
+### Opus 利用の変更前後の報告
+
+1. 変更適用前に、実機で既存の Claude usage 集計方式・権限・UTC 期間を確認し、同じ方式を固定します。
+   保存先は `.harness/reports/<変更番号>/<UTC-run-id>/before/`。models.json に登録 project/role/設定出典/要求モデル/稼働版、
+   method.json に採取コマンド・期間・role の割当て・例外、usage.json に4種の整数 token、coverage.json に未読/欠損理由を保存します。
+   採取コマンドを未確認のまま発明せず、取得不能 project は未確認と記します。生 transcript はコピー/commit しません。
+2. 変更を適用・restart し、各役割の実採用と軽い/通常経路を実機で確認します。
+3. 比較可能な7日の UTC 窓で同じ採取を after/ に保存します。message id で重複除外し、同ID不一致・ID無し・
+   未知 project・不正 timestamp/usage を数えます。同時施策、処理 Issue/経路数も記し、差を単一変更の因果としません。
+4. compare.md の project/role/出典/前後モデル/実測 Opus/4種 token/処理・未読件数/期間/例外は同じ整数集計から作ります。
+   `src/harness-usage.ts` の匿名化入力は id/project/role/model/timestamp と usage の input/output/cacheCreation/cacheRead。
+   期間は開始を含み終了を含まず、同ID不一致は全件を除外して件数を報告します。表示は万単位小数1桁の四捨五入を共用します。
+5. 秘密/個人情報を除く summary-public.md の存在・非空・JSON と表の一致を確認し、変更後に対象の報告 Issue へ
+   `gh issue comment <報告先> --repo <owner/repo> --body-file <公開本文の絶対パス>` で報告し、URL を compare.md に保存して読取り照合します。
+6. 確認後に所有 temp だけを回収し、匿名化した before/after・比較・公開本文/URL は管理外に保持します。
+   生 transcript は削除しません。設定一覧を実測と呼ばず、Codex token とプラン換算は含めません。
+
+実権限・依存準備/runner・特殊な md 実行用途、各役割の実採用、実 GitHub/Discord の経路/承認/通知と
+実測期間の確保・報告は実機確認が必要です。分類 CLI は Linux/bash/Git 前提で30秒上限、HUP/INT/TERM では
+所有子を回収して非成功で終了します。SIGKILL/親の無信号終了は自動回収の保証外です。
+PID/開始時刻を照合して残存子を止めてから、所有する一時物だけを回収し、共有 engine/tmux は止めません。

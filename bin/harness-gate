@@ -23,10 +23,15 @@
 set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ "${1:-}" = --classify ]; then
+	shift
+	exec node "$SCRIPT_DIR/../src/harness-route.ts" "$@"
+fi
+[ "${1:-}" != -- ] || shift
 DIR="${1:-$(pwd)}"
 # 結果ファイルの置き場に使うため絶対パスにする（相対のままだと cd 後に別の場所を指す）。
-DIR="$(cd "$DIR" && pwd)" || exit 2
-cd "$DIR" || exit 2
+DIR="$(cd -- "$DIR" && pwd)" || exit 2
+cd -- "$DIR" || exit 2
 
 # 古い結果を承認依頼に使わせない。以降の途中終了（終了 2/3・中断）でもファイルを残さない。
 result_file="$DIR/.harness/gate-result.json"
@@ -115,6 +120,17 @@ run_isolated() {
 	return "$rc"
 }
 
+# 分類不能は品質失敗とは別に記録し、省略の根拠にしない。
+classify_route() {
+	local route_json
+	if route_json="$(node "$SCRIPT_DIR/../src/harness-route.ts" "$DIR")"; then
+		printf 'harness-gate: route %s\n' "$route_json" >&2
+	else
+		echo 'harness-gate: 分類未確認。工程は省略できません' >&2
+	fi
+}
+classify_route
+
 results=()
 for ((i = 0; i < preflight_count; i++)); do
 	name="${pre_names[$i]}"
@@ -198,6 +214,7 @@ write_result() {
 		'{version: 1, head: $head, dirty: $dirty, policy: $policy, skipped: $skipped, failed: $failed}' \
 		>"$result_file.tmp" && mv -f -- "$result_file.tmp" "$result_file"
 }
+classify_route
 write_result 2>/dev/null || true
 
 echo "" >&2

@@ -39,6 +39,86 @@ const sampleGate = [
 	{ name: "test / build", run: 'echo {n}\n$(touch "$WT/gate-substitution")' },
 ];
 
+test("F1/F2/F4/M5: 軽い経路の生成依頼・全 gate・失敗停止・通常固定を確認する", async () => {
+	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-light62-"));
+	mkdirSync(path.join(dir, ".harness"));
+	try {
+		const routeScript = section(skill, "# ROUTE_CHECK_BEGIN", "# ROUTE_CHECK_END").replaceAll("{n}", "3");
+		const request = section(skill, "# LIGHT_REQUEST_BEGIN", "# LIGHT_REQUEST_END").replaceAll("{n}", "3");
+		const env = { ...process.env, WT: dir, ROUTE_HISTORY_KNOWN: "1" };
+		const stub = `harness-gate() { printf '%s\\n' '{"version":1,"policyVersion":1,"project":"p","issue":0,"route":"light","reasons":["docs"],"baseOid":"base","headOid":"head","fingerprint":"fp","contentFingerprint":"tree","dirty":false,"files":[]}'; }
+harness-config() { case "$1" in '.gate') printf '%s' '[{"name":"test","run":"echo gate"}]' ;; '.context | join(", ")') printf '%s' 'CLAUDE.md, README.md' ;; *) return 91 ;; esac; }
+harness-phase() { printf '%s\\n' "$*" >> "$WT/phases"; }
+`;
+		let r = await bash(`${stub}\n${routeScript}\n${request}`, env);
+		assert.equal(r.code, 0, r.stderr);
+		const prompt = readFileSync(path.join(dir, ".harness/prompt-impl-3.md"), "utf8");
+		assert.match(prompt, /issue-3.md/);
+		assert.match(prompt, /notes.md/);
+		assert.match(prompt, /実装依頼の項目/);
+		assert.match(prompt, /echo gate/);
+		assert.doesNotMatch(prompt, /spec\/3.md|candidate/);
+		assert.equal(existsSync(path.join(dir, ".harness/spec/3.md")), false);
+		assert.match(readFileSync(path.join(dir, "phases"), "utf8"), /^3 implementing/m);
+		assert.doesNotMatch(readFileSync(path.join(dir, "phases"), "utf8"), /designing|spec-review/);
+		assert.equal(JSON.parse(readFileSync(path.join(dir, ".harness/route-3.json"), "utf8")).route, "light");
+		r = await bash(
+			`${stub}\nharness-gate() { return 3; }\n${routeScript}\nharness-phase 3 awaiting-merge\nharness-merge 3`,
+			env,
+		);
+		assert.equal(r.code, 3);
+		assert.doesNotMatch(readFileSync(path.join(dir, "phases"), "utf8"), /awaiting-merge/);
+		r = await bash(`${stub.replace('"route":"light"', '"route":"normal"')}\n${routeScript}`, env);
+		assert.equal(r.code, 0, r.stderr);
+		assert.equal(JSON.parse(readFileSync(path.join(dir, ".harness/route-3.json"), "utf8")).promoted, true);
+		r = await bash(`${stub}\n${routeScript}`, env);
+		assert.equal(r.code, 0, r.stderr);
+		assert.equal(JSON.parse(readFileSync(path.join(dir, ".harness/route-3.json"), "utf8")).route, "normal");
+		const light = section(skill, "### 軽い実装レビュー", "### 5-2.");
+		assert.match(light, /fresh verifier 1 体だけ/);
+		assert.match(light, /review/);
+		assert.match(light, /懐疑役.*作らない/);
+		assert.match(skill, /--agent-model/);
+		assert.match(skill, /model 引数を省略/);
+		assert.match(skill, /親モデルを継承/);
+		assert.match(skill, /gate 実行の記録\/レビュー記録/);
+		const reviewCheck = section(skill, "# LIGHT_REVIEW_CHECK_BEGIN", "# LIGHT_REVIEW_CHECK_END").replaceAll("{n}", "3");
+		const snapshot = JSON.parse(readFileSync(path.join(dir, ".harness/route-3.json"), "utf8"));
+		snapshot.route = "light";
+		const artifact = path.join(dir, "verifier.md");
+		writeFileSync(artifact, "OK\n根拠と壊せなかった点\n");
+		const receipt = {
+			version: 1,
+			project: "p",
+			issue: 3,
+			fingerprint: "fp",
+			route: "light",
+			model: "opus",
+			reviewer: "verifier",
+			verdict: "OK",
+			artifact,
+		};
+		writeFileSync(path.join(dir, ".harness/review-3.json"), JSON.stringify(receipt));
+		const prelude = `route_json='${JSON.stringify(snapshot)}'\n`;
+		r = await bash(`${prelude}${reviewCheck}`, env);
+		assert.equal(r.code, 0, r.stderr);
+		for (const bad of [
+			{ ...receipt, project: "other" },
+			{ ...receipt, issue: 4 },
+			{ ...receipt, fingerprint: "old" },
+			{ ...receipt, version: 2 },
+			{ ...receipt, verdict: "NG" },
+			{ ...receipt, artifact: path.join(dir, "missing") },
+		]) {
+			writeFileSync(path.join(dir, ".harness/review-3.json"), JSON.stringify(bad));
+			r = await bash(`${prelude}${reviewCheck}\nharness-phase 3 awaiting-merge\nharness-merge 3`, env);
+			assert.equal(r.code, 3);
+		}
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
 async function designRequest(options: {
 	profile?: Record<string, unknown>;
 	rawProfile?: string;

@@ -31,6 +31,100 @@ test("origin の URL から owner/repo を読む", () => {
 	assert.equal(repoFromRemote("http://proxy@127.0.0.1:1234/git/jonnity/kishimen-tool"), "jonnity/kishimen-tool");
 });
 
+test("M4: 役割モデルと旧 extraArgs を起動引数へ接続し、不正 profile は対象だけ止める", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-model-p-"));
+	try {
+		writeFileSync(
+			path.join(home, "config.json"),
+			JSON.stringify({ channelIds: ["1"], allowedUserIds: ["2"], models: { tick: "opus" } }),
+		);
+		const cfg = loadConfig(home),
+			ledger = new Ledger(home);
+		const projects: Project[] = ["good", "bad", "native"].map((name) => ({
+			name,
+			repo: "x/y",
+			path: path.join(home, name),
+			mode: name === "native" ? "native" : "harness",
+			active: true,
+			addedAt: "",
+		}));
+		for (const p of projects) {
+			mkdirSync(path.dirname(ledger.profilePath(p.name)), { recursive: true });
+			writeFileSync(
+				ledger.profilePath(p.name),
+				JSON.stringify({ models: { tick: p.name === "bad" ? null : "haiku" } }),
+			);
+		}
+		writeFileSync(ledger.profilePath("good"), '{"concierge":{"x":1,"x":2},"models":{"tick":"haiku"}}');
+		let targets = sessionTargets(cfg, projects, ledger);
+		assert.equal(targets[1]?.startupError, undefined);
+		assert.match(targets[1]?.command ?? "", /--model haiku/);
+		assert.match(targets[3]?.command ?? "", /--model haiku/);
+		assert.match(targets[2]?.startupError ?? "", /models/);
+		assert.equal(targets[2]?.command, "");
+		assert.match(targets[1]?.command ?? "", /DLE_MODELS=/);
+		cfg.worker.extraArgs = ["--model=old-full-id", "--model", "opus", "--agents", "{}"];
+		targets = sessionTargets(cfg, projects, ledger);
+		assert.match(targets[1]?.command ?? "", /--model=old-full-id --model opus --agents '\{\}'$/);
+		assert.doesNotMatch(targets[1]?.command ?? "", /--model haiku/);
+		assert.equal(targets[1]?.startupError, undefined);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+});
+
+test("M4/H2: fake claude の実argvでモデルと上書き・DLE_MODELSを照合する（N=3）", () => {
+	for (let trial = 0; trial < 3; trial++) {
+		const root = mkdtempSync(path.join(os.tmpdir(), "dle-argv62-")),
+			home = path.join(root, "home");
+		mkdirSync(home);
+		try {
+			writeFileSync(
+				path.join(home, "config.json"),
+				JSON.stringify({ channelIds: ["1"], allowedUserIds: ["2"], worker: { model: "old-full-id" } }),
+			);
+			const cfg = loadConfig(home);
+			const out = path.join(root, "argv.json");
+			cfg.claudeBin = path.join(root, "claude");
+			writeFileSync(
+				cfg.claudeBin,
+				`#!${process.execPath}\nrequire('node:fs').writeFileSync(${JSON.stringify(out)},JSON.stringify({args:process.argv.slice(2),models:JSON.parse(process.env.DLE_MODELS)}));\n`,
+				{ mode: 0o755 },
+			);
+			mkdirSync(path.join(root, "repo"));
+			const project: Project = {
+				name: "p",
+				repo: "x/y",
+				path: path.join(root, "repo"),
+				active: true,
+				mode: "harness",
+				addedAt: "",
+			};
+			for (const extra of [[], ["--model=legacy-extra", "--model", "opus", "--agents", "{}"]]) {
+				cfg.worker.extraArgs = extra;
+				const target = sessionTargets(cfg, [project])[1];
+				assert.ok(target);
+				assert.equal(target.startupError, undefined);
+				const run = spawnSync("bash", ["-c", target.command], { cwd: root, encoding: "utf8" });
+				assert.equal(run.status, 0, run.stderr);
+				const result = JSON.parse(readFileSync(out, "utf8"));
+				assert.deepEqual(result.models.values, { window: "sonnet", tick: "old-full-id", spec: "opus", review: "opus" });
+				const args = result.args as string[];
+				if (extra.length) {
+					assert.deepEqual(args.slice(-extra.length), extra);
+					assert.equal(args.filter((a) => a === "--model" || a.startsWith("--model=")).length, 2);
+				} else {
+					assert.equal(args.filter((a) => a === "--model").length, 1);
+					assert.equal(args[args.indexOf("--model") + 1], "old-full-id");
+				}
+				assert.equal(args[args.indexOf("--add-dir") + 1], `${home}-worktrees/p`);
+			}
+		} finally {
+			rmSync(root, { recursive: true, force: true });
+		}
+	}
+});
+
 test("パス指定は既存の場所を使い、既定は harness、--native ならそのコマンドで native", async () => {
 	const dir = mkdtempSync(path.join(os.tmpdir(), "dle-p-"));
 	execFileSync("git", ["-C", dir, "init", "-q"]);
