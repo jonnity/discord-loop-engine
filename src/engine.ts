@@ -35,6 +35,7 @@ import {
 	ensureLabels,
 	ensureOnboardingTask,
 	type Run,
+	refreshCoverage,
 	registerProject,
 	sessionTargets,
 } from "./projects.ts";
@@ -223,6 +224,10 @@ export class Engine {
 
 	targets() {
 		return sessionTargets(this.config, this.ledger.projects(), this.ledger);
+	}
+
+	refreshCoverage() {
+		return refreshCoverage(this.config, this.ledger.projects(), this.targets(), this.ledger);
 	}
 
 	async start() {
