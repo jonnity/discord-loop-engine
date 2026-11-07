@@ -622,7 +622,26 @@ engine が A-番号の回答・dispatch・`harness:queued` の追加（60 秒ご
 worker が idle（status idle・画面が静止して入力欄が空・直前の会話ログ更新から10秒以上）と確認できたときだけ、
 入力欄に `/discord-loop-engine:issue-loop` を送る。作業中・確認画面・入力途中・判定できないときは送らず、次の30秒 tick で再試行する。
 送る文字列はこの定数だけで、回答文や Issue の中身は入力しない。マージは従来どおり承認記録がなければ行われない。
-`worker.wake.enabled: false` で無効にできる。
+`worker.wake.enabled: false` で無効にできる。この場合は新queuedのpollも無効になり、空キュー時のdispatch・回答も
+次の心拍まで120分超遅れ得る。新Issue検知はactive・repo設定済み・readyなharnessプロジェクトのopenな
+`harness:queued` が対象で、初回pollは記憶だけ、上限50件。ラベル無しや50件超の完全検知は行わない。
+
+issue-loopはセッションを保持し、空キューでblockedを含む未完了Issue/PRもDependabot監視もないengine配下workerの
+心拍を120分 `0 */2 * * *` にする。人間待ちだけ・Dependabot監視だけなら60分 `0 * * * *` から無変化2時間で120分へ、
+実行可能な作業や未処理の回答があれば15分 `*/15 * * * *` へ戻す。状態取得失敗は空とせず現間隔を維持する。
+標準cronでは旧式の分欄 `*/60` と `*/120` はともに毎時0分であり、2時間ごとにはならない。
+実予約に合わせてheartbeat_intervalとloop-heartbeatのINTERVALを記録し、毎tick CronListで生存を確認、消失時は張り直す。
+harness-statusの警告は記録間隔×2+5分（120minなら245分）で、起動や実処理の上限保証ではない。
+単体実行の全完了・明示停止では心拍を削除し、キュー完了の通知は1回だけにする。
+
+dispatch・新queued・回答による既存engineの起こしを主にし、心拍は取りこぼしの安全網にする。
+Issueコメントの返事はセッションを起こさないため心拍で回収する。PR購読は継続し、通知消失時も状態を読み直す。
+120分は予約間隔であり、busy・recurringの最大30分の遅延・sleep・上限・確認待ち・engine/session停止で処理はさらに遅れる。
+7日失効は次tick/通常再開時のCronListで復旧し、tickが来なくなった場合は所有者が通常手順で再開する。
+セッションを残すのでtmux/メモリとrefreshによるclear/再開消費は残る。refreshは従来どおり有効。
+配布はplugin更新、workerが新スキルをロードしたことの確認、通常の実機起動確認の順に行う。
+仮ルール9のdispatch/回答後の不作動時に起こす運用とは矛盾しない。ルール変更を選ぶ場合だけ、その後にrules_setし、
+rules_getの一致とworker受信を確認する。保存回答の確認・人のマージOK・harness-guard・Codexのgit操作禁止を維持する。
 
 ### 自動整理の診断
 
@@ -722,6 +741,78 @@ cat "$MEASURE_DIR/comparison/report.md"
    CLIには投稿機能がなく、減少だけで因果を断定しない。実装の検証と7日間の効果確認は別に扱う。
 7. 比較・報告後、必要な成果物を私有保管先へコピーして hash/bytes を再確認してから、所有するrunだけを掃除する。
    元のClaudeログ・journal・台帳は消さない。永続領域を用意できない場合は計測を開始せず、一時領域へ自動fallbackしない。
+
+### idle心拍の使用量を見積もる
+
+`src/idle-usage.ts` は既存usage-summaryのsnapshot（summary.json・manifest.json・inputコピー）だけを読むCLI。
+所有者が確認したharness workerのメインsessionIdをcontextのsessionsで照合し、cwdは正規化して登録cwdと同じか配下かを確認する。
+tickはsessionIdごとに追うため、途中で `.worktrees/…` に移動しても同じtickに属する。
+現在のPID記録だけで過去sessionの所属が確認できなければ追加せず、同じcwdの手動sessionをworkerと推測しない。
+contextは `{"sessions":[{"sessionId":"確認済みID","cwd":"確認済み絶対パス","project":"登録名"}]}` の形で、
+tickごとのtrigger/idleは入力しない。context外のsessionは対象外（out-of-scope）欄に件数・量を出し、unknownやcoverageCompleteに含めない。
+context内のsessionでcwd・tick等の帰属が不明なusageはunknown。subagent・isSidechain・concierge/nativeは対象外。
+
+メインuser行のtextに `<command-name>/discord-loop-engine:issue-loop</command-name>` があるとtick開始。
+同じsessionの次の開始行だけで区切り、isCompactSummary:trueの要約行・isMeta・tool_result・peer/task_notification/auto_continuation・channel行・end_turnでは区切らない。
+開始行がturnOrigin=scheduledまたはscheduledTaskIdキーありならheartbeat、それ以外でhumanならwake_or_manual、
+キー無し/その他はunknown。開始後のhuman行でもtriggerは変えない。engine起こしと手入力は区別しない。
+作業ありはassistantのBashでharness-prのinbox/scan以外のサブコマンド、harness-codex（harness-codex-statusを除く）、
+--helpを付けないharness-phase/merge/notify/gate、またはgh issue/pr commentを検出した場合と、
+MCP・Agentのツール名のcomment/merge部分一致だけ（成否不問）。本文中の言及やstatus/inbox/scan/CronList、harnessコマンドの--helpは作業にしない。
+コマンド名の前は行頭・空白・`/`・`(` を境界として照合し、`(harness-gate …)` や `$(harness-phase …)` も拾う。
+コマンド名・サブコマンド名の直後が `)` でも拾う。
+バッククォート直後は本文中の言及が多いため境界にせず、サブコマンドを照合し、`;` 等でつないだ読取りもidleのままにする。
+主集計はheartbeat-idleのみ。heartbeat-active、wake_or_manual、unknown、out-of-scopeを別欄にし、未完了/破損はunknownへ分ける。
+応答完了は、tick内で最後のメインassistant行のstop_reasonがend_turnかstop_sequenceで、その後にuser行がないこと（compact要約行を除く）。
+tool_use・max_tokens・pause_turn・refusal等は未完了のまま扱う。
+
+次のBashをリポジトリのルートで実行する。GNU date（Linux/WSL2）を使い、終了済み7×24時間窓を固定する。
+別OSではNode等で同じ絶対時刻の窓を計算する。比較する場合は変更前・変更後で窓を分ける。
+
+```bash
+umask 077
+IDLE_REPORT_BASE="${TMPDIR:-/tmp}/dle-idle-usage"
+mkdir -p "$IDLE_REPORT_BASE" || exit 1
+IDLE_REPORT_RUN=$(mktemp -d "$IDLE_REPORT_BASE/run.XXXXXX") || exit 1
+IDLE_UNTIL=$(date -u +%FT%TZ) || exit 1
+IDLE_FROM=$(date -u -d "$IDLE_UNTIL -7 days" +%FT%TZ) || exit 1
+node src/usage-summary.ts snapshot --claude-home "$HOME/.claude" \
+  --from "$IDLE_FROM" --until "$IDLE_UNTIL" --out "$IDLE_REPORT_RUN/snapshot"
+```
+
+snapshotの終了0は完備、3は欠測あり。summary/manifest/reportとinputコピーの存在・非空・JSON形式・bytes/hashを確認する。
+欠測時はmanifestのissuesを読み、完全な見積もりとはしない。元transcriptは変更しない。
+同じrunのcontext.jsonに確認したsessionsを保存し、同じ入力で両形式を作る。
+
+```bash
+node src/idle-usage.ts --snapshot "$IDLE_REPORT_RUN/snapshot" \
+  --context "$IDLE_REPORT_RUN/context.json" --format json > "$IDLE_REPORT_RUN/usage.json"
+node src/idle-usage.ts --snapshot "$IDLE_REPORT_RUN/snapshot" \
+  --context "$IDLE_REPORT_RUN/context.json" --format markdown > "$IDLE_REPORT_RUN/usage.md"
+```
+
+終了0はunknownを含め出力できたことを示す。引数/構造不正は2、入力読取失敗は1。
+usage.json/usage.mdの存在・サイズ・再読取り形式を確認する。JSONの4種tokenの整数が正本で、表は万単位の小数1桁へ四捨五入、
+平均文脈は(input+cacheCreation+cacheRead)/callsを整数へ四捨五入（0件はnull）。同IDのusage/project/model/tick帰属が同じなら1件、
+行ごとのtimestampは照合に含めず、代表時刻はそのIDの最初の行を使う。余分な行はduplicatesに数え、
+競合は分類前に全除外する。元snapshotは競合の先頭を残すので、両方の重複/競合件数と差を照合する。
+snapshotのcompleteと分類範囲のcoverageCompleteは別で、context外のsessionは分類範囲の判定から外す。unknownの件数・量・理由を0消費扱いしない。
+起動・再起動直後のtick開始前のターン（起動プロンプト・dispatch処理）はmissing-tickとしてunknownになり、workerが集計窓の中で再起動されるとcoverageCompleteはfalseになる。
+
+unknownの帰属不明・キー欠損・未完了等で主集計が小さく出得る。混在tickは、次の開始行までにisCompactSummary:trueでもisMetaでもtool_resultでもなく、
+turnOriginがhumanまたはキー無しのuser行が入るtick。新ターン後の作業はheartbeat-activeに移り、作業の無い手入力の分は
+heartbeat-idleに足される。両方向の誤差は混在tickのidle/active別件数・call数・token欄を見る（主集計の内数）。
+MCP・Agentのツール名の部分一致は実データでは当たらず、作業あり判定は実質Bashの検出だけ。
+dleのreportツールは作業ありに数えないため見逃しになる（reportのみでidle=trueのtickが実データにある）。
+指定外の作業（git commitによるコミットやgh pr createによるPR作成等）の見逃しやcommand中の文字列一致による除外もある。
+`harness-gate --classify` は分類だけをJSONで返す読取りだが、作業入口として数える既知の誤差がある。
+途中のhumanターンも開始行までのtickに含め、reportのみならidleとして集計する。
+
+集計窓のsession/cwdと起点キー形式別件数を照合する。共有する場合はusage.mdから公開用の要約を作り、
+期間・規則・分類/混在別の件数と量・unknownの理由・対象外の量・元集計との差・帰属方法を残す。
+絶対パス・session識別子・本文・私有context/snapshotは公開用本文へ入れない。
+プラン制限への換算や削減率は出さない。成果物は同じrunで保管し、不要な採取一時物はそのrunの所有物だけ掃除する。
+元ログ・台帳・他runは削除しない。
 
 ### 使用量の上限で止まったとき
 
