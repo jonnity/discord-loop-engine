@@ -502,32 +502,140 @@ DR systemctl --user daemon-reload
 無効化すると、jonnity も Linux から `explorer.exe`・`clip.exe` などの Windows の実行ファイルを起動できなくなります。
 無効化できない場合は登録しないでください。
 
-登録（runner 3 つ）は `config.sh` で行います。**トークンは引数でなく環境変数 `ACTIONS_RUNNER_INPUT_TOKEN` で渡し**（`ps` に出るため）、
-`umask 077` は `config.sh` の間だけにします。登録後、status が読めるようにディレクトリの権限を整え（`.credentials` は 0600 のまま）、
-**`enable --now` の前に、改変検知の基準値を保存します**:
+runner の登録は 4 段階（1 展開・2 登録・3 基準値の保存・4 起動）です（runner ごと）。**各ブロックは単独で貼って動きます**（`H`・`N` を各ブロックの先頭で定義・検証し、前のブロックのシェル変数や関数に頼りません。別のシェルに貼っても `actions-runners//…` や空の `$H` にはなりません）。
+先頭の `N=` を runner 名に書き換えてから貼ります（例の `oogiri-doc-1`）。
+
+**runner 名の制約**: `^[a-z0-9][a-z0-9-]*$`（小文字英数字で始まり、あとは小文字英数字とハイフンだけ）。
+**ディレクトリ名 1 個であり、`/home/…` のようなパスを入れてはいけません**（`actions-runners//home/…` というディレクトリができ、`dle runner status` に警告が出ます）。
+
+登録後、status が読めるようにディレクトリの権限を整えます（`.credentials` は 0600 のまま）。
+トークンは引数でなく環境変数 `ACTIONS_RUNNER_INPUT_TOKEN` で渡し（`ps` に出るため）、`umask 077` は `config.sh` の間だけにします。**`enable --now` の前に、改変検知の基準値を保存します。**
+
+1. 展開。配布物（GitHub の runner のリリースの `actions-runner-linux-x64-<版>.tar.gz`）の絶対パスと sha256 は、リリースのページで確認した値に置き換えます（置き換えないと検証で止まります）。
+   配布物は jonnity だけが書ける場所に置いてください（検査と展開の間に差し替えられないように）。展開先が既にあるときは止まります:
 
 ```bash
-B=/usr/local/libexec/dle/baseline
-d=$H/actions-runners/<名前>
-for f in .runner .env .path run.sh run-helper.sh.template env.sh config.sh; do
-  if [ -f "$d/$f" ]; then sudo -H -u dle-runner sha256sum "$d/$f"; else echo "absent  $d/$f"; fi
-done | sudo tee $B/<名前>.sha256 >/dev/null
-for f in .bashrc .profile .bash_logout; do
-  if [ -f "$H/$f" ]; then sudo -H -u dle-runner sha256sum "$H/$f"; else echo "absent  $H/$f"; fi
-done | sudo tee $B/home.sha256 >/dev/null
-DR systemctl --user enable --now dle-runner@<名前>
+# [dle-runner-block:expand]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo 'dle-runner のホームを確認してください' >&2; exit 1; }
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo 'runner 名にはパスを入れないでください' >&2; exit 1; }
+  A='<公式の配布物（tar.gz）の絶対パス。版は GitHub の runner のリリースで確認する>'
+  S='<配布物の sha256>'
+  [[ "$A" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo '配布物の絶対パスを指定してください' >&2; exit 1; }
+  echo "$S  $A" | sha256sum -c --quiet -
+  [[ ! -e "$H/actions-runners/$N" ]] || { echo '既にあります' >&2; exit 1; }
+  sudo -H -u dle-runner install -d -m 755 -- "$H/actions-runners/$N"
+  sudo -H -u dle-runner tar -xzf - -C "$H/actions-runners/$N" < "$A"
+)
+```
+
+2. 登録。`R` は登録先のリポジトリ（owner/repo）です。実行ユーザーは `dle-runner`、カレントディレクトリは展開先の絶対パス、`--name` は `dle-<名前>`、`--work` は絶対パスです。
+   トークンは `dle-runner` のシェルに人が入力します（履歴・引数・ログに残しません）。`config.sh` は標準入力を読まないよう `</dev/null` を付けています:
+
+```bash
+# [dle-runner-block:register]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo 'dle-runner のホームを確認してください' >&2; exit 1; }
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo 'runner 名にはパスを入れないでください' >&2; exit 1; }
+  R=jonnity/oogiri-doc
+  [[ "$R" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]] || { echo 'リポジトリは owner/repo の形で指定してください' >&2; exit 1; }
+  sudo -H -u dle-runner bash -s -- "$H" "$N" "$R" <<'RUNNER_REGISTER'
+set -euo pipefail
+H=$1
+N=$2
+R=$3
+d="$H/actions-runners/$N"
+cd -- "$d"
+test -f "$d/config.sh"
+(
+  umask 077
+  IFS= read -r -s -p '登録用トークン: ' TOKEN </dev/tty
+  printf '\n' >/dev/tty
+  test -n "$TOKEN"
+  ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" ./config.sh --unattended \
+    --url "https://github.com/$R" --name "dle-$N" --work "$d/_work" --labels dle </dev/null
+  unset TOKEN
+)
+RUNNER_REGISTER
+)
+```
+
+3. 登録後、status が読めるようにディレクトリの権限を整えてから（`.credentials` は 0600 のまま）、基準値を保存します。保存前にハッシュの内容を表示するので、正当な内容か確認して `yes` を入力してください:
+
+```bash
+# [dle-runner-block:baseline]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo 'dle-runner のホームを確認してください' >&2; exit 1; }
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo 'runner 名にはパスを入れないでください' >&2; exit 1; }
+  d="$H/actions-runners/$N"
+  B=/usr/local/libexec/dle/baseline
+  test -f "$d/.runner"
+  R_SUMS=$(for f in .runner .env .path run.sh run-helper.sh.template env.sh config.sh; do
+    if [ -f "$d/$f" ]; then sudo -H -u dle-runner sha256sum "$d/$f" || exit 1; else echo "absent  $d/$f"; fi
+  done)
+  H_SUMS=$(for f in .bashrc .profile .bash_logout; do
+    if [ -f "$H/$f" ]; then sudo -H -u dle-runner sha256sum "$H/$f" || exit 1; else echo "absent  $H/$f"; fi
+  done)
+  printf '%s\n' "$R_SUMS" "$H_SUMS"
+  IFS= read -r -p '内容が正しければ yes: ' OK </dev/tty
+  [[ "$OK" == yes ]] || { echo '中止' >&2; exit 1; }
+  printf '%s\n' "$R_SUMS" | sudo tee "$B/$N.sha256" >/dev/null
+  printf '%s\n' "$H_SUMS" | sudo tee "$B/home.sha256" >/dev/null
+)
+```
+
+4. 起動。基準値を保存したあとにだけ行います:
+
+```bash
+# [dle-runner-block:start]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo 'dle-runner のホームを確認してください' >&2; exit 1; }
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo 'runner 名にはパスを入れないでください' >&2; exit 1; }
+  test -d "$H/actions-runners/$N"
+  test -s "/usr/local/libexec/dle/baseline/$N.sha256"
+  u=$(id -u dle-runner)
+  [[ "$u" =~ ^[0-9]+$ ]] || { echo 'dle-runner の uid を確認してください' >&2; exit 1; }
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR="/run/user/$u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" systemctl --user enable --now "dle-runner@$N"
+)
 dle runner status --json    # ? と警告が無いこと
 ```
 
 #### PATH を変える変更の反映
 
 root 所有のファイルは自動では更新されません。`templates/runner/runner-start.sh` を変えたら、セットアップと同じ形で入れ直します
-（`job-completed.sh` は変更が無ければ不要）。ユニットを変えたときだけ `/etc/systemd/user/dle-runner@.service` も入れ直して `DR systemctl --user daemon-reload` します。
+（`job-completed.sh` は変更が無ければ不要）。ユニットを変えたときだけ `/etc/systemd/user/dle-runner@.service` も入れ直し、先に `daemon-reload` を実行します（下の再起動のブロックの `restart "dle-runner@$N"` を `daemon-reload` に替えて、`dle-runner@$N` は付けずに実行）。そのあとで、下の再起動のブロックをそのまま実行します（入れ直し → daemon-reload → 再起動の順）。
 
 ```bash
 git -C <リポジトリ> show <コミット>:templates/runner/runner-start.sh | sudo install -m 755 -o root -g root /dev/stdin /usr/local/libexec/dle/runner-start.sh
-dle runner status                                  # 走行中の job が無いことを確かめてから
-DR systemctl --user restart dle-runner@<名前>      # runner ごとに（dle runner stop|start が表示するコマンドでもよい）
+```
+
+走行中の job が無いことを `dle runner status` で確かめてから、runner ごとに再起動します（`dle runner stop|start` が表示するコマンドでもよい）:
+
+```bash
+# [dle-runner-block:restart]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo 'dle-runner のホームを確認してください' >&2; exit 1; }
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo 'runner 名にはパスを入れないでください' >&2; exit 1; }
+  test -d "$H/actions-runners/$N"
+  u=$(id -u dle-runner)
+  [[ "$u" =~ ^[0-9]+$ ]] || { echo 'dle-runner の uid を確認してください' >&2; exit 1; }
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR="/run/user/$u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" systemctl --user restart "dle-runner@$N"
+)
 ```
 
 - run.sh に渡る PATH は固定で `/usr/local/bin:/usr/bin:/bin:<home>/.cargo/bin` です（`<home>` は `getent passwd` の結果。環境変数 `HOME` は使わない）。確認処理は `/usr/bin:/bin` のままで、広げるのは exec の直前だけです。job や `.env` の `PATH` 行は信用しません（`.env`・`.path` の改変は `dle runner status` が検知します）
@@ -537,7 +645,7 @@ DR systemctl --user restart dle-runner@<名前>      # runner ごとに（dle ru
 #### 実機で確認していないこと
 
 この節の手順と仕組みのうち、次は **実機で確認していません**（テストで確かめたのは、スクリプト・コード・テンプレートの文字列の振る舞いだけです）:
-別ユーザーの systemd 操作（`DR` 関数）、`runner-start.sh` の 71 と `RestartPreventExitStatus=71` の挙動、オフライン・強制終了・自己更新の後の復帰、
+別ユーザーの systemd 操作（`sudo -H -u dle-runner env XDG_RUNTIME_DIR=…`）、`runner-start.sh` の 71 と `RestartPreventExitStatus=71` の挙動、オフライン・強制終了・自己更新の後の復帰、
 `PrivateTmp`・`InaccessiblePaths` の動作、WSL interop が止まること（`/init <exe>` の直接実行を含む）と再起動後の持続、資源の上限、
 自己更新で基準値の対象が変わるか、`bin/runnerversion` の有無、**フックに `GITHUB_WORKSPACE`・`RUNNER_TEMP` の環境変数が渡ること**（ソースの読み取りでは渡る見込み）、
 **job から `pwsh`・`rustup` が見えること**（PATH の変更の実機での効果。Listener や `.path` が PATH を上書きしないか）。
@@ -549,7 +657,7 @@ DR systemctl --user restart dle-runner@<名前>      # runner ごとに（dle ru
   enabled のまま Listener がいなければ `⚠ 異常停止`、`disable` して止めた runner は `停止（無効化済み）`（警告にならない）です。
   警告が 1 つでもあれば終了コード 1。**public の警告が出たら、すぐ `dle runner stop --force` が表示するコマンドで止めてください**
 - `dle runner start|stop` — 実行する `sudo ... systemctl --user ...` のコマンドを表示します。走行中の runner は、`--force` を付けない限り stop のコマンドを表示しません
-- `dle runner update [--check]` — 最新の runner との比較と、手動で更新する手順（一時ディレクトリへの展開→検証→差し替え。失敗したら自動で元に戻す）を表示します。runner は自己更新するので、実行は任意です。**更新が成功しても `bin.dle-bak`・`externals.dle-bak` などの退避（`*.dle-bak`）は残ります。起動を確認してから削除してください**（次の更新の最初に消えます）
+- `dle runner update [--check]` — 最新の runner との比較と、手動で更新する手順（一時ディレクトリへの展開→検証→差し替え。失敗したら自動で元に戻す）を表示します。表示は利用者が 1 runner ずつ貼り付けて実行する前提で、展開先はホームの絶対パスで書かれます（`~` は実行したシェルの HOME で変わるため使いません）。runner は自己更新するので、実行は任意です。**更新が成功しても `bin.dle-bak`・`externals.dle-bak` などの退避（`*.dle-bak`）は残ります。起動を確認してから削除してください**（次の更新の最初に消えます）
 
 #### 改変検知の範囲と基準値の取り直し
 
@@ -581,9 +689,35 @@ secrets を使う job も全部 self-hosted になります。repository secrets
 
 #### 削除
 
+先に止めます（ディレクトリを消すと CHDIR で失敗し続けるため）。続いて、人がトークンを入力して登録を解除し、**消す対象のパスを確認してから**ディレクトリと基準値を消します:
+
 ```bash
-DR systemctl --user disable --now dle-runner@<名前>      # 先に止める（ディレクトリを消すと CHDIR で失敗し続けるため）
-# トークンを環境変数 ACTIONS_RUNNER_INPUT_TOKEN で渡して、dle-runner として ./config.sh remove --unattended を実行し、ディレクトリと基準値を消す
+# [dle-runner-block:remove]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || { echo 'dle-runner のホームを確認してください' >&2; exit 1; }
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || { echo 'runner 名にはパスを入れないでください' >&2; exit 1; }
+  d="$H/actions-runners/$N"
+  test -d "$d"
+  u=$(id -u dle-runner)
+  [[ "$u" =~ ^[0-9]+$ ]] || { echo 'dle-runner の uid を確認してください' >&2; exit 1; }
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR="/run/user/$u" DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" systemctl --user disable --now "dle-runner@$N"
+  sudo -H -u dle-runner bash -s -- "$d" <<'RUNNER_REMOVE'
+set -euo pipefail
+d=$1
+cd -- "$d"
+IFS= read -r -s -p '解除用トークン: ' TOKEN </dev/tty
+printf '\n' >/dev/tty
+test -n "$TOKEN"
+ACTIONS_RUNNER_INPUT_TOKEN="$TOKEN" ./config.sh remove --unattended </dev/null
+RUNNER_REMOVE
+  echo "消す: $d と /usr/local/libexec/dle/baseline/$N.sha256"
+  IFS= read -r -p '対象が正しければ yes: ' OK </dev/tty
+  [[ "$OK" == yes ]] || { echo '中止' >&2; exit 1; }
+  sudo rm -rf -- "$d" "/usr/local/libexec/dle/baseline/$N.sha256"
+)
 ```
 
 ## 設定（`~/.discord-loop-engine/config.json`）
