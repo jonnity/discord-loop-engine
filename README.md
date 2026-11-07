@@ -501,12 +501,28 @@ DR systemctl --user enable --now dle-runner@<名前>
 dle runner status --json    # ? と警告が無いこと
 ```
 
+#### PATH を変える変更の反映
+
+root 所有のファイルは自動では更新されません。`templates/runner/runner-start.sh` を変えたら、セットアップと同じ形で入れ直します
+（`job-completed.sh` は変更が無ければ不要）。ユニットを変えたときだけ `/etc/systemd/user/dle-runner@.service` も入れ直して `DR systemctl --user daemon-reload` します。
+
+```bash
+git -C <リポジトリ> show <コミット>:templates/runner/runner-start.sh | sudo install -m 755 -o root -g root /dev/stdin /usr/local/libexec/dle/runner-start.sh
+dle runner status                                  # 走行中の job が無いことを確かめてから
+DR systemctl --user restart dle-runner@<名前>      # runner ごとに（dle runner stop|start が表示するコマンドでもよい）
+```
+
+- run.sh に渡る PATH は固定で `/usr/local/bin:/usr/bin:/bin:<home>/.cargo/bin` です（`<home>` は `getent passwd` の結果。環境変数 `HOME` は使わない）。確認処理は `/usr/bin:/bin` のままで、広げるのは exec の直前だけです。job や `.env` の `PATH` 行は信用しません（`.env`・`.path` の改変は `dle runner status` が検知します）
+- 反映の確認は、入れ直して再起動した後に行います。Listener の PATH は `sudo cat /proc/<Listener の pid>/environ | tr '\0' '\n' | grep ^PATH=` で、job 側は検証用の workflow で `command -v pwsh rustup` で確かめます
+- 標準のサービスの経路（`bin/runsvc.sh`）は `.path` を読んで PATH を設定しますが、DLE の `runner-start.sh` は `run.sh` を直接 exec するのでその経路を通りません。`.path` を直したら内容を確認してから基準値を取り直します（下の「改変検知の範囲と基準値の取り直し」）
+
 #### 実機で確認していないこと
 
 この節の手順と仕組みのうち、次は **実機で確認していません**（テストで確かめたのは、スクリプト・コード・テンプレートの文字列の振る舞いだけです）:
 別ユーザーの systemd 操作（`DR` 関数）、`runner-start.sh` の 71 と `RestartPreventExitStatus=71` の挙動、オフライン・強制終了・自己更新の後の復帰、
 `PrivateTmp`・`InaccessiblePaths` の動作、WSL interop が止まること（`/init <exe>` の直接実行を含む）と再起動後の持続、資源の上限、
-自己更新で基準値の対象が変わるか、`bin/runnerversion` の有無、**フックに `GITHUB_WORKSPACE`・`RUNNER_TEMP` の環境変数が渡ること**（ソースの読み取りでは渡る見込み）。
+自己更新で基準値の対象が変わるか、`bin/runnerversion` の有無、**フックに `GITHUB_WORKSPACE`・`RUNNER_TEMP` の環境変数が渡ること**（ソースの読み取りでは渡る見込み）、
+**job から `pwsh`・`rustup` が見えること**（PATH の変更の実機での効果。Listener や `.path` が PATH を上書きしないか）。
 セットアップのあと、検証用の一時ブランチの workflow で確かめてください（掃除フックの目印ファイルが消えること、interop が起動できないこと、など）。
 
 #### 日常

@@ -15,6 +15,14 @@
 # テスト用の差し替え: DLE_CURL（curl の場所）・DLE_RUNNERS_ROOT（actions-runners の場所）・
 #   DLE_INTEROP_FILE（binfmt の WSLInterop）。PATH 経由の差し替えは使わない（PATH は固定する）。
 #   ユニットの UnsetEnvironment= で、manager の環境からは引き継がない。
+#
+# PATH: 確認処理（getent・stat・sed・head・curl）は /usr/bin:/bin のまま。run.sh に exec する直前だけ、
+#   固定の /usr/local/bin:/usr/bin:/bin:<home>/.cargo/bin を渡す（job が pwsh・rustup を使えるように）。
+#   値は固定のリテラルと getent の結果だけで組み立て、呼び出し元の PATH・DLE_*・ユニットの Environment=PATH は見ない。
+# Why not 冒頭の PATH を広げる: 確認処理が /usr/local/bin のコマンドの差し替えに影響される。
+# Why not 環境変数の HOME: manager 経由で入りうる。getent の結果（HOME_DIR）を使う。
+# .cargo/bin を最後に置く理由: dle-runner が書ける場所なので、system ディレクトリのコマンドを同名で隠させない。
+# HOME_DIR が相対パスや : 入りのときは .cargo/bin を足さない（cd "$dir" の後に相対要素が PATH に入る・要素が分割される）。
 
 set -u
 export PATH=/usr/bin:/bin
@@ -55,7 +63,12 @@ code=$("$CURL" --silent --max-time 10 --connect-timeout 5 --output /dev/null --w
 rc=$?
 [ "$rc" -eq 0 ] || exit 75
 case $code in
-404) cd "$dir" || exit 75; exec "$dir/run.sh" ;;
+404)
+	cd "$dir" || exit 75
+	run_path=/usr/local/bin:/usr/bin:/bin
+	case $HOME_DIR in /*:* | [!/]*) ;; *) run_path=$run_path:$HOME_DIR/.cargo/bin ;; esac
+	PATH="$run_path" exec "$dir/run.sh"
+	;;
 200) exit 71 ;;
 *) exit 75 ;;
 esac
