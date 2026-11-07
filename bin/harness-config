@@ -91,6 +91,16 @@ resolve_worktree_root() {
 }
 
 case "${1:-}" in
+--models|--model|--agent-model)
+	if { [ "$1" = --models ] && [ "$#" != 1 ]; } || { [ "$1" != --models ] && [ "$#" != 2 ]; }; then
+		echo "harness-config: --models / --model <role> / --agent-model <role> を指定してください" >&2
+		exit 2
+	fi
+	SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+	config_home="${DLE_CONFIG_HOME:-${DLE_HOME:-$HOME/.discord-loop-engine}}"
+	case "$config_home" in /*) ;; *) config_home="$ROOT/$config_home" ;; esac
+	exec node "$SCRIPT_DIR/../src/harness-models.ts" "$1" "$CONFIG" "$config_home" "${@:2}"
+	;;
 --worktree-root)
 	[ "$#" = 1 ] || { echo "harness-config: --worktree-root は引数不要です" >&2; exit 2; }
 	resolve_worktree_root

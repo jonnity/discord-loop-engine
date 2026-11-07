@@ -217,6 +217,21 @@ Phase 1 の質問の答えが **CLAUDE.md に明記された規約**から一意
 - 製品仕様・UX・セキュリティ・データ整合性に関わる新しい判断を含むなら、必ずブロッキングで待つ
 - 迷ったら待つ
 
+### 分類とモデルの再開確認
+
+Issue の PR 更新を見た tick・実装後・CI 修正後・rebase 後は issue-cycle「実 diff の分類と軽い経路」を
+PR 番号付きで再実行する。light は独立 verifier 1 段、normal は通常の二段階。
+一度 light から normal へ昇格した Issue は通常固定。設計→設計二段階→実装修正→実装二段階へ戻す。
+head/base/fingerprint/policy の変化で旧レビューを失効し、light 継続なら verifier をやり直す。
+承認依頼/merge 呼出直前は clean WT/index・HEAD=PR head と現 remote base/head/policy を照合し、
+分類が非0/不正 JSON/取得不能なら呼ばない。CI green・全 gate・新しい人の OK は両経路で必要。
+Issue 無し Dependabot は既存の A/head/CI 経路を維持し、この Issue label/設計工程を追加しない。
+
+日常 tick と CI 仕分けの Agent は `harness-config --agent-model tick` の alias を model 引数に指定する。
+旧 full ID の `ok=false` は issue-cycle と同じく model 引数を省略し親モデルを継承して同じ作業を起動する。
+role・値・理由を gate 実行の記録/レビュー記録と warnings に残し、再依頼/復帰でも工程の停止やレビュー省略をしない。
+監視サブエージェントの既存 `model: haiku` は維持する。Agent の実採用は新 session で実機確認する。
+
 ### 5. CI red への対応
 
 PR の CI が失敗したら（購読イベント、または tick ごとの `gh pr checks <PR>`）:
@@ -234,7 +249,7 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
    **再トリガー目的の空コミットは積まない**（harness-guard が止める）
 3. `REAL` → サブエージェントに「根本原因と、Codex に渡す修正指示を1段落で」まとめさせ、
    `learning_add`（tag: `ci-red`。engine が無ければ `.harness/failure-log.jsonl` に1行）で記録してから `codex-impl-{n}` に再依頼する（指示には `.harness/prompt-spec-{n}.md` の「差し戻し時の項目」を含める）
-   （Claude はコードを直さない。再依頼も共通起動手順で起動を単独の Bash に分け、拒否されたら直ちに blocked）。直ったら `harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
+   （Claude はコードを直さない。再依頼も共通起動手順で起動を単独の Bash に分け、拒否されたら直ちに blocked）。直ったら全 diff を再分類して現在の経路で再レビューし、`harness-gate` の終了値を `gate_rc=0; harness-gate || gate_rc=$?` で保持する。
    0なら push、1ならコード検査失敗として差し戻し、2なら設定を修正する。
    0でも一覧に ⚠（未確認）があれば承認依頼の前に現 head で `harness-gate` を再実行した結果を使う。
    3なら環境不備なので push を止め、Codex へ再差し戻しせず、この失敗は REAL の回数に加算しない。

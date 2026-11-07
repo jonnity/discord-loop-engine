@@ -5,6 +5,8 @@
 import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { parseStrictJson } from "./harness-json.ts";
+import { DEFAULT_ROLE_MODELS, type ModelOverrides, resolveModels, validateModels } from "./harness-models.ts";
 import { DEFAULT_WORKER_LIMIT, type WorkerLimit } from "./limit.ts";
 import { dleHome, socketPath } from "./protocol.ts";
 
@@ -27,6 +29,11 @@ export interface WorkerRefresh {
 }
 
 export interface Config {
+	models?: ModelOverrides;
+	/** 既定で埋める前の旧指定を保持し、出典を区別する */
+	legacyModels?: { window?: unknown; tick?: unknown };
+	/** 旧空文字の診断を起動時にも維持する */
+	modelWarnings?: string[];
 	home: string;
 	socketPath: string;
 	channelIds: string[];
@@ -61,6 +68,7 @@ export interface Config {
 }
 
 export const CONFIG_TEMPLATE = {
+	models: { ...DEFAULT_ROLE_MODELS },
 	channelIds: ["000000000000000000"],
 	allowedUserIds: ["000000000000000000"],
 	permissionRelay: false,
@@ -68,7 +76,7 @@ export const CONFIG_TEMPLATE = {
 	workspaceDir: "~/dle/workspaces",
 	concierge: { model: "sonnet", refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 } },
 	worker: {
-		model: null,
+		model: "sonnet",
 		extraArgs: [],
 		refresh: {
 			enabled: true,
@@ -138,7 +146,8 @@ const strList = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is
 export function loadConfig(home = dleHome()): Config {
 	const file = path.join(home, "config.json");
 	if (!existsSync(file)) throw new Error(`設定ファイルがありません: ${file}（dle init で雛形を作れます）`);
-	const raw = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
+	const raw = parseStrictJson(readFileSync(file, "utf8"), "models") as Record<string, unknown>;
+	const models = validateModels(raw.models);
 	const errors: string[] = [];
 	if (!isIdList(raw.channelIds)) errors.push("channelIds: Discord のチャンネル ID（数字の文字列）を1つ以上");
 	if (!isIdList(raw.allowedUserIds))
@@ -181,7 +190,11 @@ export function loadConfig(home = dleHome()): Config {
 	const num = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v > 0 ? v : d);
 	const nonnegative = (v: unknown, d: number) => (typeof v === "number" && Number.isFinite(v) && v >= 0 ? v : d);
 	const percent = (v: unknown) => (typeof v === "number" && Number.isFinite(v) && v > 0 && v <= 100 ? v : 15);
+	const resolved = resolveModels({ models, concierge: { model: c.model }, worker: { model: w.model } });
 	return {
+		models,
+		modelWarnings: resolved.warnings,
+		legacyModels: { window: c.model, tick: w.model },
 		home,
 		socketPath: typeof raw.socketPath === "string" ? raw.socketPath : socketPath(home),
 		channelIds,
@@ -192,7 +205,7 @@ export function loadConfig(home = dleHome()): Config {
 		workspaceDir: expandHome(typeof raw.workspaceDir === "string" ? raw.workspaceDir : "~/dle/workspaces"),
 		claudeBin: typeof raw.claudeBin === "string" ? raw.claudeBin : "claude",
 		concierge: {
-			model: typeof c.model === "string" ? c.model : "sonnet",
+			model: typeof c.model === "string" && c.model.trim() ? c.model : "sonnet",
 			extraArgs: strList(c.extraArgs),
 			allowedTools: strList(c.allowedTools),
 			refresh: {
@@ -204,7 +217,7 @@ export function loadConfig(home = dleHome()): Config {
 			},
 		},
 		worker: {
-			model: typeof w.model === "string" ? w.model : null,
+			model: typeof w.model === "string" && w.model.trim() ? w.model : "sonnet",
 			extraArgs: strList(w.extraArgs),
 			initialPrompt: typeof w.initialPrompt === "string" ? w.initialPrompt : "/discord-loop-engine:issue-loop",
 			wake: { enabled: typeof ww.enabled === "boolean" ? ww.enabled : true },

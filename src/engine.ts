@@ -20,6 +20,8 @@ import net, { type Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
+import { isObject, parseStrictJson } from "./harness-json.ts";
+import { resolveModels, validateModels } from "./harness-models.ts";
 import {
 	type Attention,
 	type AttentionKind,
@@ -804,6 +806,11 @@ export class Engine {
 			}
 			case "profile_activate": {
 				const name = who.role === "worker" ? who.name : str(a.project);
+				const draftFile = path.join(this.config.home, "projects", name, "draft.json");
+				if (existsSync(draftFile)) {
+					const draft = parseStrictJson(readFileSync(draftFile, "utf8"));
+					if (isObject(draft) && isObject(draft.profile)) validateModels(draft.profile.models);
+				}
 				const p = this.ledger.activateDraft(name);
 				const labelError = p.mode === "harness" ? await ensureLabels(p, this.exec) : null;
 				const task = this.ledger
@@ -942,9 +949,10 @@ export class Engine {
 		let profile: Record<string, unknown> | undefined;
 		let resolvedWorktreeRoot: string | undefined;
 		if (mode === "harness") {
-			profile = (typeof a.profile === "string" ? JSON.parse(a.profile) : a.profile) as
+			profile = (typeof a.profile === "string" ? parseStrictJson(a.profile) : a.profile) as
 				| Record<string, unknown>
 				| undefined;
+			validateModels(profile?.models);
 			const gate = profile?.gate;
 			if (
 				!Array.isArray(gate) ||
@@ -1013,6 +1021,7 @@ export class Engine {
 						...(hooks.length
 							? [`差し込み口:\n${hooks.map(([k, v]) => `- ${k}: ${v.map((c) => `\`${c}\``).join(" → ")}`).join("\n")}`]
 							: []),
+						`モデル要求値・出典・警告: ${JSON.stringify(resolveModels(this.config, profile?.models))}`,
 					].join("\n")
 				: `このリポジトリ独自のループで進めます: \`${str(a.initial_prompt)}\``;
 		return this.openGate(project, GATE_EVENTS.setup as (typeof GATE_EVENTS)[string], {

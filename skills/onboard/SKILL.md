@@ -181,3 +181,17 @@ HUP/INT/TERM は trap 回収と129/130/143での終了だけを保証し、子�
    harness-implementer への許可継承、実 Codex/tmux の監視・復帰・片付けを確認する。旧領域の整理は別途判断する。
 
 README「要件と検証の対応」に自動試験と手動確認を記している。
+
+### 役割モデルの設定
+
+`models` は window/tick/spec/review の部分上書き。既定はそれぞれ sonnet/sonnet/opus/opus。
+優先順は既定 < 旧 concierge.model/worker.model < engine の global models < 選択 profile.models。
+新 models は既知 role と非空文字列を検証し、full ID は保存・起動時にそのまま保持する。
+旧 worker null/欠落/空は Sonnet、空は警告。extraArgs の model/agents は警告付きで保持し、model 明示時は resolver 分を重ねない。
+`harness-config --models` で要求値・出典・warnings、`--model <role>` で起動用文字列を確認する。
+Agent は `--agent-model <role>` の alias を model 引数へ。旧 full ID が未対応なら理由を gate 実行の記録/レビュー記録と warnings に残し、
+model 引数を省略し親モデルを継承して同じ作業を起動する。工程の停止やレビュー省略はしない。
+変更は他項目を保持した完全な profile を提案→人の OK→activate→restart。global は engine/窓口/worker も restart する。
+native も worker 起動は tick を使うが、リポジトリ独自ループ内部の指定は維持する。
+通常設計担当は Codex のままで spec は設計代行へ適用。共有窓口本体は global window、project.window の委譲方式は未決。
+監視 haiku と advisor opus は現状維持し、各役割の実採用モデルは独立 session で確認する。

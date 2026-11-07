@@ -5,6 +5,7 @@ import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { type Config, DLE_TOOLS_RULE, expandHome, PLUGIN_SPEC } from "./config.ts";
+import { modelArgs, readModelConfig, resolveModels } from "./harness-models.ts";
 import type { Ledger, Project } from "./ledger.ts";
 import { type SessionTarget, shq } from "./supervisor.ts";
 
@@ -179,14 +180,20 @@ export function gitIdentityEnv(cfg: Config): Record<string, string> {
 }
 
 export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger): SessionTarget[] {
-	const baseEnv = { DLE_HOME: cfg.home, DLE_CONFIG_HOME: cfg.home, DLE_SOCKET: cfg.socketPath };
+	const globalModels = resolveModels(cfg);
+	globalModels.warnings = [...new Set([...globalModels.warnings, ...(cfg.modelWarnings ?? [])])];
+	const baseEnv = {
+		DLE_MODELS: JSON.stringify(globalModels),
+		DLE_HOME: cfg.home,
+		DLE_CONFIG_HOME: cfg.home,
+		DLE_SOCKET: cfg.socketPath,
+	};
 	const channelArgs = ["--dangerously-load-development-channels", PLUGIN_SPEC];
 	const concierge: SessionTarget = {
 		name: "concierge",
 		cwd: path.join(cfg.home, "concierge"),
 		command: claudeCommand(cfg, { ...baseEnv, DLE_ROLE: "concierge" }, [
-			"--model",
-			cfg.concierge.model,
+			...modelArgs(globalModels.values.window, cfg.concierge.extraArgs),
 			...channelArgs,
 			"--allowedTools",
 			DLE_TOOLS_RULE,
@@ -232,6 +239,14 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 					: `/discord-loop-engine:onboard${p.harnessOnly ? " harness" : ""}`;
 			let worktreeRoot: string | undefined;
 			let startupError: string | undefined;
+			let models = globalModels;
+			try {
+				const profilePath = ledger?.effectiveProfilePath(p);
+				if (profilePath) readModelConfig(profilePath);
+				models = resolveModels(cfg, profile?.models);
+			} catch (error) {
+				startupError = `${p.name}: ${error instanceof Error ? error.message : String(error)}`;
+			}
 			if (!native) {
 				try {
 					worktreeRoot = resolveWorktreeRoot({
@@ -255,6 +270,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 							cfg,
 							{
 								...baseEnv,
+								DLE_MODEL_PROFILE: ledger?.effectiveProfilePath(p) ?? "",
 								...gitIdentityEnv(cfg),
 								DLE_ROLE: "worker",
 								DLE_PROJECT: p.name,
@@ -262,7 +278,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 							},
 							[
 								...(worktreeRoot ? ["--add-dir", worktreeRoot] : []),
-								...(cfg.worker.model ? ["--model", cfg.worker.model] : []),
+								...modelArgs(models.values.tick, cfg.worker.extraArgs),
 								...channelArgs,
 								"--allowedTools",
 								DLE_TOOLS_RULE,

@@ -1585,6 +1585,50 @@ test("互換性: 正常な配信・追加5項目・project優先順位・JSON pr
 	}
 });
 
+test("M3: models の提案と確定は共通検証し、値・出典・警告を案に表示する", async () => {
+	const { engine, home, rest } = setupEngine();
+	engine.ledger.upsertProject({ name: "models", repo: "x/y", path: home, active: true, mode: "harness" });
+	const who = { role: "worker", name: "models" } as const;
+	try {
+		for (const models of [null, [], { tick: "" }, { other: "opus" }]) {
+			await assert.rejects(
+				engine.call(who, "profile_propose", {
+					mode: "harness",
+					summary: "モデル案",
+					profile: { gate: [{ name: "test", run: "true" }], models },
+				}),
+				/models/,
+			);
+			assert.equal(engine.ledger.draft("models"), null);
+		}
+		await assert.rejects(
+			engine.call(who, "profile_propose", {
+				mode: "harness",
+				summary: "モデル案",
+				profile: '{"gate":[{"name":"test","run":"true"}],"models":{"tick":"opus","tick":"sonnet"}}',
+			}),
+			/重複/,
+		);
+		await engine.call(who, "profile_propose", {
+			mode: "harness",
+			summary: "モデル案",
+			profile: { gate: [{ name: "test", run: "true" }], models: { review: "sonnet", spec: "full-id" } },
+		});
+		const body = rest.calls.map((c) => c.content ?? "").join("\n");
+		assert.match(body, /review.*sonnet/);
+		assert.match(body, /project/);
+		assert.match(body, /model 引数を省略/);
+		const draft = engine.ledger.draft("models");
+		assert.ok(draft?.profile);
+		draft.profile.models = { tick: null };
+		engine.ledger.saveDraft("models", draft);
+		await assert.rejects(engine.call(who, "profile_activate", {}), /models/);
+		assert.equal(existsSync(engine.ledger.profilePath("models")), false);
+	} finally {
+		await engine.stop();
+	}
+});
+
 test("W5: worktreeRootの提案検証は保存・承認依頼前、明示値の維持と承認付き除去", async () => {
 	const { engine, rest, home } = setupEngine(5, async () => ({ ok: true, stdout: "", stderr: "" }));
 	await engine.start();
