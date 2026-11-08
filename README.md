@@ -355,15 +355,60 @@ socket/spawn が EPERM なら失敗テスト名・メッセージを残し、制
 
 ### 更新する
 
+ローカル環境の所有者が、再起動できる状態で行います。以下は Linux/WSL2 + Bash、`~/discord-loop-engine`、user scope の例です。
+実際のインストール先と scope、`claude plugin update --help` / `claude plugin uninstall --help` / `claude plugin install --help`、GitHub の読取り権限を確認してください。
+失敗した段で止まり、原因を確認してから進みます。
+
 ```bash
 git -C ~/discord-loop-engine pull
 claude plugin marketplace update discord-loop-engine
-claude plugin update discord-loop-engine@discord-loop-engine
-dle down && dle up
+claude plugin update discord-loop-engine@discord-loop-engine --scope user
 ```
 
-plugin の cache が古いと、worker の PATH に `harness-codex` などの入口が入らず、許可を足しても届きません（0.1.1 に version を上げたのは、据え置きだと `claude plugin update` が更新するか未確認のため、更新を確実にする狙いです）。
-更新後、worker の plugin cache の `bin/` に `harness-codex` があることを確かめ、worker を再起動してください（許可は起動時に決まります）。
+marketplace の取得とインストール済み plugin の更新は別です。同じ version のままでは cache の内容は更新されず、`latest` と出ても内容が古い場合があります。
+plugin の cache が古いと、worker の PATH に `harness-codex` などの入口が入らず、許可を足しても届きません。
+
+user scope の marketplace checkout は `~/.claude/plugins/marketplaces/discord-loop-engine` です。冒頭で pull した開発用クローン `~/discord-loop-engine` とは別のディレクトリです。
+`claude plugin list --json` で対象の version・installPath・有効/無効の状態を確認し、次をこの marketplace checkout と照合します。
+
+- version を、marketplace checkout の `.claude-plugin/plugin.json` と比較する。版の一致だけで更新成功としない。
+- installPath と marketplace checkout の `skills/concierge/SKILL.md` を比較し、そのリリースで変更されたファイルも確認する（代表1件だけでは全配布物の一致を証明できません）。
+- installPath の `bin/harness-codex` が存在し、実行可能であることを確認する。
+
+内容が古いままなら、有効/無効の状態を控えてから同じ scope に再インストールし、上の観点と状態の保持を再確認します。
+
+```bash
+claude plugin uninstall discord-loop-engine@discord-loop-engine --scope user --keep-data
+claude plugin install discord-loop-engine@discord-loop-engine --scope user
+```
+
+内容を確認したら、engine と既存セッションを順に再起動します。まず engine を停止します。
+
+```bash
+dle down
+```
+
+起動していないときは「起動していません」と出て非0になります。稼働中の停止に失敗した場合は原因を確認してください。
+停止指示はすぐ戻るため、次で engine が停止になったのを確かめてから起動へ進みます。
+
+```bash
+dle status
+```
+
+停止を確認したら起動します。
+
+```bash
+dle up
+```
+
+窓口が立ち上がったら（15 秒ほど）、既存セッションを再起動します。`dle down` では窓口と worker のセッションは止まりません。
+
+```bash
+dle restart --all
+```
+
+busy で見送られたセッションは作業完了後に `dle restart <名前>` で再起動し、新しい窓口/worker がロードした版と bin を確認します。
+engine・plugin・CLI・worker の配置と版を揃えてください。許可とスキルはセッションの起動時に読み込まれます。
 
 ### Codex の設定移行
 
@@ -1046,6 +1091,8 @@ npm run check       # Biome
 
 engine は TypeScript をビルドせず、Node の型ストリップでそのまま実行しています。
 ハーネス（`bin/harness-*`）は bash です。
+
+プラグインに効く変更の版更新は、[プラグインのリリース手順](docs/plugin-release.md)を参照してください。
 
 ### ツールの入力契約
 
