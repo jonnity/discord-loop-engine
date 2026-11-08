@@ -75,16 +75,15 @@ mkrunner oogiri-doc-1 "$GOOD"; : >"$R/path.log"
 (PATH="$R/pathfake:$PATH" CURLBIN="$R/fake/curl2" start oogiri-doc-1 >/dev/null)
 check "runner-start: PATH の先頭の偽の curl は使われず、DLE_CURL だけが効く" 'grep -q dle_curl "$R/path.log" && ! grep -q path_curl "$R/path.log"'
 
-# run.sh に渡る PATH: 固定のリテラル + getent の HOME_DIR だけ（呼び出し元の PATH・HOME は影響しない）
+# run.sh に渡る PATH: 固定のリテラル + getent の HOME_DIR を基にした runner の場所（呼び出し元の PATH・HOME は影響しない）
 mkprobe() { # PATH を記録する偽の run.sh を持つ runner
 	rm -f "$R/root/path-probe/path" # 前回の値で通る偽陽性を防ぐ
 	mkrunner path-probe "$GOOD"
 	printf '#!/bin/sh\nprintf %%s "$PATH" > "$(dirname "$0")/path"\n' >"$R/root/path-probe/run.sh"
 }
-REAL_HOME=$(getent passwd "$(id -un)" | cut -d: -f6)
-EXP="/usr/local/bin:/usr/bin:/bin:$REAL_HOME/.cargo/bin"
+EXP="/usr/local/bin:/usr/bin:/bin:$R/root/path-probe/.cargo/bin"
 mkprobe
-check "runner-start: run.sh の PATH は /usr/local/bin:/usr/bin:/bin:<HOME_DIR>/.cargo/bin" '[ "$(FAKE_CODE=404 start path-probe)" = 0 ] && [ "$(cat "$R/root/path-probe/path")" = "$EXP" ]'
+check "runner-start: run.sh の PATH は /usr/local/bin:/usr/bin:/bin:<runner>/.cargo/bin" '[ "$(FAKE_CODE=404 start path-probe)" = 0 ] && [ "$(cat "$R/root/path-probe/path")" = "$EXP" ]'
 mkprobe
 check "runner-start: 環境変数 HOME を変えても run.sh の PATH は同じ" '[ "$(HOME=/nonexistent/fake FAKE_CODE=404 start path-probe)" = 0 ] && [ "$(cat "$R/root/path-probe/path")" = "$EXP" ]'
 mkprobe
@@ -92,16 +91,33 @@ check "runner-start: 呼び出し側の PATH を差し替えても run.sh の PA
 	'(PATH="$R/pathfake:/tmp/evil:$PATH" FAKE_CODE=404 start path-probe >/dev/null); p=$(cat "$R/root/path-probe/path"); [ "$p" = "$EXP" ] && case $p in */.cargo/bin) true ;; *) false ;; esac'
 check "runner-start: 確認処理の PATH は /usr/bin:/bin のまま（広げるのは exec の直前の 1 か所だけ）" \
 	'grep -q "^export PATH=/usr/bin:/bin$" "$START" && [ "$(grep -v "^[[:space:]]*#" "$START" | grep -c "\bPATH=")" = 2 ]'
-# HOME_DIR の検査: getent の行だけ差し替えたコピーで確かめる
+# HOME_DIR と ROOT の検査: getent の行だけ差し替えても、実際に値を組む ROOT が優先される
 path_with_home() { # $1=HOME_DIR の値
 	sed "s|^HOME_DIR=.*|HOME_DIR='$1'|" "$START" >"$R/start-home.sh"
 	mkprobe
 	DLE_CURL="$R/fake/curl" DLE_RUNNERS_ROOT="$R/root" DLE_INTEROP_FILE="$R/interop-off" FAKE_CODE=404 bash "$R/start-home.sh" path-probe >/dev/null 2>&1
 	cat "$R/root/path-probe/path"
 }
-check "runner-start: HOME_DIR が絶対パスなら末尾に <HOME_DIR>/.cargo/bin" '[ "$(path_with_home /home/dle-runner)" = "/usr/local/bin:/usr/bin:/bin:/home/dle-runner/.cargo/bin" ]'
-check "runner-start: HOME_DIR が相対パスなら .cargo/bin を足さない" '[ "$(path_with_home relative/home)" = "/usr/local/bin:/usr/bin:/bin" ]'
-check "runner-start: HOME_DIR に : を含むなら .cargo/bin を足さない" '[ "$(path_with_home /home/a:b)" = "/usr/local/bin:/usr/bin:/bin" ]'
+check "runner-start: HOME_DIR が絶対パスなら末尾に <runner>/.cargo/bin" '[ "$(path_with_home /home/dle-runner)" = "$EXP" ]'
+check "runner-start: HOME_DIR が相対パスでも絶対 ROOT の .cargo/bin を使う" '[ "$(path_with_home relative/home)" = "$EXP" ]'
+check "runner-start: HOME_DIR に : があっても絶対 ROOT の .cargo/bin を使う" '[ "$(path_with_home /home/a:b)" = "$EXP" ]'
+
+# ROOT に : がある場合は、HOME_DIR が正常でも PATH を分割せず Rust の環境変数も注入しない。
+mkdir -p "$R/a:b/path-probe"
+printf '%s' "$GOOD" >"$R/a:b/path-probe/.runner"
+cat >"$R/a:b/path-probe/run.sh" <<'SH'
+#!/bin/sh
+printf '%s|%s|%s' "$PATH" "${CARGO_HOME-unset}" "${RUSTUP_HOME-unset}" > "$(dirname "$0")/env"
+SH
+chmod +x "$R/a:b/path-probe/run.sh"
+root_with_colon() {
+	rm -f "$R/a:b/path-probe/env"
+	env -u CARGO_HOME -u RUSTUP_HOME DLE_CURL="$R/fake/curl" DLE_RUNNERS_ROOT="$R/a:b" \
+		DLE_INTEROP_FILE="$R/interop-off" FAKE_CODE=404 bash "$START" path-probe >/dev/null 2>&1 &&
+		cat "$R/a:b/path-probe/env"
+}
+check "runner-start: ROOT に : があると PATH は固定3要素、Rust の環境変数は未設定のまま" \
+	'[ "$(root_with_colon)" = "/usr/local/bin:/usr/bin:/bin|unset|unset" ]'
 
 # --- job-completed.sh ----------------------------------------------------------------------------
 AR="$R/ar"

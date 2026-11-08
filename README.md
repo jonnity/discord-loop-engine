@@ -548,7 +548,7 @@ DR systemctl --user daemon-reload
 無効化できない場合は登録しないでください。
 
 runner の登録は 4 段階（1 展開・2 登録・3 基準値の保存・4 起動）です（runner ごと）。**各ブロックは単独で貼って動きます**（`H`・`N` を各ブロックの先頭で定義・検証し、前のブロックのシェル変数や関数に頼りません。別のシェルに貼っても `actions-runners//…` や空の `$H` にはなりません）。
-先頭の `N=` を runner 名に書き換えてから貼ります（例の `oogiri-doc-1`）。
+先頭の `N=` を runner 名に書き換えてから貼ります（例の `oogiri-doc-1`）。Rust を使う runner は、登録・基準値の保存後、起動前に「Rust の分離・導入・復旧」の rust-bootstrap を行います。新規登録では rust-before は不要です。起動後に rust-after で Listener の環境を照合します（変更前の容量記録がなければ、容量比較は省きます）。
 
 **runner 名の制約**: `^[a-z0-9][a-z0-9-]*$`（小文字英数字で始まり、あとは小文字英数字とハイフンだけ）。
 **ディレクトリ名 1 個であり、`/home/…` のようなパスを入れてはいけません**（`actions-runners//home/…` というディレクトリができ、`dle runner status` に警告が出ます）。
@@ -659,6 +659,8 @@ dle runner status --json    # ? と警告が無いこと
 
 #### PATH を変える変更の反映
 
+Rust の分離を導入する際は、先に「Rust の分離・導入・復旧」の rust-before と rust-bootstrap を Rust 使用対象全てで完了させてから、この節で配布・再起動します。
+
 root 所有のファイルは自動では更新されません。`templates/runner/runner-start.sh` を変えたら、セットアップと同じ形で入れ直します
 （`job-completed.sh` は変更が無ければ不要）。ユニットを変えたときだけ `/etc/systemd/user/dle-runner@.service` も入れ直し、先に `daemon-reload` を実行します（下の再起動のブロックの `restart "dle-runner@$N"` を `daemon-reload` に替えて、`dle-runner@$N` は付けずに実行）。そのあとで、下の再起動のブロックをそのまま実行します（入れ直し → daemon-reload → 再起動の順）。
 
@@ -683,9 +685,204 @@ git -C <リポジトリ> show <コミット>:templates/runner/runner-start.sh | 
 )
 ```
 
-- run.sh に渡る PATH は固定で `/usr/local/bin:/usr/bin:/bin:<home>/.cargo/bin` です（`<home>` は `getent passwd` の結果。環境変数 `HOME` は使わない）。確認処理は `/usr/bin:/bin` のままで、広げるのは exec の直前だけです。job や `.env` の `PATH` 行は信用しません（`.env`・`.path` の改変は `dle runner status` が検知します）
-- 反映の確認は、入れ直して再起動した後に行います。Listener の PATH は `sudo cat /proc/<Listener の pid>/environ | tr '\0' '\n' | grep ^PATH=` で、job 側は検証用の workflow で `command -v pwsh rustup` で確かめます
+- run.sh に渡る PATH は固定で `/usr/local/bin:/usr/bin:/bin:<home>/actions-runners/<名前>/.cargo/bin` です（`<home>` は `getent passwd` の結果。環境変数 `HOME` は使わない）。確認処理は `/usr/bin:/bin` のままで、広げるのは exec の直前だけです。`CARGO_HOME` と `RUSTUP_HOME` も同じ runner の場所から渡します。job や `.env` による上書きは防げないため、実効環境を確認します。job や `.env` の `PATH` 行は信用しません（`.env`・`.path` の改変は `dle runner status` が検知します）
+- 反映の確認は、入れ直して再起動した後に行います。Listener の 4 つの環境値は下の rust-after ブロックで、job 側は検証用の workflow で 4 つの環境値と `command -v pwsh rustup cargo rustc` を確かめます
 - 標準のサービスの経路（`bin/runsvc.sh`）は `.path` を読んで PATH を設定しますが、DLE の `runner-start.sh` は `run.sh` を直接 exec するのでその経路を通りません。`.path` を直したら内容を確認してから基準値を取り直します（下の「改変検知の範囲と基準値の取り直し」）
+
+#### Rust の分離・導入・復旧
+
+旧共有ディレクトリへの symlink や hardlink によるコピーは使わず、runner ごとに新しい `.cargo` と `.rustup` を作ります。`credentials.toml`・`config.toml` は秘密を含み得るため、一括コピーしません。
+
+`HOME` は共有のまま、`CARGO_HOME`・`RUSTUP_HOME` をそれぞれ `actions-runners/<名前>/.cargo`・`.rustup` に分け、Rust の実行ファイルも runner ごとに置きます。`runner-start.sh` が exec の直前にこの 2 つの環境変数と `PATH` を渡し、`HOME` は systemd の値を引き継ぎます。同じ UID で動くため、runner 間のセキュリティ境界にはなりません。また、分離だけでは同じ runner 内の cache による rustup の削除は防げません。所有者が workflow の cache 設定を確認し、同じ runner の次の job まで検証してください。
+
+容量は Rust を使う runner の数・toolchain の版・component・target に応じて増えます。`dle runner status` が表示する容量は `_work` だけなので、Rust のディレクトリの使用量は `du`・`df` で別に確認します。
+
+以下は所有者が実行する手順です。worker・Codex は実機を実行・変更しません。各ブロックはシェル変数や関数を引き継がずに実行できます。移行時の記録ファイルは、実行者のホームの `.local/state/dle-runner-rust/<名前>` に保存し、後のブロックで読みます（ブロック内の変数 `E` がこの記録先です）。`N` は API の表示名ではなく `actions-runners` 直下のディレクトリ名です。例の `oogiri-doc-1` を対象名に書き換えてください。
+
+##### 通し手順と中断の扱い
+
+既存 runner の移行は、**新規 job の受付停止と idle の確認 → 全対象の変更前記録・停止・残存プロセスの確認 → 全対象の rust-bootstrap → 設定・基準値の確認 → root 所有ファイルの配布 → 全対象の再起動 → job・基準値の前後比較と容量の確認 → 後片付け**の順で行います。ここで「全対象」は Rust を使う runner を指します。Rust を使わない runner には bootstrap は不要です。
+
+wrapper と unit は全 instance に共通する配布物です。使う instance を棚卸しし、Rust を使う全対象の準備が終わってから配布してください。未準備のまま配布すると、`Restart=always`・自己更新・WSL の再起動による次回起動で、準備していない `CARGO_HOME` を使います。Rust を使わなかった runner に Rust の job を追加する場合も、その初回起動前に bootstrap します。新規登録では登録・基準値の保存後に rust-bootstrap を実行し、起動後に rust-after を実行します。rust-before の記録がない場合、rust-after は容量比較を省き、Listener の環境を照合します。
+
+中断時間と対象の runner は所有者が決めます。job を無断で cancel したり、busy の runner を強制停止したりしないでください。同じ UID の他の job が共有領域へ書き込む間は、共有 Rust の修復を行いません。旧共有 Rust は保持し、新規の個別ディレクトリに rustup を再導入します。共有 `.rustup` を再利用する暫定修復が必要なら、全該当 runner を停止して別の復旧計画を立てます。自動的には共有へ切り替えません。
+
+1. 全対象について変更前の記録を取り、停止します。新規 job の受付を止め、`dle runner status` と GitHub の busy 表示の両方で idle を確認してから貼ってください。ブロック内でも Worker の不在を確認し、実行中または確認に失敗した場合は、記録先の作成や停止へ進まず中断します。
+
+```bash
+# [dle-runner-block:rust-before]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || exit 1
+  O=$(getent passwd "$(id -un)" | cut -d: -f6)
+  [[ "$O" =~ ^/[A-Za-z0-9._/-]+$ && "$O" != "$H" ]] || exit 1
+  E="$O/.local/state/dle-runner-rust/$N"
+  d="$H/actions-runners/$N"
+  test -d "$d"
+  [[ ! -e "$E" && ! -L "$E" ]] || { echo "既存の記録を確認してください: $E" >&2; exit 1; }
+  u=$(id -u dle-runner)
+  [[ "$u" =~ ^[0-9]+$ ]] || exit 1
+  worker_re=${d//./\\.}
+  if pgrep -af "^$worker_re/bin/Runner[.]Worker( |$)"; then
+    echo 'job が実行中なので停止しません' >&2
+    exit 1
+  else
+    rc=$?
+    [[ "$rc" -eq 1 ]] || exit "$rc"
+  fi
+  umask 077
+  mkdir -p "$E"
+  sudo cat /usr/local/libexec/dle/runner-start.sh > "$E/runner-start.before.sh"
+  sudo cat /etc/systemd/user/dle-runner@.service > "$E/unit.before"
+  sha256sum "$E/runner-start.before.sh" "$E/unit.before" > "$E/before.sha256"
+  cat "$E/before.sha256"
+  sudo -H -u dle-runner du -s -B1 "$H/.cargo" "$H/.rustup" > "$E/usage.before"
+  df -B1 "$H" > "$E/df.before"
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR="/run/user/$u" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" \
+    systemctl --user stop "dle-runner@$N"
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR="/run/user/$u" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" \
+    systemctl --user show "dle-runner@$N" -p ActiveState -p MainPID > "$E/stopped.txt"
+  if pgrep -af "^$worker_re/bin/Runner[.](Listener|Worker)( |$)"; then
+    echo '残存プロセスを確認してください' >&2
+    exit 1
+  else
+    rc=$?
+    [[ "$rc" -eq 1 ]] || exit "$rc"
+  fi
+  test -s "$E/runner-start.before.sh"
+  test -s "$E/unit.before"
+  test -s "$E/usage.before"
+)
+```
+
+Worker が実行中、または UID の取得・Worker の確認に失敗した場合は、記録先を作らず中断します。記録先が残るのは、記録取得の途中で失敗した場合、または記録後の停止・確認まで進んだ場合です。表示した `before.sha256` は、所有者が記録先の外にも保管します。記録開始後に `du` などが失敗しても、記録先は消しません。
+
+再開時は、表示された記録先の絶対パスで各ファイル（wrapper・unit・usage・df・stopped）の存在・非空・内容と、対象 service の実際の停止状態を確認してください。記録と停止が揃っていれば、rust-before を繰り返さずに次へ進みます。記録取得の途中で失敗して不足している場合は、同じ私有親ディレクトリ内の未使用の別名（runner 名と採取日時を含む）へ移し、証拠を保持します。元の記録先が存在しないことと、受付停止・idle を確認してから、rust-before を実行し直してください。壊れた共有ディレクトリの欠落などで `du` が失敗した場合は、失敗対象と理由を記録し、所有者が存在する対象に限定して採取し直します。空ファイルは成功記録として扱いません。
+
+記録が揃った後の停止・確認だけが失敗した場合は、記録先を移動・再作成しません。受付停止・idle を再確認し、既存の記録を保持して停止と残存プロセスの確認をやり直します。
+
+停止の前後に job が到着する競合があるため、受付停止・idle の判定・全対象の停止完了を人が確認します。HUP・INT・TERM・親シェル終了後も、自動で runner を起動し直しません。systemd の control-group による停止と 5 分の timeout の結果を確認し、Listener・Worker とその子孫が残っていないことを確かめてください。`pgrep` だけでは全子孫の不在を証明できません。未完了なら停止状態と記録先を保持し、共有の engine・tmux や他の runner を kill しないでください。
+
+2. **配布前に全対象で**、rustup を個別に再導入します。明示した環境変数で実行するため、新しい wrapper は不要です。Rust 本体は root として実行しません。壊れた共有領域は消さず、新規の `.cargo`・`.rustup` だけを作ります。個別ディレクトリが既にある場合は止め、内容を確認して別の復旧計画を立ててください。公式の[導入方法](https://rust-lang.github.io/rustup/installation/other.html)に従い、`--no-modify-path` で共有の profile を変更せずに導入します。
+
+```bash
+# [dle-runner-block:rust-bootstrap]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || exit 1
+  d="$H/actions-runners/$N"
+  test -d "$d"
+  [[ ! -e "$d/.cargo" && ! -L "$d/.cargo" ]] || exit 1
+  [[ ! -e "$d/.rustup" && ! -L "$d/.rustup" ]] || exit 1
+  I=$(mktemp)
+  trap 'rm -f -- "$I"' EXIT
+  curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs -o "$I"
+  test -s "$I"
+  sha256sum "$I"
+  sudo -H -u dle-runner install -d -m 755 -- "$d/.cargo" "$d/.rustup"
+  sudo -H -u dle-runner env -i HOME="$H" PATH=/usr/local/bin:/usr/bin:/bin \
+    CARGO_HOME="$d/.cargo" RUSTUP_HOME="$d/.rustup" \
+    /bin/sh -s -- -y --no-modify-path --profile minimal --default-toolchain none < "$I"
+  sudo -H -u dle-runner test -s "$d/.cargo/bin/rustup"
+  sudo -H -u dle-runner test -x "$d/.cargo/bin/rustup"
+  sudo -H -u dle-runner env -i HOME="$H" PATH="/usr/local/bin:/usr/bin:/bin:$d/.cargo/bin" \
+    CARGO_HOME="$d/.cargo" RUSTUP_HOME="$d/.rustup" "$d/.cargo/bin/rustup" --version
+)
+```
+
+表示した sha256 は取得ファイルの記録であり、既知の期待値と照合した証明ではありません。インストーラを固定の SHA・配布物で管理する場合は、所有者が確認した公式配布物と照合してください。プロキシなどが必要で `env -i` では通信できない場合は、必要な項目を所有者が確認して追加します。呼出元の資格情報は丸ごと渡しません。ダウンロードの失敗・割込み時にはインストーラの一時ファイルだけを回収し、途中生成の個別ディレクトリは消さず、停止したまま調査します。
+
+3. 停止中に設定を確認します。`.env` に旧 `CARGO_HOME`・`RUSTUP_HOME` があれば、内容を確認して修正してください。`.env`・`.path`・ホームの基準値に差がある場合は「改変検知の範囲と基準値の取り直し」で差を確認して保存します。警告を黙らせる目的では取り直しません。各対象で `.cargo`・`.rustup` の存在、`bin/rustup` の非空・実行可能・`--version` の成功を確認し、**全対象の bootstrap が成功してから配布します**。root 所有ファイルは「PATH を変える変更の反映」に従い、レビューしたコミットから wrapper を入れ直します。unit も変更した場合にだけ入れ直し、daemon-reload します。新規登録でも、起動前に bootstrap を行ってください。
+
+4. 準備と配布が終わったら、「PATH を変える変更の反映」の再起動ブロックを全対象へ実行します。新規登録の場合は「起動」のブロックを使います。Listener が立ち上がったことを確認してから、下の記録・環境照合ブロックを貼ってください。`HOME`・`CARGO_HOME`・`RUSTUP_HOME`・`PATH` の 4 つを照合し、変更前の容量記録がある場合にだけ容量も比較します。
+
+```bash
+# [dle-runner-block:rust-after]
+(
+  set -euo pipefail
+  H=$(getent passwd dle-runner | cut -d: -f6)
+  [[ "$H" =~ ^/[A-Za-z0-9._/-]+$ ]] || exit 1
+  N=oogiri-doc-1
+  [[ "$N" =~ ^[a-z0-9][a-z0-9-]*$ ]] || exit 1
+  O=$(getent passwd "$(id -un)" | cut -d: -f6)
+  [[ "$O" =~ ^/[A-Za-z0-9._/-]+$ && "$O" != "$H" ]] || exit 1
+  E="$O/.local/state/dle-runner-rust/$N"
+  d="$H/actions-runners/$N"
+  umask 077
+  mkdir -p "$E"
+  test -s "/usr/local/libexec/dle/baseline/$N.sha256"
+  sudo -H -u dle-runner test -x "$d/.cargo/bin/rustup"
+  u=$(id -u dle-runner)
+  [[ "$u" =~ ^[0-9]+$ ]] || exit 1
+  sudo -H -u dle-runner env XDG_RUNTIME_DIR="/run/user/$u" \
+    DBUS_SESSION_BUS_ADDRESS="unix:path=/run/user/$u/bus" \
+    systemctl --user show "dle-runner@$N" -p ActiveState -p MainPID > "$E/service.after"
+  PID=$(ps -eo pid=,args= | awk -v exe="$d/bin/Runner.Listener" '$2 == exe { print $1 }')
+  [[ "$PID" =~ ^[0-9]+$ ]] || { echo '対象の Listener を1件に特定してください' >&2; exit 1; }
+  sudo -H -u dle-runner cat "/proc/$PID/environ" | tr '\0' '\n' | \
+    grep -E '^(HOME|PATH|CARGO_HOME|RUSTUP_HOME)=' > "$E/exec-env.after"
+  grep -Fxq -- "HOME=$H" "$E/exec-env.after"
+  grep -Fxq -- "CARGO_HOME=$d/.cargo" "$E/exec-env.after"
+  grep -Fxq -- "RUSTUP_HOME=$d/.rustup" "$E/exec-env.after"
+  grep -Fxq -- "PATH=/usr/local/bin:/usr/bin:/bin:$d/.cargo/bin" "$E/exec-env.after"
+  test -s "$E/service.after"
+  if test -s "$E/usage.before"; then
+    sudo -H -u dle-runner du -s -B1 "$d/.cargo" "$d/.rustup" > "$E/usage.after"
+    df -B1 "$H" > "$E/df.after"
+    test -s "$E/usage.after"
+    printf '%s\n' '旧共有 Rust の使用量（保持分、bytes）'
+    cat "$E/usage.before"
+    printf '%s\n' '対象 runner の個別 Rust の使用量（追加分、bytes）'
+    cat "$E/usage.after"
+    diff -u "$E/df.before" "$E/df.after" || test "$?" -eq 1
+  else
+    printf '%s\n' '変更前の容量記録がないため、Listener の環境照合のみ行いました。'
+  fi
+)
+```
+
+`service.after` は稼働状態と PID の記録です。環境の合格判定には使わず、**wrapper の exec 先から Listener へ渡った環境**を `exec-env.after` に抽出して照合します。MainPID と Listener の対応も確認し、環境全文は公開しないでください。さらに所有者が用意する一時的な検証 workflow の job 内で、同じ 4 変数と `command -v rustup cargo rustc`・`readlink -f`・`rustup show home` を確認します。Listener・`.env`・action による上書きも確認し、unit の Environment 表示は job の環境の証拠に使いません。
+
+最低 2 つの runner を使い、各試行前に job と残存プロセスがないこと、新しい一意の目印ファイルがあることを確認します。一方だけが toolchain・cache を更新しても他方の bin・目印・設定が保持されることを **3 試行連続**で確かめてください。同じ runner の次の job も確認し、失敗したら連続数を 0 に戻します。各試行で別の run・job ID と変更前後のハッシュ・実効パスを残します。終了コード 0、期待値の一致、rustup の実体とリンクの解決成功、status の既存出力・警告の意味の維持を合格条件とします。systemd の stop・start を含む通常経路も 3 回確認します。これらは所有者が実施します。
+
+検証 job の後にも同じ `du`・`df` で容量を測り、全導入対象の `.cargo`・`.rustup` の合計と、旧共有の保持分を別に記録します。容量のために旧共有や Rust のバイナリを自動削除しません。job が共有の固定パスへアクセスしていれば、完了とせず原因と対象を報告します。
+
+5. 後片付けを行います。インストーラの一時ファイルは rust-bootstrap の trap で自身の分だけを回収します。記録先は証拠として保持し、旧共有の `.cargo`・`.rustup` は他の用途がないことを所有者が確認するまで削除しません。検証 workflow と目印も、所有者が作ったものだけを回収します。「削除」の手順では runner のディレクトリ全体と個別の `.cargo`・`.rustup` も消えます。再登録時には容量を確認し、再導入してください。
+
+rollback 時はまず全対象の受付を止め、idle・停止・孤児不在を確認します。戻す元は **所有者が内容をレビューしたコミットの git show の出力**に固定します。記録先（`E`）は実行者が書ける場所なので、その before ファイルを root 所有の場所へはコピーしません。手配布版の before と同一の版が git にあるとは限りません。before の差分・記録先の外に保管した sha256 と照合して必要な動作をレビューし、rollback 用コミットとその wrapper の期待 SHA-256 を所有者が別途確定してください。同一の手配布版をそのまま復元する必要がある場合は停止を保ち、別の復旧計画を立てます。
+
+次のブロックの R・C・S を、その絶対リポジトリパス・レビューした 40 桁コミット・事前確認した 64 桁 SHA-256 に書き換えて実行します。S はこのブロックが生成するハッシュをそのまま採用せず、レビュー時に記録した期待値を使います。取得元とインストール後の両方を照合し、wrapper は構文も確認します。このブロックは起動しません。
+
+```bash
+# [dle-runner-rollback]
+(
+  set -euo pipefail
+  R=/absolute/path/to/discord-loop-engine
+  [[ "$R" =~ ^/[A-Za-z0-9._/-]+$ ]] && test -d "$R" || exit 1
+  C=レビューした40桁のコミットID
+  [[ "$C" =~ ^[0-9a-f]{40}$ ]] || exit 1
+  S=事前確認した64桁のSHA256
+  [[ "$S" =~ ^[0-9a-f]{64}$ ]] || exit 1
+  I=$(mktemp)
+  trap 'rm -f -- "$I"' EXIT
+  git -C "$R" show "$C:templates/runner/runner-start.sh" > "$I"
+  test -s "$I"
+  printf '%s  %s\n' "$S" "$I" | sha256sum -c -
+  bash -n "$I"
+  sudo install -m 755 -o root -g root "$I" /usr/local/libexec/dle/runner-start.sh
+  printf '%s  %s\n' "$S" /usr/local/libexec/dle/runner-start.sh | sudo sha256sum -c -
+)
+```
+
+unit を変えた場合も、レビューしたコミットの `git show` から取得し、別途確定した期待 SHA-256 と照合して root 所有で戻します。配置後の sha256 を確認してから daemon-reload してください。**旧共有の rustup が欠落したままなら、旧 wrapper を戻しても復旧しないため、そのまま再起動しないでください。** rollback での共有領域の修復・フォールバック方針は所有者が判断します。失敗したら停止したまま報告し、自動で旧共有へは向けません。配布の途中や SIGKILL・親の無信号終了で trap が動かない場合は、所有する一時ファイルと PID を特定して回収します。共有領域は一括削除しません。
 
 #### 実機で確認していないこと
 
@@ -694,6 +891,8 @@ git -C <リポジトリ> show <コミット>:templates/runner/runner-start.sh | 
 `PrivateTmp`・`InaccessiblePaths` の動作、WSL interop が止まること（`/init <exe>` の直接実行を含む）と再起動後の持続、資源の上限、
 自己更新で基準値の対象が変わるか、`bin/runnerversion` の有無、**フックに `GITHUB_WORKSPACE`・`RUNNER_TEMP` の環境変数が渡ること**（ソースの読み取りでは渡る見込み）、
 **job から `pwsh`・`rustup` が見えること**（PATH の変更の実機での効果。Listener や `.path` が PATH を上書きしないか）。
+また、`PrivateUsers` の下で `sudo -H -u dle-runner cat /proc/PID/environ` により Listener の `CARGO_HOME`・`RUSTUP_HOME` を読み取れること、
+`--default-toolchain none` で rustup 本体だけを事前導入しても既存の job が動くこと、rustup-init が `env -i` の環境で通信できることも、実機での確認が必要です。
 セットアップのあと、検証用の一時ブランチの workflow で確かめてください（掃除フックの目印ファイルが消えること、interop が起動できないこと、など）。
 
 #### 日常
