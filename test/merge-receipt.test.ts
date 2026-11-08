@@ -1,6 +1,6 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
+import { execFile, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +26,11 @@ for (const mode of [
 	"invalid",
 	"recovery",
 ] as const) {
-	test(`#75 T2/T5/T6: RPCから動画承認とcleanupまで（${mode}）`, async () => {
+	test(`#75 T2/T5/T6: RPCから動画承認とcleanupまで（${mode}）`, async (t) => {
+		if (spawnSync("which", ["ffmpeg", "ffprobe"], { env: process.env }).status !== 0) {
+			t.skip("ffmpeg または ffprobe がありません（動画の結合テストに両方が必要）");
+			return;
+		}
 		const home = mkdtempSync(path.join(os.tmpdir(), "dle75-"));
 		mkdirSync(path.join(home, "tmp"));
 		writeFileSync(
