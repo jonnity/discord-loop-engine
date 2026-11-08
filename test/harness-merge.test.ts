@@ -211,6 +211,19 @@ test("M1/M4/M6d: 動画なしも同IDのpending→必須通知→完成、二度
 		rmSync(s.dir, { recursive: true, force: true });
 	}
 });
+test("#75: 動画なしの仮POST失敗は動画照合の診断を出さない", async () => {
+	const s = setup();
+	try {
+		const result = await s.call("harness-phase", args, { GH_FAILURE: "post" });
+		assert.equal(result.code, 1, result.stderr);
+		assert.match(result.stderr, /harness-phase: 仮POST 失敗（exit 1）/);
+		assert.doesNotMatch(result.stderr, /stage=|reason=|動画照合|https:|token/);
+		assert.ok(existsSync(path.join(s.dir, ".harness/merge-recovery-3.json")));
+		assert.equal(s.state().comments.length, 0);
+	} finally {
+		rmSync(s.dir, { recursive: true, force: true });
+	}
+});
 for (const [failure, expected] of [
 	["notify", 4],
 	["patch", 7],
@@ -225,6 +238,7 @@ for (const [failure, expected] of [
 				...(failure === "notify" ? { CURL_FAIL: "1" } : {}),
 			});
 			assert.equal(result.code, expected, result.stderr);
+			assert.doesNotMatch(result.stderr, /stage=|reason=|段階=動画照合/);
 			assert.deepEqual(
 				s.state().labels.filter((l: string) => l.startsWith("harness:") && l !== "harness:merge-ok"),
 				["harness:awaiting-merge"],
@@ -257,6 +271,7 @@ test("M2: 静的未設定は4で全副作用ゼロ、プレースホルダーは
 	try {
 		const result = await s.call("harness-phase", args, { DISCORD_WEBHOOK_URL: "" });
 		assert.equal(result.code, 4, result.stderr);
+		assert.doesNotMatch(result.stderr, /stage=|reason=|段階=動画照合/);
 		assert.ok(!existsSync(s.env.MEDIA_LOG));
 		assert.equal(
 			(await s.call("harness-phase", [...args, "--comment", "【動きのない動画の場合だけ後半は変更"])).code,
@@ -348,6 +363,7 @@ for (const [failure, expected] of [
 		try {
 			const result = await s.call("harness-phase", args, { GH_FAILURE: failure });
 			assert.equal(result.code, expected, result.stderr);
+			assert.doesNotMatch(result.stderr, /stage=|reason=|段階=動画照合/);
 			const state = s.state();
 			assert.notEqual((await s.call("harness-merge", ["3", "--chat-approval", "OK", "--attention", "A-1"])).code, 0);
 			if (["label-start", "label-left", "post"].includes(failure)) {

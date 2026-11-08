@@ -159,7 +159,13 @@ export function evaluateApproval(p: ApprovalInput) {
 		...(pending ? { requestState: "pending" as const } : {}),
 	};
 }
-export function run(command: string, args: string[], timeout = 30000): Promise<string> {
+export type RecoveryExitCode = 1 | 2 | 4 | 5 | 7;
+export function run(
+	command: string,
+	args: string[],
+	timeout = 30000,
+	recoveryExitCode?: RecoveryExitCode,
+): Promise<string> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, { stdio: ["ignore", "pipe", "pipe"] });
 		child.stdout.setEncoding("utf8");
@@ -206,7 +212,12 @@ export function run(command: string, args: string[], timeout = 30000): Promise<s
 		});
 		child.once("close", (code) => {
 			cleanup();
-			if (code === 0 && !stopped && !process.exitCode) resolve(stdout.trim());
+			// 依頼失敗を先に固定しても復旧だけは続ける。通常経路や中断の拒否は緩めない。
+			const recovering =
+				recoveryExitCode !== undefined &&
+				[1, 2, 4, 5, 7].includes(recoveryExitCode) &&
+				process.exitCode === recoveryExitCode;
+			if (code === 0 && !stopped && (!process.exitCode || recovering)) resolve(stdout.trim());
 			else
 				reject(
 					Object.assign(new Error(`${command} failed (${code})${stderr ? `: ${stderr.slice(0, 500)}` : ""}`), { code }),

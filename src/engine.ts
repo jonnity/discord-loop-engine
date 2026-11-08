@@ -31,7 +31,7 @@ import {
 	type Task,
 	type TaskStatus,
 } from "./ledger.ts";
-import { normalizeReceipt, object } from "./notification-receipt.ts";
+import { type DiscordReceipt, inspectReceipt, object, type ReceiptFailure } from "./notification-receipt.ts";
 import {
 	run as defaultRun,
 	ensureLabels,
@@ -933,16 +933,28 @@ export class Engine {
 			{ kind: "notice", attention: att.id, project },
 		);
 		this.scheduleBoard();
-		let discord: ReturnType<typeof normalizeReceipt>;
+		let discord: DiscordReceipt | undefined;
+		let discord_error: ReceiptFailure | undefined;
 		if (gate.kind === "merge" && o.file) {
 			let guild: unknown;
 			try {
 				const channel = await this.rest.channel(this.config.defaultChannelId);
 				if (channel.id === this.config.defaultChannelId) guild = object(channel).guild_id;
-			} catch {}
-			discord = normalizeReceipt(lastMessage, guild, this.config.defaultChannelId);
+				else discord_error = { stage: "channel", reason: "metadata-mismatch" };
+			} catch {
+				discord_error = { stage: "guild", reason: "fetch-failed" };
+			}
+			const inspected = inspectReceipt(lastMessage, guild, this.config.defaultChannelId);
+			discord = inspected.receipt;
+			// 投稿応答そのものの不正を先に示し、guild 欠落には GET の失敗理由を補う。
+			discord_error = inspected.failure?.stage === "guild" ? (discord_error ?? inspected.failure) : inspected.failure;
 		}
-		return { attention: att.id, message_id: messageId, ...(discord ? { discord } : {}) };
+		return {
+			attention: att.id,
+			message_id: messageId,
+			...(discord ? { discord } : {}),
+			...(discord_error ? { discord_error } : {}),
+		};
 	}
 
 	/** worker の調査結果（設定の案）を受け取り、A-番号で確認を求める */

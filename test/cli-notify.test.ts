@@ -98,6 +98,7 @@ test("M2: dle --jsonは結果JSONだけを出し、json指定をRPCへ渡さず�
 	);
 	const result = {
 		attention: "A-12",
+		discord_error: { stage: "guild", reason: "fetch-failed" },
 		message_id: "789",
 		discord: {
 			guild_id: "123",
@@ -156,6 +157,30 @@ test("M2: dle --jsonは結果JSONだけを出し、json指定をRPCへ渡さず�
 			if (json) assert.deepEqual(JSON.parse(r.stdout), result);
 			else assert.equal(r.stdout, "A-12\n");
 		}
+		const forwarded = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) =>
+			execFile(
+				path.resolve("bin/harness-notify"),
+				[
+					"--json",
+					"--event",
+					"merge-request",
+					"--title",
+					"test",
+					"--url",
+					"https://example.test",
+					"--project",
+					"test",
+					"--repo",
+					"example/project",
+				],
+				{
+					env: { ...process.env, DLE_HOME: home, DLE_SOCKET: socket, HARNESS_CONFIG: config, CLAUDE_PROJECT_DIR: home },
+				},
+				(error, stdout, stderr) => resolve({ code: error ? Number(error.code) : 0, stdout, stderr }),
+			),
+		);
+		assert.equal(forwarded.code, 0, forwarded.stderr);
+		assert.deepEqual(JSON.parse(forwarded.stdout), { ...result, status: "posted", source: "engine" });
 	} finally {
 		if (server.listening) await new Promise<void>((resolve) => server.close(() => resolve()));
 		rmSync(home, { recursive: true, force: true });
