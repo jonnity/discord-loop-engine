@@ -1,9 +1,16 @@
 // awaiting-merge の外部書込みは直列化する。未確認の復旧をローカルにも残す。
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { gh, run, validTime } from "./harness-approval.ts";
+import { type RecoveryExitCode, run, validTime } from "./harness-approval.ts";
 import { resolveHarnessProject } from "./harness-project.ts";
-import { object, verifyMedia } from "./notification-receipt.ts";
+import {
+	formatReceiptFailure,
+	MediaVerificationError,
+	object,
+	parseReceiptFailure,
+	receiptFailure,
+	verifyMedia,
+} from "./notification-receipt.ts";
 
 const bin = path.resolve(import.meta.dirname, "../bin");
 const [issue = "", pr = "", commentFile = "", summaryFile = "", file = "", temp = "", gateDefinedArg = ""] =
@@ -11,13 +18,15 @@ const [issue = "", pr = "", commentFile = "", summaryFile = "", file = "", temp 
 const states = new Set([path.resolve(".harness", `merge-recovery-${issue}.json`)]);
 let stage = "静的通知先検査",
 	attention = "不明",
-	code = 4,
 	repo = "",
 	commentId = 0,
 	pending = "",
 	login = "",
 	head = "",
 	note = "";
+let code: RecoveryExitCode = 4;
+let recoveryExitCode: RecoveryExitCode | undefined;
+const gh = (...args: string[]) => run("gh", args, 30000, recoveryExitCode);
 // harness-gate が残す結果ファイル。承認依頼に未確認の検査（skipExit 宣言の段の終了 78）を載せるために読む。
 type GateResult = {
 	version: 1;
@@ -203,7 +212,13 @@ async function main() {
 	if (file) args.push("--file", file);
 	const raw = await run(path.join(bin, "harness-notify"), args, 180000);
 	await writeFile(path.join(temp, "receipt.json"), raw, { mode: 0o600 });
-	const receipt = object(JSON.parse(raw));
+	let receipt: Record<string, unknown>;
+	try {
+		receipt = object(JSON.parse(raw));
+	} catch (error) {
+		if (!file) throw error;
+		throw new MediaVerificationError({ stage: "input", reason: "invalid" });
+	}
 	if (receipt.status !== "posted") throw Error("通知未完了");
 	stage = "A/動画照合";
 	code = 7;
@@ -214,7 +229,13 @@ async function main() {
 	else throw Error("source 不正");
 	let media = "";
 	if (file) {
-		const fp = JSON.parse(await readFile(path.join(temp, "fingerprint.json"), "utf8"));
+		if ("discord_error" in receipt) throw new MediaVerificationError(parseReceiptFailure(receipt.discord_error));
+		let fp: unknown;
+		try {
+			fp = JSON.parse(await readFile(path.join(temp, "fingerprint.json"), "utf8"));
+		} catch {
+			throw new MediaVerificationError({ stage: "input", reason: "invalid" });
+		}
 		const verified = await verifyMedia(receipt.discord, fp, file, path.join(temp, "download.mp4"));
 		media = `\n\n動画: [デモ動画を開く（Discord）](${object(receipt.discord).url})\n${verified.filename} / ${verified.bytes} bytes / SHA-256: ${verified.sha256} / 再取得照合済み`;
 	}
@@ -235,25 +256,41 @@ async function main() {
 	for (const state of states) await rm(state, { force: true });
 	console.error(`harness-phase: #${issue} → awaiting-merge: ${posted.html_url}`);
 }
-main().catch(async () => {
+main().catch(async (error: unknown) => {
+	process.exitCode = process.exitCode || code;
+	recoveryExitCode = code;
+	const primary =
+		error instanceof MediaVerificationError || (file && stage === "A/動画照合")
+			? `${formatReceiptFailure(receiptFailure(error))} `
+			: "";
+	let recoveryFailed = false;
 	if (commentId && pending) {
 		// 一方の復旧が失敗しても、もう一方を試す。次の成功再依頼まで拒否状態を残す。
 		try {
 			await resetLabels();
-		} catch {}
+		} catch {
+			recoveryFailed = true;
+		}
 		try {
 			const result = await patch(pending);
 			validateComment(result, pending, commentId);
-		} catch {}
+		} catch {
+			recoveryFailed = true;
+		}
 		try {
 			const result = object(JSON.parse(await gh("api", `repos/${repo}/issues/comments/${commentId}`)));
 			validateComment(result, pending, commentId);
 			await resetLabels();
-		} catch {}
-		await rememberRecovery();
+		} catch {
+			recoveryFailed = true;
+		}
+		try {
+			await rememberRecovery();
+		} catch {
+			recoveryFailed = true;
+		}
 	}
 	console.error(
-		`harness-phase: ${stage} 失敗（exit ${code}）。${attention === "不明" ? "A は取下げ未確認" : `この ${attention} の承認依頼は未完了です`}。OK を返してもマージできません。原因解消後に再依頼してください。`,
+		`harness-phase: ${primary}${stage} 失敗（exit ${code}）。${recoveryFailed ? "復旧状態は未確認。" : ""}${attention === "不明" ? "A は取下げ未確認" : `この ${attention} の承認依頼は未完了です`}。OK を返してもマージできません。原因解消後に再依頼してください。`,
 	);
-	process.exitCode = process.exitCode || code;
 });

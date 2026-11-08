@@ -1776,16 +1776,27 @@ test("W5: worktreeRootの提案検証は保存・承認依頼前、明示値の�
 });
 
 test("M1/M2: engineは最後の添付receiptと先頭IDを区別し、guild欠落でも投稿済みを保つ", async () => {
-	for (const mode of ["normal", "guild-missing", "guild-failure", "old-message"] as const) {
+	for (const mode of [
+		"normal",
+		"guild-missing",
+		"guild-failure",
+		"channel-mismatch",
+		"old-message",
+		"invalid-and-guild-failure",
+		"invalid-and-channel-mismatch",
+	] as const) {
 		const { engine, rest, home } = setupEngine();
 		const file = path.join(home, "demo.mp4");
 		writeFileSync(file, "movie");
 		if (mode === "guild-missing") rest.channel = async (id) => ({ id, guild_id: "", type: 1 });
-		if (mode === "guild-failure")
+		if (mode === "guild-failure" || mode === "invalid-and-guild-failure")
 			rest.channel = async () => {
 				throw Error("no guild");
 			};
-		if (mode === "old-message") rest.sendMessage = async () => ({ id: "123", channel_id: "", attachments: [] });
+		if (mode === "channel-mismatch" || mode === "invalid-and-channel-mismatch")
+			rest.channel = () => Promise.resolve({ id: "999", guild_id: "800", type: 0 });
+		if (mode === "old-message" || mode.startsWith("invalid-and-"))
+			rest.sendMessage = async () => ({ id: "123", channel_id: "", attachments: [] });
 		try {
 			const result = (await engine.call({ role: "cli", name: "" }, "notify", {
 				project: "quality",
@@ -1798,9 +1809,20 @@ test("M1/M2: engineは最後の添付receiptと先頭IDを区別し、guild欠�
 				attention: string;
 				message_id: string;
 				discord?: { message_id: string; url: string | null; link_error?: string; attachments: unknown[] };
+				discord_error?: { stage: string; reason: string };
 			};
 			assert.match(result.attention, /^A-/);
-			if (mode === "old-message") assert.equal(result.discord, undefined);
+			const expected = {
+				"guild-missing": { stage: "guild", reason: "unavailable" },
+				"guild-failure": { stage: "guild", reason: "fetch-failed" },
+				"channel-mismatch": { stage: "channel", reason: "metadata-mismatch" },
+				"invalid-and-guild-failure": { stage: "message", reason: "invalid" },
+				"invalid-and-channel-mismatch": { stage: "message", reason: "invalid" },
+				"old-message": { stage: "message", reason: "invalid" },
+				normal: undefined,
+			};
+			assert.deepEqual(result.discord_error, expected[mode]);
+			if (mode === "old-message" || mode.startsWith("invalid-and-")) assert.equal(result.discord, undefined);
 			else {
 				assert.ok(result.discord);
 				assert.notEqual(result.discord.message_id, result.message_id);
