@@ -26,8 +26,11 @@ if (command === "gh") {
 	else if (args[0] === "api" && args.includes("graphql")) {
 		const pr = Number(args.find((a) => a.startsWith("number="))?.slice(7));
 		const p = state.prs.find((v: { number: number }) => v.number === pr);
+		if (state.graphqlByPr?.[pr]) output = state.graphqlByPr[pr];
+		else {
 		const checks = state.checkPages ?? [state.checksByPr?.[pr] ?? state.checks];
 		output = checks.map((nodes: unknown[], i: number) => ({ data: { repository: { pullRequest: { mergeQueueEntry: state.queue ? { id: "queue-entry" } : null, reviewDecision: state.reviewDecision, mergeStateStatus: state.mergeStateStatus, commits: { nodes: [{ commit: { oid: p.head.sha, statusCheckRollup: { contexts: { nodes, pageInfo: { hasNextPage: i < checks.length - 1, endCursor: i < checks.length - 1 ? "next" : null } } } } }] } } } } }));
+		}
 	} else if (args[0] === "api" && endpoint === "repos/example/project/pulls?state=open&per_page=100") output = state.prs.map((p: { state: string }) => p.state === "open" ? [p] : []).filter((p: unknown[]) => p.length);
 	else if (args[0] === "api" && endpoint === "repos/example/project") output = { full_name: "example/project", default_branch: "main" };
 	else if (args[0] === "pr" && args[1] === "edit") {

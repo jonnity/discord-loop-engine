@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { evaluateAttention } from "../src/harness-approval.ts";
-import { ciGreen, evaluatePrApproval, parsePrTarget } from "../src/harness-pr.ts";
+import { ciGreen, evaluatePrApproval, parsePrTarget, readCiPage } from "../src/harness-pr.ts";
 
 const root = path.resolve(import.meta.dirname, "..");
 const head = "a".repeat(40);
@@ -627,5 +627,298 @@ test("T18-1/6: scanは台帳を変更せずPR本文を出さず、外部closed�
 		} finally {
 			s.close();
 		}
+	}
+});
+
+// T77 用: GraphQL の1ページ分（--slurp 後の配列の要素）を組み立てる。既定はスタブの通常出力と同じ。
+function graphqlPage(o: Record<string, unknown> = {}) {
+	const v = {
+		oid: head,
+		rollup: "default",
+		nodes: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }],
+		hasNextPage: false,
+		mergeStateStatus: "CLEAN",
+		reviewDecision: null,
+		...o,
+	} as Record<string, unknown>;
+	const statusCheckRollup =
+		v.rollup === "default"
+			? { contexts: { nodes: v.nodes, pageInfo: { hasNextPage: v.hasNextPage, endCursor: null } } }
+			: v.rollup;
+	const commit: Record<string, unknown> = { oid: v.oid };
+	if (v.rollup !== "absent") commit.statusCheckRollup = statusCheckRollup;
+	const page: Record<string, unknown> = {
+		data: {
+			repository: {
+				pullRequest: {
+					reviewDecision: v.reviewDecision,
+					mergeStateStatus: v.mergeStateStatus,
+					mergeQueueEntry: null,
+					commits: v.commitNodes ?? { nodes: [{ commit }] },
+				},
+			},
+		},
+	};
+	if (v.errors) page.errors = v.errors;
+	return page;
+}
+
+const t77Cases: {
+	name: string;
+	page: Record<string, unknown>;
+	total?: number;
+	lead: string;
+	problem: string;
+	final: string;
+}[] = [
+	{
+		name: "errors",
+		page: graphqlPage({ errors: [{ message: "secret https://x token" }] }),
+		lead: "CI 応答が不正です",
+		problem: "GraphQL errors あり",
+		final: "harness-pr: CI 応答が不正です（PR #25 1/1 ページ: GraphQL errors あり）",
+	},
+	{
+		name: "commits",
+		page: graphqlPage({ commitNodes: { nodes: [] } }),
+		lead: "CI 応答が不正です",
+		problem: "commits.nodes が1件でない",
+		final: "harness-pr: CI 応答が不正です（PR #25 1/1 ページ: commits.nodes が1件でない）",
+	},
+	{
+		name: "head",
+		page: graphqlPage({ oid: "b".repeat(40) }),
+		lead: "CI 全件/head が未確認です",
+		problem: "head 不一致",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/1 ページ: head 不一致）",
+	},
+	{
+		name: "rollup-absent",
+		page: graphqlPage({ rollup: "absent" }),
+		lead: "CI 全件/head が未確認です",
+		problem: "statusCheckRollup が不正",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/1 ページ: statusCheckRollup が不正）",
+	},
+	{
+		name: "rollup-mid-null",
+		page: graphqlPage({ rollup: null }),
+		total: 2,
+		lead: "CI 全件/head が未確認です",
+		problem: "statusCheckRollup が途中で null",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/2 ページ: statusCheckRollup が途中で null）",
+	},
+	{
+		name: "nodes",
+		page: graphqlPage({ nodes: "x" }),
+		lead: "CI 全件/head が未確認です",
+		problem: "contexts.nodes が配列でない",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/1 ページ: contexts.nodes が配列でない）",
+	},
+	{
+		name: "paging",
+		page: graphqlPage({ hasNextPage: true }),
+		lead: "CI 全件/head が未確認です",
+		problem: "ページ分割の不一致 hasNextPage=true 期待=false",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/1 ページ: ページ分割の不一致 hasNextPage=true 期待=false）",
+	},
+	{
+		name: "merge-state",
+		page: graphqlPage({ mergeStateStatus: 1 }),
+		lead: "CI 全件/head が未確認です",
+		problem: "mergeStateStatus の型 number",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/1 ページ: mergeStateStatus の型 number）",
+	},
+	{
+		name: "review",
+		page: graphqlPage({ reviewDecision: 1 }),
+		lead: "CI 全件/head が未確認です",
+		problem: "reviewDecision の型 number",
+		final: "harness-pr: CI 全件/head が未確認です（PR #25 1/1 ページ: reviewDecision の型 number）",
+	},
+];
+
+test("T77-1: readCiPage は条件ごとに別の理由を返し、null の rollup は CI 0 件として読む", () => {
+	for (const c of t77Cases)
+		assert.deepEqual(readCiPage(c.page, 0, c.total ?? 1, head), { lead: c.lead, problem: c.problem }, c.name);
+	assert.equal(new Set(t77Cases.map((c) => c.problem)).size, t77Cases.length);
+	assert.deepEqual(readCiPage(graphqlPage(), 0, 1, head), {
+		nodes: [{ __typename: "CheckRun", status: "COMPLETED", conclusion: "SUCCESS" }],
+	});
+	assert.deepEqual(readCiPage(graphqlPage({ rollup: null }), 0, 1, head), { nodes: [] });
+});
+
+for (const c of t77Cases)
+	test(`T77-2: request の失敗は条件を1行で出す: ${c.name}`, async () => {
+		const s = fixture();
+		try {
+			s.change((v) => {
+				v.graphqlByPr = { 25: c.total === 2 ? [c.page, graphqlPage()] : [c.page] };
+			});
+			const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+			assert.equal(r.code, 1);
+			assert.equal(r.stderr.trim().split("\n").length, 1);
+			assert.equal(r.stderr.replace(/\n$/, ""), c.final);
+			for (const bad of ["UNTRUSTED_PR_BODY", "https://", "token"]) assert.ok(!r.stderr.includes(bad));
+			assert.equal(s.state().comments[25], undefined);
+		} finally {
+			s.close();
+		}
+	});
+
+test("T77-2: 2ページ目の hasNextPage 不一致は 1/2 ページとして出す", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.graphqlByPr = { 25: [graphqlPage({ hasNextPage: false }), graphqlPage()] };
+		});
+		const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(
+			r.stderr.trim(),
+			"harness-pr: CI 全件/head が未確認です（PR #25 1/2 ページ: ページ分割の不一致 hasNextPage=false 期待=true）",
+		);
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-2: 追跡中の別 PR で落ちたときは、その PR 番号を指す", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.prs.unshift(pr(24));
+			v.graphqlByPr = { 24: [graphqlPage({ oid: "b".repeat(40) })] };
+		});
+		const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(r.code, 1);
+		assert.equal(r.stderr.trim(), "harness-pr: CI 全件/head が未確認です（PR #24 1/1 ページ: head 不一致）");
+	} finally {
+		s.close();
+	}
+});
+
+function dirty(v: { prs: ReturnType<typeof pr>[] }, n: number) {
+	const p = v.prs.find((x) => x.number === n);
+	if (p) Object.assign(p, { mergeable: false, mergeable_state: "dirty" });
+}
+const nullRollup = (extra: Record<string, unknown> = {}) => [graphqlPage({ rollup: null, ...extra })];
+
+test("T77-3a: 古い PR 24 が CI 未登録でも、green の PR 25 の依頼は出る", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.prs.unshift(pr(24));
+			v.graphqlByPr = { 24: nullRollup() };
+		});
+		const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(r.code, 0, r.stderr);
+		assert.equal(s.state().comments[25].length, 1);
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-3b: 古い PR 24 が CI 未登録で dirty なら、PR 25 は先行候補で止まり、どちらにも書かない", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.prs.unshift(pr(24));
+			dirty(v, 24);
+			v.graphqlByPr = { 24: nullRollup({ mergeStateStatus: "DIRTY" }) };
+		});
+		const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(r.code, 1);
+		assert.equal(r.stderr.trim(), "harness-pr: より古い適格候補があります。指定 PR には発行していません");
+		assert.equal(s.state().comments[24], undefined);
+		assert.equal(s.state().comments[25], undefined);
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-3c: 指定 PR 自身が CI 未登録で clean なら依頼しない", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.graphqlByPr = { 25: nullRollup() };
+		});
+		const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(r.code, 1);
+		assert.equal(r.stderr.trim(), "harness-pr: CI/追従/保護状態が依頼条件を満たしません");
+		assert.equal(s.state().comments[25], undefined);
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-3d: scan は CI 未登録の PR を incomplete にせず ci=waiting で出す", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.graphqlByPr = { 25: nullRollup() };
+		});
+		const r = await s.call("harness-pr", ["scan"]);
+		assert.equal(r.code, 0, r.stderr);
+		assert.ok(!r.stdout.includes("incomplete"), r.stdout);
+		assert.ok(r.stdout.includes('"ci":"waiting"'), r.stdout);
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-3e: statusCheckRollup のキーが無いページは失敗のまま", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			v.graphqlByPr = { 25: [graphqlPage({ rollup: "absent" })] };
+		});
+		const r = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(r.code, 1);
+		assert.ok(r.stderr.includes("statusCheckRollup が不正"));
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-3f: 指定 PR が CI 未登録で dirty なら rebase 依頼を1件だけ書き、A は出さない", async () => {
+	const s = fixture();
+	try {
+		s.change((v) => {
+			dirty(v, 25);
+			v.graphqlByPr = { 25: nullRollup({ mergeStateStatus: "DIRTY" }) };
+		});
+		const first = await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(first.code, 0, first.stderr);
+		assert.equal(s.state().comments[25].length, 1);
+		assert.equal(s.state().comments[25][0].body, `@dependabot rebase\n\n<!-- harness:rebase sha=${head} -->`);
+		for (let i = 0; i < 3; i++) await s.call("harness-pr", ["request", "--pr", "25"]);
+		assert.equal(s.state().comments[25].length, 1);
+		assert.ok(!s.state().comments[25].some((c: { body: string }) => c.body.includes("attention=")));
+		assert.equal(readFileSync(path.join(s.dir, "attention.json"), "utf8"), "[]");
+		const retry = await s.call("harness-pr", ["request", "--pr", "25", "--retry"]);
+		assert.equal(retry.code, 1);
+		assert.equal(
+			retry.stderr.trim(),
+			"harness-pr: rebase 待ちのため新 A を発行していません。head/CI の更新後に再依頼してください",
+		);
+		assert.equal(s.state().comments[25].length, 1);
+	} finally {
+		s.close();
+	}
+});
+
+test("T77-4: OK の後に CI 未登録の応答になったらマージしない", async () => {
+	const s = fixture();
+	try {
+		assert.equal((await s.call("harness-pr", ["request", "--pr", "25"])).code, 0);
+		s.answer();
+		s.change((v) => {
+			v.graphqlByPr = { 25: nullRollup() };
+		});
+		const r = await s.call("harness-merge", ["--pr", "25"]);
+		assert.equal(r.code, 1);
+		assert.equal(r.stderr.trim(), "harness-pr: CI/保護状態がマージ条件を満たしません");
+		assert.equal(s.state().calls.filter((c: string[]) => c[2] === "merge").length, 0);
+	} finally {
+		s.close();
 	}
 });
