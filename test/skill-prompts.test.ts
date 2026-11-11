@@ -1551,3 +1551,111 @@ test("T3: 起動・毎tick・clear・終了は同じ心拍表と実INTERVALを�
 	assert.match(loop, /heartbeat_interval.*15min.*60min.*120min/);
 	assert.match(loop, /承認記録が無ければマージしない/);
 });
+
+test("U80a: UI 変更の型は Phase 1 の後に1節で置き、受け入れ条件1〜4と人の決定を持つ", () => {
+	const ui = section(skill, "## UI 変更の型", "## 実 diff の分類と軽い経路");
+	assert.ok(skill.indexOf("## Phase 1:") < skill.indexOf("## UI 変更の型"));
+	assert.ok(skill.indexOf("## UI 変更の型") < skill.indexOf("## Phase 2:"));
+	assert.equal(skill.split("## UI 変更の型").length, 2);
+	assert.match(
+		ui,
+		/既存の欄・部品に統合できるかを先に聞く[\s\S]*大きなレイアウト変更は実装前に配置図（ASCII 案など）で合意を取る[\s\S]*寸法要件は人数・選択有無などの状態の組合せで試験を書く[\s\S]*spec と docs 全体の旧配置の記述を全文検索で洗う[\s\S]*既存表示との重複・状態による幅の変化・既存行との高さと余白の差・全操作の到達性を、viewport×状態で実測して表にする[\s\S]*文言追加や局所修正で済ませず、NG の趣旨と操作の種類から期待形を先に確認する/,
+	);
+	// 設計中に合意の無い大きなレイアウト変更を見つけたら、設計レビューの NG で Phase 1 に戻す
+	assert.match(ui, /配置図の合意が無い大きなレイアウト変更が見つかったら、設計レビューの NG として Phase 1 に戻す/);
+	assert.match(ui, /codex-spec を再起動せず、`harness-phase \{n\} interview` で配置図を質問し/);
+	// 実測表は実装者が測り、レビュー役が照合し、承認依頼には ❌ と未計測だけを載せる
+	assert.match(ui, /実装者が測って完了サマリに書き、レビュー役が実画面と照合する/);
+	assert.match(ui, /測れないセルには測れない理由を書き、推測で埋めない。そのセルは humanChecks に載せて承認依頼へ進む/);
+	assert.match(ui, /承認依頼には、表の ❌ と未計測のセルだけを載せる/);
+	// NG 後の期待形: 一つに決まれば差し戻しに書き、決まらなければ interview に戻す
+	assert.match(ui, /要件メモの配置図と NG 本文から期待形が一つに決まれば、差し戻しの指示に書く/);
+	assert.match(ui, /決まらなければ[\s\S]*`harness-phase \{n\} interview` に戻して人に確かめ[\s\S]*設計し直す/);
+	// 測れないときに止める案（blocked）は採らない
+	assert.doesNotMatch(ui, /blocked/);
+});
+
+test("U80b: 判定の1行は画面に触れる Issue だけに書き、無ければ UI 非変更とみなす", () => {
+	const ui = section(skill, "## UI 変更の型", "## 実 diff の分類と軽い経路");
+	assert.match(ui, /画面に触れる Issue だけに使う/);
+	assert.match(ui, /`UI 変更: あり（理由）` の1行を書く/);
+	assert.match(ui, /回答待ちでは質問コメント、非ブロッキング進行では推定回答のコメント/);
+	assert.match(ui, /この行が無い Issue は UI 非変更とみなし、下の質問・試験・実測表を足さない/);
+	assert.doesNotMatch(ui, /すべての案件|全 Issue/);
+	// 判定が覆ったときの書き方は未確定なので、新節に書かない
+	assert.doesNotMatch(ui, /UI 変更: なし|要件メモの行を優先/);
+	const phase1 = section(skill, "## Phase 1:", "### 認証情報を人に依頼した後");
+	assert.match(
+		phase1,
+		/画面に触れる Issue では、「UI 変更の型」の判定の1行を質問コメント（非ブロッキング進行では推定回答のコメント）に書き/,
+	);
+	assert.match(phase1, /同節の 1\. を質問に含める（質問は合わせて1〜3点に収める）/);
+	assert.match(phase1, /画面に触れない Issue には、判定の1行も質問も足さない/);
+});
+
+test("U80c: 設計依頼と軽い経路の依頼に同じ UI 変更の項目が入り、本文が一致する", async () => {
+	const light = section(skill, "<<'LIGHT_CHECKLIST'\n", "\nLIGHT_CHECKLIST\n").replace("<<'LIGHT_CHECKLIST'\n", "");
+	const design = section(skill, "<<'CHECKLIST'\n", "\nCHECKLIST\n").replace("<<'CHECKLIST'\n", "");
+	assert.equal(light, design);
+	const r = await designRequest({ stub: true, profile: { gate: sampleGate } });
+	assert.equal(r.code, 0, r.stderr);
+	assert.doesNotMatch(section(r.prompt, "常に確かめる項目", "該当するときだけの項目"), /UI 変更/);
+	const conditional = section(r.prompt, "該当するときだけの項目", "実装依頼の項目");
+	assert.match(
+		conditional,
+		/`UI 変更: あり` の行がある Issue は、issue-cycle スキルの「UI 変更の型」[\s\S]*人数・選択有無などの状態の組合せで試験[\s\S]*spec と docs 全体の旧配置の記述を全文検索[\s\S]*配置図が要件メモに無い大きなレイアウト変更は、未確定事項に挙げる/,
+	);
+	const impl = section(r.prompt, "実装依頼の項目（", "差し戻し時の項目（");
+	assert.match(
+		impl,
+		/`UI 変更: あり` の Issue は[\s\S]*viewport×状態で実測した表を完了サマリに書く[\s\S]*測れない理由を書き、推測で埋めない/,
+	);
+});
+
+test("U80d: 各 Phase と各 NG が UI 変更の型の該当番号を参照する", () => {
+	const refs: [string, string, RegExp][] = [
+		["## Phase 3:", "- **OK**", /「UI 変更の型」の 1\.・2\.[\s\S]*NG とし、同節の 1\. に従い Phase 1 に戻す/],
+		[
+			"- **NG**（取り違え",
+			"## Phase 4:",
+			/「UI 変更の型」の 4\. に従う。期待形が一つに決まらなければ再起動せず、4\. のとおり interview に戻す。[\s\S]*配置図の合意が無い大きなレイアウト変更の NG は、codex-spec を再起動せず `harness-phase \{n\} interview` で配置図を質問する（4\. より優先）/,
+		],
+		["### 5-1.", "- **NG**", /「UI 変更の型」の 2\./],
+		[
+			"- **NG**（取り違え NG は除く。レビュー共通に従い懐疑役を作り直す）→ 指摘を添えて",
+			"### 軽い実装レビュー",
+			/「UI 変更の型」の 4\. に従う。期待形が一つに決まらなければ再起動せず、4\. のとおり interview に戻す/,
+		],
+		[
+			"NG は共通起動手順で Codex へ差戻し",
+			"verifier OK の時",
+			/「UI 変更の型」の 4\. に従う。期待形が一つに決まらなければ再起動せず、4\. のとおり interview に戻す。[\s\S]*配置図の合意が無い大きなレイアウト変更の NG は、Codex へ差し戻さず `harness-phase \{n\} interview` で配置図を質問する（4\. より優先）/,
+		],
+		[
+			"### 5-2.",
+			"### 5-3.",
+			/完了サマリの「UI 変更の型」の 3\. の表を、サブエージェントに実画面と照合させる[\s\S]*同節の 4\. に従う。期待形が一つに決まらなければ再起動せず、4\. のとおり interview に戻す/,
+		],
+		["### 5-4", "```bash", /3\. の表の ❌ と未計測のセル（測れない理由つき）だけを雛形の humanChecks に載せる/],
+		[
+			"### NG（`merge-ng`",
+			"## Codex 起動を blocked",
+			/3\. の再起動の前に「UI 変更の型」の 4\. に従う[\s\S]*一つに決まらなければ、3\. の再起動をせず、同節の 4\. のとおり interview に戻す/,
+		],
+	];
+	for (const [b, e, ref] of refs) assert.match(section(skill, b, e), ref, b);
+});
+
+test("U80e: UI 変更の型は安全柵を弱めず、Phase 6 NG の既存手順を残す", () => {
+	const ui = section(skill, "## UI 変更の型", "## 実 diff の分類と軽い経路");
+	assert.doesNotMatch(
+		ui,
+		/gh pr merge|harness-merge|git add|git commit|git push|--no-verify|gh issue edit|--add-label|merge-ok/,
+	);
+	const ng = section(skill, "### NG（`merge-ng`", "## Codex 起動を blocked");
+	for (const word of ["PR は閉じない", "learning_add", "差し戻し時の項目", "harness-phase {n} impl-review"])
+		assert.ok(ng.includes(word), word);
+	const template = section(skill, "コメント雛形（動画欄は自動生成", "動く動画なら条件行を削除");
+	assert.ok(template.includes("【動きのない動画の場合だけ"));
+	assert.ok(!template.includes("UI 変更"));
+});
