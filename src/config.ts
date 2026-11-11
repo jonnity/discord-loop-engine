@@ -65,7 +65,11 @@ export interface Config {
 	git?: GitIdentity | null;
 	/** マージ承認の投稿に付けると OK になる絵文字。未指定は既定（🙆‍♂️）、null は無効。optional（型付きの Config リテラルを壊さない） */
 	reactionEmoji?: string | null;
+	/** 読み取り専用の Web ダッシュボード。optional（型付きの Config リテラルを壊さない）。未設定は無効 */
+	dashboard?: { enabled: boolean; host: string; port: number; allowedHosts: string[] };
 }
+
+export const DASHBOARD_DEFAULTS = { enabled: false, host: "127.0.0.1", port: 4870, allowedHosts: [] as string[] };
 
 export const CONFIG_TEMPLATE = {
 	models: { ...DEFAULT_ROLE_MODELS },
@@ -158,6 +162,23 @@ export function loadConfig(home = dleHome()): Config {
 	else if (typeof raw.reactionEmoji === "string" && raw.reactionEmoji.trim() !== "")
 		reactionEmoji = raw.reactionEmoji.trim();
 	else errors.push("reactionEmoji: 絵文字1つの文字列、または false（リアクションでの OK を無効にする）");
+	const dashRaw = (raw.dashboard ?? {}) as Record<string, unknown>;
+	if (raw.dashboard !== undefined && (typeof raw.dashboard !== "object" || raw.dashboard === null))
+		errors.push("dashboard: オブジェクトにしてください");
+	if (
+		dashRaw.port !== undefined &&
+		!(Number.isInteger(dashRaw.port) && (dashRaw.port as number) >= 0 && (dashRaw.port as number) <= 65535)
+	)
+		errors.push("dashboard.port: 0〜65535 の整数にしてください");
+	if (dashRaw.enabled !== undefined && typeof dashRaw.enabled !== "boolean")
+		errors.push("dashboard.enabled: true か false にしてください");
+	if (dashRaw.host !== undefined && (typeof dashRaw.host !== "string" || dashRaw.host.trim() === ""))
+		errors.push("dashboard.host: ホスト名の文字列にしてください");
+	if (
+		dashRaw.allowedHosts !== undefined &&
+		!(Array.isArray(dashRaw.allowedHosts) && dashRaw.allowedHosts.every((x) => typeof x === "string"))
+	)
+		errors.push("dashboard.allowedHosts: 文字列の配列にしてください");
 	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const channelIds = raw.channelIds as string[];
 	const c = (raw.concierge ?? {}) as Record<string, unknown>;
@@ -239,5 +260,11 @@ export function loadConfig(home = dleHome()): Config {
 		board: { enabled: (raw.board as Record<string, unknown> | undefined)?.enabled !== false },
 		git: readGit(raw.git),
 		...(reactionEmoji !== undefined ? { reactionEmoji } : {}),
+		dashboard: {
+			enabled: dashRaw.enabled === true,
+			host: typeof dashRaw.host === "string" ? dashRaw.host.trim() : DASHBOARD_DEFAULTS.host,
+			port: typeof dashRaw.port === "number" ? dashRaw.port : DASHBOARD_DEFAULTS.port,
+			allowedHosts: Array.isArray(dashRaw.allowedHosts) ? (dashRaw.allowedHosts as string[]) : [],
+		},
 	};
 }

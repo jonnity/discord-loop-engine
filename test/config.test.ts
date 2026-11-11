@@ -139,3 +139,24 @@ test("reactionEmoji は未指定で未設定、文字列でその絵文字、fal
 	for (const v of [1, "", "  ", true, null, ["✅"]])
 		assert.throws(() => load({ reactionEmoji: v }), /reactionEmoji/, JSON.stringify(v));
 });
+
+test("dashboard の既定は無効・127.0.0.1・allowedHosts 空で、不正な値は設定エラーにする", () => {
+	const d = load({}).dashboard;
+	assert.deepEqual(d, { enabled: false, host: "127.0.0.1", port: 4870, allowedHosts: [] });
+	assert.deepEqual(load({ dashboard: { enabled: true, port: 0, allowedHosts: ["pc.local"] } }).dashboard, {
+		enabled: true,
+		host: "127.0.0.1",
+		port: 0,
+		allowedHosts: ["pc.local"],
+	});
+	for (const dashboard of [
+		{ enabled: "true" },
+		{ enabled: 1 },
+		{ port: "x" },
+		{ port: 70000 },
+		{ host: "" },
+		{ allowedHosts: [1] },
+		5,
+	])
+		assert.throws(() => load({ dashboard }), /dashboard/, JSON.stringify(dashboard));
+});

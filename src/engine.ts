@@ -20,6 +20,7 @@ import net, { type Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Config } from "./config.ts";
+import { isLoopbackHost, startDashboard } from "./dashboard.ts";
 import { isObject, parseStrictJson } from "./harness-json.ts";
 import { resolveModels, validateModels } from "./harness-models.ts";
 import {
@@ -193,6 +194,7 @@ export class Engine {
 	private activityBy = new Map<string, { events: number; lastAt: number }>();
 	// /clear している最中のセッション。この間に届いたものは outbox に溜め、終わってから渡す
 	private refreshing = new Set<string>();
+	private dashboard: { url: string; close(): Promise<void> } | null = null;
 	// 窓口との直近のやり取り。/clear の後に渡し直して、会話の続きが分かるようにする
 	private recentChat: string[] = [];
 
@@ -244,6 +246,7 @@ export class Engine {
 		// 同じマシンの他ユーザーから注入されないよう、ソケットは本人だけが読み書きできるようにする
 		chmodSync(this.config.socketPath, 0o600);
 		this.gateway.start();
+		await this.startDashboard();
 		this.writeStatus();
 		this.log(`engine: 待ち受け開始 ${this.config.socketPath}`);
 		const emoji = this.reactionEmoji();
@@ -255,8 +258,33 @@ export class Engine {
 		);
 	}
 
+	/** ダッシュボードの失敗で engine（Discord 中継が本体）を止めない */
+	private async startDashboard() {
+		const d = this.config.dashboard;
+		if (d?.enabled !== true) return;
+		// 認証を持たないので、同じ PC から以外は受けない。LAN へ出すなら認証つきの別 Issue で
+		if (!isLoopbackHost(d.host)) {
+			this.log(`engine: ダッシュボードを起動できません host ${d.host} は 127.0.0.1 / localhost / ::1 だけ使えます`);
+			return;
+		}
+		try {
+			this.dashboard = await startDashboard({
+				ledger: this.ledger,
+				host: d.host,
+				port: d.port,
+				allowedHosts: d.allowedHosts,
+				log: this.log,
+			});
+			this.log(`engine: ダッシュボード ${this.dashboard.url}`);
+		} catch (e) {
+			this.log(`engine: ダッシュボードを起動できません ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+		}
+	}
+
 	async stop() {
 		this.gateway.stop();
+		await this.dashboard?.close();
+		this.dashboard = null;
 		if (this.boardTimer) clearTimeout(this.boardTimer);
 		for (const s of this.sessions.values()) s.socket.destroy();
 		await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
