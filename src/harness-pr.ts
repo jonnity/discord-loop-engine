@@ -292,6 +292,46 @@ export async function listPrs(c: PrContext) {
 	}
 	return result.sort((a, b) => Date.parse(a.createdAt) - Date.parse(b.createdAt) || a.pr - b.pr);
 }
+export type CiPageResult = { nodes: unknown[] } | { problem: string; lead: string };
+// 失敗の理由は固定の文言・型名・真偽値だけで組む。GitHub から来た文字列は出さない（本文や URL の漏れを避ける）。
+// 「保護状態が変わりました」「キュー状態が未確認です」「CI ページがありません」「head が変わりました」は
+// ページ単体では判定できない（ページ間・前後の比較）ため診断の対象外にし、facts() 側の既存の文言のまま残す。
+export function readCiPage(page: unknown, index: number, total: number, head: string): CiPageResult {
+	const bad = "CI 応答が不正です";
+	const unconfirmed = "CI 全件/head が未確認です";
+	const p = object(object(object(object(page).data).repository).pullRequest);
+	if (object(page).errors) return { lead: bad, problem: "GraphQL errors あり" };
+	const commitNodes = object(p.commits).nodes;
+	if (!Array.isArray(commitNodes) || commitNodes.length !== 1)
+		return { lead: bad, problem: "commits.nodes が1件でない" };
+	const commit = object(object(commitNodes[0]).commit);
+	if (commit.oid !== head) return { lead: unconfirmed, problem: "head 不一致" };
+	const rollup = commit.statusCheckRollup;
+	// null は CI 未登録。0 件として読み、green にはしない（ciGreen([]) は false）。
+	// キー欠落（undefined）は想定外として止める。複数ページの途中の null も、分割の整合を確かめられないので止める。
+	if (rollup === undefined || (rollup !== null && (typeof rollup !== "object" || Array.isArray(rollup))))
+		return { lead: unconfirmed, problem: "statusCheckRollup が不正" };
+	const typeName = (v: unknown) => (typeof v === "boolean" ? String(v) : typeof v);
+	let nodes: unknown[] = [];
+	if (rollup === null) {
+		if (total !== 1) return { lead: unconfirmed, problem: "statusCheckRollup が途中で null" };
+	} else {
+		const contexts = object(object(rollup).contexts);
+		if (!Array.isArray(contexts.nodes)) return { lead: unconfirmed, problem: "contexts.nodes が配列でない" };
+		const next = object(contexts.pageInfo).hasNextPage;
+		if (next !== index < total - 1)
+			return {
+				lead: unconfirmed,
+				problem: `ページ分割の不一致 hasNextPage=${typeName(next)} 期待=${index < total - 1}`,
+			};
+		nodes = contexts.nodes;
+	}
+	if (typeof p.mergeStateStatus !== "string")
+		return { lead: unconfirmed, problem: `mergeStateStatus の型 ${typeName(p.mergeStateStatus)}` };
+	if (p.reviewDecision !== null && typeof p.reviewDecision !== "string")
+		return { lead: unconfirmed, problem: `reviewDecision の型 ${typeName(p.reviewDecision)}` };
+	return { nodes };
+}
 export async function facts(c: PrContext, pr: number) {
 	const target = await readPr(c, pr);
 	const query = `query($owner:String!,$name:String!,$number:Int!,$endCursor:String){repository(owner:$owner,name:$name){pullRequest(number:$number){reviewDecision mergeStateStatus mergeQueueEntry{id} commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100,after:$endCursor){nodes{__typename ... on CheckRun{status conclusion} ... on StatusContext{state}} pageInfo{hasNextPage endCursor}}}}}}}}}`;
@@ -318,20 +358,11 @@ export async function facts(c: PrContext, pr: number) {
 		protection = "",
 		queued = false;
 	for (const [i, page] of raw.entries()) {
+		const read = readCiPage(page, i, raw.length, target.head);
+		if ("problem" in read)
+			throw new PrError(`${read.lead}（PR #${pr} ${i + 1}/${raw.length} ページ: ${read.problem}）`);
 		const p = object(object(object(object(page).data).repository).pullRequest);
-		const nodes = object(p.commits).nodes;
-		if (object(page).errors || !Array.isArray(nodes) || nodes.length !== 1) throw new PrError("CI 応答が不正です");
-		const commit = object(object(nodes[0]).commit);
-		const contexts = object(object(commit.statusCheckRollup).contexts);
-		if (
-			commit.oid !== target.head ||
-			!Array.isArray(contexts.nodes) ||
-			object(contexts.pageInfo).hasNextPage !== i < raw.length - 1 ||
-			typeof p.mergeStateStatus !== "string" ||
-			(p.reviewDecision !== null && typeof p.reviewDecision !== "string")
-		)
-			throw new PrError("CI 全件/head が未確認です");
-		checks.push(...contexts.nodes);
+		checks.push(...read.nodes);
 		const nextReview = p.reviewDecision === null ? "" : String(p.reviewDecision);
 		if (i && (review !== nextReview || protection !== p.mergeStateStatus))
 			throw new PrError("CI 取得中に保護状態が変わりました");
@@ -342,7 +373,7 @@ export async function facts(c: PrContext, pr: number) {
 			throw new PrError("キュー状態が未確認です");
 		queued = p.mergeQueueEntry !== null;
 		review = nextReview;
-		protection = p.mergeStateStatus;
+		protection = String(p.mergeStateStatus);
 	}
 	const after = await readPr(c, pr);
 	if (after.head !== target.head) throw new PrError("CI 取得中に head が変わりました");

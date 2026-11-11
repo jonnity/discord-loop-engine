@@ -1442,6 +1442,9 @@ NG/非 OK 後は新 head でも自動再依頼しません。原因解消と窓�
 worker が `harness-pr request --pr N --retry` で新 A を発行し、新しい OK を待ちます。
 retry も指定 PR だけを対象とし、枠使用中や先行候補があれば理由付きの非0です。窓口へその理由を返します。
 
+CI 未登録（`statusCheckRollup` が null）の PR は CI 待ち（0 件）として扱い、`request` 全体は止めません。
+CI 未登録の behind/dirty PR も rebase 依頼の対象です。読めない応答で失敗するときは、どの PR・どのページ・どの条件かを1行で出します。
+
 behind/dirty の rebase は枠に入る候補と OK 後のマージ段階だけで依頼し、head が変われば CI と新 A からやり直します。
 **解釈**として rebase の期限は120分です。再起動しても開始時刻を延長せず、同じ head のコメントを増やしません。
 新経路の CI green は SUCCESS が1件以上で全件 SUCCESS/NEUTRAL/SKIPPED、CheckRun は COMPLETED が必要という解釈です。
