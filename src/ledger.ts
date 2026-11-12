@@ -13,6 +13,7 @@
 
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import type { WorkerPermissionMode } from "./config.ts";
 
 export type TaskStatus = "inbox" | "queued" | "ai-working" | "waiting-human" | "blocked" | "done";
 export const TASK_STATUSES: TaskStatus[] = ["inbox", "queued", "ai-working", "waiting-human", "blocked", "done"];
@@ -77,6 +78,8 @@ export interface Project {
 	tmuxSession?: string;
 	/** worker を起動するときに追加で許可するもの（--allowedTools の形式） */
 	allow?: string[];
+	/** worker の permission mode の上書き。未指定は config の worker.permissionMode、null はフラグを渡さない */
+	permissionMode?: WorkerPermissionMode | null;
 	/**
 	 * 独自のループがあっても harness で進めると人が決めているとき（dle add --harness / dle mode harness）。
 	 * 調査では native を提案せず、独自のループから固有の手順を hooks に写す。設定が確定したら消す

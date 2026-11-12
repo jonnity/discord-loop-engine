@@ -439,7 +439,7 @@ plugin/engine/worker の更新後、A-番号の承認を得てから窓口が書
 | 🙆‍♂️ を付けても進まない | 付けた人が `allowedUserIds` にいるか、マージ承認の投稿か（要件確認・要対応などは文字で返す）、すでに対応済みでないか。engine のログの `リアクションを無視`（理由）と、起動時の `リアクションで OK`（設定の絵文字）を見る。受け付けられた（「OK として受け付けました」が返った）のにマージされないときは、head が動いた・CI が通っていないなど `harness-merge` の検査で止まっている（新しい承認依頼を出し直す）。受け付けた回答は取り消せない |
 | Discord に何も届かない | `dle status` の Discord 欄。`close 4014` なら Message Content Intent が無効、`トークンが無効` なら .env |
 | 「セッションが engine に繋がっていません」と届く | `tmux attach -t dle` で該当ウィンドウを開き、表示されている確認に答える |
-| 「許可の確認で止まっています」と届く | 同じく tmux で答える。よく出るものは、そのリポジトリの `permissions.allow` に足す |
+| 「許可の確認で止まっています」と届く | 同じく tmux で答える。worker は auto で動くので、出るのは auto でも確認が出るもの（危険な `rm` など）。内容を確かめて答える。`permissions.allow` に足すと auto の分類器を通らずに実行されるので、push・削除・送信を含む広い規則は足さない |
 | 窓口が返事をしない | `dle restart concierge`。台帳は残っているので続きから再開する |
 | 設定を見直したい | `~/.discord-loop-engine/projects/<名前>/harness.json` を直して `dle restart <名前>`。窓口に「kishimen-tool の設定を見直して」と頼んでもよい |
 
@@ -1025,7 +1025,8 @@ RUNNER_REMOVE
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
 | `worker.limit` | `enabled: true` / `tailLines: 12` / `wakeIntervalMinutes: 30` / `wakeMaxAttempts: 5` | `enabled`・`patterns`・`resetPatterns`・`tailLines`・`wakeIntervalMinutes`（正の数）・`wakeMaxAttempts`（0 以上の整数。0 は自動で起こさない）。使用量の上限の表示を画面から探し、止まった worker を固定間隔で起こし直す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
-| `worker.model` / `worker.extraArgs` | `sonnet` / — | worker のモデル（未指定・null は `sonnet`。`models` で上書き可）と追加の起動引数（例: `["--permission-mode", "acceptEdits"]`） |
+| `worker.model` / `worker.extraArgs` | `sonnet` / — | worker のモデル（未指定・null は `sonnet`。`models` で上書き可）と追加の起動引数（例: `["--effort", "high"]`） |
+| `worker.permissionMode` | `"auto"` | worker の起動時に渡す permission mode。`auto` / `acceptEdits` / `default` / `manual`。`null` で渡さない（Claude Code の設定と既定に任せる）。`extraArgs` に `--permission-mode` があればそちらを使う。プロジェクトごとの上書きは `projects.json` の `permissionMode` |
 | `git` | なし | worker の `git commit` の作者（`name` と `email` の両方が要る）。worker の起動時に `GIT_AUTHOR_*` / `GIT_COMMITTER_*` で渡す。リポジトリ側の `user.email` より優先される |
 | `reactionEmoji` | 🙆‍♂️ | マージ承認の投稿に付けると OK になる絵文字（Unicode 絵文字1つ。サーバー独自絵文字は不可）。`false` でリアクションでの OK を無効にする。変えたら engine を再起動する |
 | `workspaceDir` | `~/dle/workspaces` | `dle add owner/repo` の clone 先 |
@@ -1293,6 +1294,11 @@ projects/<名前>/       プロジェクトごとの設定（harness.json）と�
   設計・実装を Claude（`harness-implementer`）に自動で切り替えます。Codex が戻れば次の段階から Codex に戻ります
 - 起動の権限拒否・`reason=launch-failed`（tmux 起動失敗）・拒否/利用不可の判別不能は、代行せず `blocked` と人向け起動1行を案内します。
   exit 10 だけで代行を決めません。拒否時の自動再試行・直接起動・フラグ変更・許可追加による迂回は行いません（engine が組み込みで渡す `harness-codex start` / `stop` を除く）
+- worker は `--permission-mode auto` で起動します（リポジトリの `.claude/settings*.json` の `permissions.defaultMode` より強く効きます）。
+  auto の分類器は危険な操作（force push・削除・秘密情報の送信など）を止めますが、安全を保証するものではありません。
+  また `permissions.allow` の規則に一致したコマンドは分類器を通らないので、`Bash(git push:*)` や `Bash(curl:*)` のような広い規則は足さないでください。
+  外すには `config.json` の `worker.permissionMode` を `null` にします。プロジェクトだけ変えるときは `projects.json` の該当項目に
+  `"permissionMode": "acceptEdits"`（`null` なら渡さない）を手で書きます。`dle restart <名前>` で反映されます
 - 届くのはセッションが動いている間だけです。窓口が止まっている間の発言は保存しておき、起動したら渡します
 
 ### Codex の起動と拒否時の案内

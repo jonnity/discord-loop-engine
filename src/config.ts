@@ -14,6 +14,16 @@ export const PLUGIN_SPEC = "plugin:discord-loop-engine@discord-loop-engine";
 // reply などの dle ツールを許可確認なしで使えるようにする（離席中に返事だけで止まらないように）
 export const DLE_TOOLS_RULE = "mcp__plugin_discord-loop-engine_dle";
 
+// worker に渡してよい permission mode。bypassPermissions・dontAsk・plan は入れない
+// （bypass は安全柵を外す。dontAsk は確認の代わりに全部拒否して作業が進まない。plan は編集しない）
+export const WORKER_PERMISSION_MODES = ["auto", "acceptEdits", "default", "manual"] as const;
+export type WorkerPermissionMode = (typeof WORKER_PERMISSION_MODES)[number];
+export const DEFAULT_WORKER_PERMISSION_MODE: WorkerPermissionMode = "auto";
+
+export function isWorkerPermissionMode(v: unknown): v is WorkerPermissionMode {
+	return typeof v === "string" && (WORKER_PERMISSION_MODES as readonly string[]).includes(v);
+}
+
 export interface GitIdentity {
 	name: string;
 	email: string;
@@ -53,6 +63,8 @@ export interface Config {
 	worker: {
 		model: string | null;
 		extraArgs: string[];
+		/** 起動時に渡す permission mode。未指定は既定（auto）、null はフラグを渡さない。optional（型付きの既存リテラルを壊さない） */
+		permissionMode?: WorkerPermissionMode | null;
 		initialPrompt: string;
 		refresh: WorkerRefresh;
 		wake?: { enabled: boolean };
@@ -82,6 +94,8 @@ export const CONFIG_TEMPLATE = {
 	worker: {
 		model: "sonnet",
 		extraArgs: [],
+		// auto / acceptEdits / default / manual。null で --permission-mode を渡さない
+		permissionMode: DEFAULT_WORKER_PERMISSION_MODE as WorkerPermissionMode | null,
 		refresh: {
 			enabled: true,
 			maxTokens: 100000,
@@ -179,6 +193,15 @@ export function loadConfig(home = dleHome()): Config {
 		!(Array.isArray(dashRaw.allowedHosts) && dashRaw.allowedHosts.every((x) => typeof x === "string"))
 	)
 		errors.push("dashboard.allowedHosts: 文字列の配列にしてください");
+	let permissionMode: WorkerPermissionMode | null;
+	const pmRaw = (raw.worker as Record<string, unknown> | null | undefined)?.permissionMode;
+	if (pmRaw === undefined) permissionMode = DEFAULT_WORKER_PERMISSION_MODE;
+	else if (pmRaw === null) permissionMode = null;
+	else if (isWorkerPermissionMode(pmRaw)) permissionMode = pmRaw;
+	else {
+		permissionMode = DEFAULT_WORKER_PERMISSION_MODE;
+		errors.push(`worker.permissionMode: ${WORKER_PERMISSION_MODES.join(" / ")}、または null（フラグを渡さない）`);
+	}
 	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const channelIds = raw.channelIds as string[];
 	const c = (raw.concierge ?? {}) as Record<string, unknown>;
@@ -240,6 +263,7 @@ export function loadConfig(home = dleHome()): Config {
 		worker: {
 			model: typeof w.model === "string" && w.model.trim() ? w.model : "sonnet",
 			extraArgs: strList(w.extraArgs),
+			permissionMode,
 			initialPrompt: typeof w.initialPrompt === "string" ? w.initialPrompt : "/discord-loop-engine:issue-loop",
 			wake: { enabled: typeof ww.enabled === "boolean" ? ww.enabled : true },
 			limit,
