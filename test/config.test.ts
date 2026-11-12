@@ -160,3 +160,17 @@ test("dashboard の既定は無効・127.0.0.1・allowedHosts 空で、不正な
 	])
 		assert.throws(() => load({ dashboard }), /dashboard/, JSON.stringify(dashboard));
 });
+
+// worker.permissionMode は未指定で auto、null でフラグを渡さない、許す値はそのまま、bypass 系などは設定エラー
+test("T1: worker.permissionMode の既定と値", () => {
+	assert.equal(load({}).worker.permissionMode, "auto");
+	assert.equal(load({ worker: {} }).worker.permissionMode, "auto");
+	assert.equal(load({ worker: { permissionMode: null } }).worker.permissionMode, null);
+	assert.equal(load({ worker: { permissionMode: "acceptEdits" } }).worker.permissionMode, "acceptEdits");
+	assert.equal(CONFIG_TEMPLATE.worker.permissionMode, "auto");
+});
+
+test("T5: worker.permissionMode の不正値は設定エラー", () => {
+	for (const permissionMode of ["bypassPermissions", "dontAsk", "plan", "Auto", 1, true])
+		assert.throws(() => load({ worker: { permissionMode } }), /worker\.permissionMode/, String(permissionMode));
+});

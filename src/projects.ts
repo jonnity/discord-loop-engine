@@ -4,7 +4,16 @@ import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { type Config, DLE_TOOLS_RULE, expandHome, PLUGIN_SPEC } from "./config.ts";
+import {
+	type Config,
+	DEFAULT_WORKER_PERMISSION_MODE,
+	DLE_TOOLS_RULE,
+	expandHome,
+	isWorkerPermissionMode,
+	PLUGIN_SPEC,
+	WORKER_PERMISSION_MODES,
+	type WorkerPermissionMode,
+} from "./config.ts";
 import { modelArgs, readModelConfig, resolveModels } from "./harness-models.ts";
 import type { Ledger, Project } from "./ledger.ts";
 import type { RefreshCoverage } from "./refresh.ts";
@@ -20,6 +29,15 @@ export const run: Run = (cmd, args) =>
 			resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
 		);
 	});
+
+// extraArgs で mode を指定済みなら足さない（後から付けた方が勝つかは CLI の実装次第なので、二重に渡さない）
+export function permissionModeArgs(mode: WorkerPermissionMode | null, extraArgs: string[]): string[] {
+	if (mode === null) return [];
+	const given = extraArgs.some(
+		(a) => a === "--permission-mode" || a.startsWith("--permission-mode=") || a === "--dangerously-skip-permissions",
+	);
+	return given ? [] : ["--permission-mode", mode];
+}
 
 export const RESERVED_NAMES = ["concierge", "engine"];
 
@@ -241,6 +259,13 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 			let worktreeRoot: string | undefined;
 			let startupError: string | undefined;
 			let models = globalModels;
+			// プロジェクトの上書きが優先。null はフラグを渡さない
+			// （?? は null も既定に倒すので使わない）
+			let permissionMode: WorkerPermissionMode | null =
+				cfg.worker.permissionMode === undefined ? DEFAULT_WORKER_PERMISSION_MODE : cfg.worker.permissionMode;
+			if (p.permissionMode === null || isWorkerPermissionMode(p.permissionMode)) permissionMode = p.permissionMode;
+			else if (p.permissionMode !== undefined)
+				startupError = `${p.name}: projects.json の permissionMode が不正です: ${JSON.stringify(p.permissionMode)}（${WORKER_PERMISSION_MODES.join(" / ")} / null）`;
 			try {
 				const profilePath = ledger?.effectiveProfilePath(p);
 				if (profilePath) readModelConfig(profilePath);
@@ -280,6 +305,8 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 							[
 								...(worktreeRoot ? ["--add-dir", worktreeRoot] : []),
 								...modelArgs(models.values.tick, cfg.worker.extraArgs),
+								// Why not 末尾: --allowedTools は可変長で、後ろに置くと規則の続きとして読まれる恐れがある
+								...permissionModeArgs(permissionMode, cfg.worker.extraArgs),
 								...channelArgs,
 								"--allowedTools",
 								DLE_TOOLS_RULE,

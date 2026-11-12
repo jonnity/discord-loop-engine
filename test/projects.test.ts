@@ -604,3 +604,151 @@ test("起こしの対象（wake）は harness・ready の worker にだけ付き
 	assert.equal(wake(mk(false)).ready, undefined, "enabled:false は付けない");
 	assert.deepEqual(Object.keys(wake(mk()).ready ?? {}), ["enabled"], "prompt は持たない");
 });
+
+// ---- #82: worker の permission mode ----
+// OFF の経路の期待値は、変更前（origin/main）のコードから同じ入力で作った command の固定値。
+// 変更後のコードで取り直さない。ずれたら固定値ではなく実装を疑う。<HOME> は一時ディレクトリに置き換えて比べる。
+const MAIN_CONCIERGE =
+	'env DLE_MODELS=\'{"values":{"window":"sonnet","tick":"sonnet","spec":"opus","review":"opus"},"sources":{"window":"legacy","tick":"default","spec":"default","review":"default"},"warnings":[]}\' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_ROLE=concierge claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle \'Bash(gh issue create:*)\' \'Bash(gh issue view:*)\' \'Bash(gh issue list:*)\' \'Bash(gh issue comment:*)\' \'Bash(gh pr view:*)\' \'Bash(gh pr list:*)\' \'Bash(gh pr checks:*)\'';
+
+const MAIN_DEFAULT_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const AUTO_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --permission-mode auto --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const ACCEPT_EDITS_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --permission-mode acceptEdits --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const MAIN_DEFAULT_N =
+	"env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=n DLE_LOOP=native claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const AUTO_N =
+	"env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=n DLE_LOOP=native claude --model sonnet --permission-mode auto --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const MAIN_DEFAULT_READY_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const AUTO_READY_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --permission-mode auto --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const ACCEPT_EDITS_READY_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --permission-mode acceptEdits --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)'";
+
+const MAIN_EXTRA_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)' --permission-mode acceptEdits";
+
+const MAIN_EXTRA_EQ_H =
+	"mkdir -p -- <HOME>-worktrees/h && exec env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=h DLE_LOOP=harness claude --add-dir <HOME>-worktrees/h --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(harness-config:*)' 'Bash(harness-hook:*)' 'Bash(harness-phase:*)' 'Bash(harness-inbox:*)' 'Bash(harness-gate:*)' 'Bash(harness-merge:*)' 'Bash(harness-status:*)' 'Bash(harness-notify:*)' 'Bash(harness-labels:*)' 'Bash(harness-issue-md:*)' 'Bash(harness-codex-status:*)' 'Bash(harness-codex start:*)' 'Bash(harness-codex stop:*)' 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)' --permission-mode=plan";
+
+const MAIN_EXTRA_N =
+	"env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=n DLE_LOOP=native claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)' --permission-mode acceptEdits";
+
+const MAIN_EXTRA_EQ_N =
+	"env DLE_MODELS='{\"values\":{\"window\":\"sonnet\",\"tick\":\"sonnet\",\"spec\":\"opus\",\"review\":\"opus\"},\"sources\":{\"window\":\"legacy\",\"tick\":\"default\",\"spec\":\"default\",\"review\":\"default\"},\"warnings\":[]}' DLE_HOME=<HOME> DLE_CONFIG_HOME=<HOME> DLE_SOCKET=<HOME>/engine.sock DLE_MODEL_PROFILE='' DLE_ROLE=worker DLE_PROJECT=n DLE_LOOP=native claude --model sonnet --dangerously-load-development-channels plugin:discord-loop-engine@discord-loop-engine --allowedTools mcp__plugin_discord-loop-engine_dle 'Bash(ls:*)' 'Bash(cat:*)' 'Bash(head:*)' 'Bash(tail:*)' 'Bash(wc:*)' 'Bash(find:*)' 'Bash(grep:*)' 'Bash(rg:*)' 'Bash(jq:*)' 'Bash(git status:*)' 'Bash(git log:*)' 'Bash(git diff:*)' 'Bash(git show:*)' 'Bash(git branch:*)' 'Bash(git rev-parse:*)' 'Bash(gh issue view:*)' 'Bash(gh issue list:*)' 'Bash(gh pr view:*)' 'Bash(gh pr list:*)' 'Bash(gh pr checks:*)' 'Bash(gh run list:*)' 'Bash(gh run view:*)' --permission-mode=plan";
+
+function pmTargets(
+	workerExtra: { permissionMode?: Config["worker"]["permissionMode"]; extraArgs?: string[] },
+	overrides: Partial<Project> = {},
+	only?: "h" | "n",
+) {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-pm-"));
+	try {
+		const cfg = {
+			home,
+			socketPath: `${home}/engine.sock`,
+			claudeBin: "claude",
+			concierge: { model: "sonnet", extraArgs: [], allowedTools: [], refresh: { enabled: false } },
+			worker: {
+				model: null,
+				extraArgs: workerExtra.extraArgs ?? [],
+				...("permissionMode" in workerExtra ? { permissionMode: workerExtra.permissionMode } : {}),
+				refresh: { enabled: false },
+				initialPrompt: "/discord-loop-engine:issue-loop",
+			},
+		} as unknown as Config;
+		const base = { repo: "x/y", active: true, addedAt: "" };
+		const projects: Project[] = [
+			{ ...base, name: "h", path: "/w/h", mode: "harness", ...(only === "h" ? overrides : {}) },
+			{ ...base, name: "n", path: "/w/n", mode: "native", initialPrompt: "/x", ...(only === "n" ? overrides : {}) },
+		];
+		const norm = (t: { command: string; startupError?: string }) => ({
+			command: t.command.split(home).join("<HOME>"),
+			startupError: t.startupError,
+		});
+		const [c, h, n] = sessionTargets(cfg, projects, new Ledger(home)).map(norm);
+		// ledger なし = 設定済み（ready）の経路
+		const readyH = sessionTargets(cfg, projects.slice(0, 1))[1];
+		return { c, h, n, readyH: readyH ? norm(readyH) : undefined };
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+	}
+}
+
+test("T2: 既定は --permission-mode auto を --model の直後に入れる（窓口は変えない）", () => {
+	const t = pmTargets({});
+	assert.equal(t.c?.command, MAIN_CONCIERGE);
+	assert.equal(t.h?.command, AUTO_H);
+	assert.equal(t.n?.command, AUTO_N);
+	assert.equal(t.readyH?.command, AUTO_READY_H);
+	assert.equal(pmTargets({ permissionMode: "auto" }).h?.command, AUTO_H);
+});
+
+test("T3: 全体で null にすると、窓口・worker とも変更前の command と完全一致する", () => {
+	const t = pmTargets({ permissionMode: null });
+	assert.equal(t.c?.command, MAIN_CONCIERGE);
+	assert.equal(t.h?.command, MAIN_DEFAULT_H);
+	assert.equal(t.n?.command, MAIN_DEFAULT_N);
+	assert.equal(t.readyH?.command, MAIN_DEFAULT_READY_H);
+});
+
+test("T4: プロジェクトの permissionMode が全体設定より優先される", () => {
+	// (a) 全体 auto + h だけ null
+	const a = pmTargets({}, { permissionMode: null }, "h");
+	assert.equal(a.c?.command, MAIN_CONCIERGE);
+	assert.equal(a.h?.command, MAIN_DEFAULT_H);
+	assert.equal(a.n?.command, AUTO_N);
+	// (b) acceptEdits
+	const b = pmTargets({}, { permissionMode: "acceptEdits" }, "h");
+	assert.equal(b.h?.command, ACCEPT_EDITS_H);
+	assert.equal(b.n?.command, AUTO_N);
+	assert.equal(b.c?.command, MAIN_CONCIERGE);
+	// (c) 全体 null + n だけ auto
+	const c = pmTargets({ permissionMode: null }, { permissionMode: "auto" }, "n");
+	assert.equal(c.n?.command, AUTO_N);
+	assert.equal(c.h?.command, MAIN_DEFAULT_H);
+	assert.equal(c.c?.command, MAIN_CONCIERGE);
+	// 設定済みの経路でも同じ（ledger なしで h のみ）
+	assert.equal(b.readyH?.command, ACCEPT_EDITS_READY_H);
+});
+
+test("T6: 不正なプロジェクト値はその target だけ起動せず、設定で bypass 系は選べない", () => {
+	for (const permissionMode of ["bypassPermissions", "dontAsk"] as unknown as Project["permissionMode"][]) {
+		const t = pmTargets({}, { permissionMode }, "h");
+		assert.equal(t.h?.command, "");
+		assert.match(t.h?.startupError ?? "", /h: .*permissionMode/);
+		assert.equal(t.n?.command, AUTO_N, "他のプロジェクトは起動する");
+	}
+	const ok = [
+		pmTargets({}),
+		pmTargets({ permissionMode: null }),
+		pmTargets({}, { permissionMode: "acceptEdits" }, "h"),
+		pmTargets({ permissionMode: null }, { permissionMode: "auto" }, "n"),
+	];
+	for (const t of ok)
+		for (const x of [t.c, t.h, t.n, t.readyH])
+			assert.doesNotMatch(x?.command ?? "", /bypassPermissions|dontAsk|--dangerously-skip-permissions/);
+});
+
+test("T7: extraArgs に mode があれば engine は足さず、変更前の command と完全一致する", () => {
+	for (const permissionMode of [undefined, "acceptEdits", null] as const) {
+		const e1 = pmTargets({ permissionMode, extraArgs: ["--permission-mode", "acceptEdits"] });
+		assert.equal(e1.c?.command, MAIN_CONCIERGE);
+		assert.equal(e1.h?.command, MAIN_EXTRA_H);
+		assert.equal(e1.n?.command, MAIN_EXTRA_N);
+		const e2 = pmTargets({ permissionMode, extraArgs: ["--permission-mode=plan"] });
+		assert.equal(e2.c?.command, MAIN_CONCIERGE);
+		assert.equal(e2.h?.command, MAIN_EXTRA_EQ_H);
+		assert.equal(e2.n?.command, MAIN_EXTRA_EQ_N);
+	}
+});
