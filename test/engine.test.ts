@@ -13,6 +13,7 @@ import "./isolate.ts";
 import assert from "node:assert/strict";
 import { type ChildProcess, execFile, spawn } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import http from "node:http";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -2681,5 +2682,184 @@ test("起動ログに、リアクションで OK にする絵文字がコード�
 			logs.some((l) => l.includes("リアクションで OK") && l.includes(expected)),
 			logs.join("\n"),
 		);
+	}
+});
+
+const httpGet = (port: number, p: string) =>
+	new Promise<{ status: number; body: string }>((resolve, reject) => {
+		const req = http.request({ host: "127.0.0.1", port, path: p, agent: false }, (res) => {
+			let body = "";
+			res.on("data", (c) => {
+				body += c;
+			});
+			res.on("end", () => resolve({ status: res.statusCode ?? 0, body }));
+		});
+		req.on("error", reject);
+		req.end();
+	});
+
+const dashboardPort = (logs: string[]) => {
+	const m = logs.map((l) => /ダッシュボード http:\/\/127\.0\.0\.1:(\d+)\//.exec(l)).find(Boolean);
+	return Number(m?.[1]);
+};
+
+test("ダッシュボードの A-番号の並びは、発行・回答・置き換えの直後も attention_list と一致する", async () => {
+	const logs: string[] = [];
+	const { engine } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	engine.config.dashboard = { enabled: true, host: "127.0.0.1", port: 0, allowedHosts: [] };
+	await engine.start();
+	try {
+		const port = dashboardPort(logs);
+		assert.ok(port > 0);
+		const W1 = { role: "worker", name: "p1" } as const;
+		const compare = async () => {
+			const expected = ((await engine.call(W1, "attention_list")) as { id: string }[]).map((x) => x.id);
+			const html = (await httpGet(port, "/")).body;
+			const section = html.split("<h2>AI 作業中</h2>")[0] ?? "";
+			assert.deepEqual(
+				[...section.matchAll(/<td>(A-\d+)<\/td>/g)].map((m) => m[1]),
+				expected,
+			);
+		};
+		const add = (kind: "merge" | "interview", taskId: string) =>
+			engine.ledger.addAttention({ taskId, project: "p1", issue: "1", pr: "", kind, title: "t", url: "", summary: "" })
+				.attention;
+		await compare();
+		const a1 = add("merge", "T-1");
+		await compare();
+		add("merge", "T-1"); // 置き換え
+		await compare();
+		const a3 = add("interview", "T-2");
+		await compare();
+		engine.ledger.resolveAttention(a3.id, "OK");
+		await compare();
+		assert.notEqual(a1.id, "");
+	} finally {
+		await engine.stop();
+	}
+});
+
+test("ダッシュボードが未設定・無効なら待ち受けず、使用中のポートや外向きの host でも engine は起動する", async () => {
+	for (const dashboard of [undefined, { enabled: false, host: "127.0.0.1", port: 0, allowedHosts: [] }]) {
+		const logs: string[] = [];
+		const { engine } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+		if (dashboard) engine.config.dashboard = dashboard;
+		await engine.start();
+		await engine.stop();
+		assert.ok(!logs.some((m) => m.includes("ダッシュボード")));
+	}
+	const busy = net.createServer();
+	await new Promise<void>((r) => busy.listen(0, "127.0.0.1", () => r()));
+	const busyPort = (busy.address() as net.AddressInfo).port;
+	for (const [host, port, expect] of [
+		["127.0.0.1", busyPort, /ダッシュボードを起動できません EADDRINUSE/],
+		["0.0.0.0", 0, /ダッシュボードを起動できません/],
+	] as const) {
+		const logs: string[] = [];
+		const { engine } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+		engine.config.dashboard = { enabled: true, host, port, allowedHosts: [] };
+		await engine.start();
+		assert.ok(
+			logs.some((m) => expect.test(m)),
+			logs.join("\n"),
+		);
+		await engine.stop();
+	}
+	busy.close();
+});
+
+test("ダッシュボードへの途中の要求（ヘッダを送りかけ）が残っていても、stop() が一定時間内に終わる", async () => {
+	const logs: string[] = [];
+	const { engine } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	engine.config.dashboard = { enabled: true, host: "127.0.0.1", port: 0, allowedHosts: [] };
+	await engine.start();
+	const socks: net.Socket[] = [];
+	try {
+		const port = dashboardPort(logs);
+		// 1: ヘッダの途中で止める（server.close() だけでは閉じない接続）
+		const partial = net.connect(port, "127.0.0.1");
+		socks.push(partial);
+		partial.on("error", () => {});
+		await new Promise<void>((r) => partial.once("connect", () => r()));
+		partial.write("GET / HTTP/1.1\r\nHost: localhost\r\n");
+		// 2: 応答を受けた後の keep-alive 接続
+		const idle = net.connect(port, "127.0.0.1");
+		socks.push(idle);
+		idle.on("error", () => {});
+		await new Promise<void>((r) => idle.once("connect", () => r()));
+		idle.write("GET / HTTP/1.1\r\nHost: localhost\r\nConnection: keep-alive\r\n\r\n");
+		await new Promise((r) => setTimeout(r, 100));
+		let timer: NodeJS.Timeout | undefined;
+		try {
+			await Promise.race([
+				engine.stop(),
+				new Promise((_, rej) => {
+					timer = setTimeout(() => rej(new Error("stop がハングした")), 2000);
+				}),
+			]);
+		} finally {
+			clearTimeout(timer);
+		}
+	} finally {
+		for (const s of socks) s.destroy();
+	}
+});
+
+test("openGate の投稿が失敗しても、ダッシュボードの revision は発行で変わる", async () => {
+	const logs: string[] = [];
+	const { engine, rest } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	engine.config.dashboard = { enabled: true, host: "127.0.0.1", port: 0, allowedHosts: [] };
+	await engine.start();
+	try {
+		const port = dashboardPort(logs);
+		const before = (await httpGet(port, "/revision")).body;
+		rest.hooks.send = async () => {
+			throw new Error("送信失敗");
+		};
+		await openGate(engine, "interview", "1").catch(() => {});
+		assert.equal(engine.ledger.openAttention().length, 1, "投稿より前に台帳へ書かれている");
+		const after = (await httpGet(port, "/revision")).body;
+		assert.notEqual(after, before);
+	} finally {
+		await engine.stop();
+	}
+});
+
+test("ダッシュボードが無効のとき、board.md・attention.md の中身と投稿回数は未設定の場合と同じ", async () => {
+	const run = async (dashboard: Config["dashboard"]) => {
+		const { engine, rest, home } = setupEngine();
+		if (dashboard) engine.config.dashboard = dashboard;
+		await engine.start();
+		await openGate(engine, "interview", "1");
+		await openGate(engine, "merge-request", "2");
+		await new Promise((r) => setTimeout(r, 100)); // ボードの更新は debounce される
+		await engine.stop();
+		const read = (f: string) => readFileSync(path.join(engine.ledger.dir, f), "utf8").replaceAll(home, "<home>");
+		return {
+			board: read("board.md"),
+			attention: read("attention.md"),
+			sends: sends(rest).map((c) => c.content),
+			edits: rest.calls.filter((c) => c.kind !== "send").map((c) => c.kind),
+		};
+	};
+	const base = await run(undefined);
+	assert.ok(base.board.length > 0 && base.attention.length > 0);
+	assert.deepEqual(await run({ enabled: false, host: "127.0.0.1", port: 0, allowedHosts: [] }), base);
+});
+
+test("attention.json が構文エラーでも attention_list は今までどおり [] を返し、ダッシュボードは警告を出す", async () => {
+	const logs: string[] = [];
+	const { engine } = setupEngine(5, undefined, undefined, (m) => logs.push(m));
+	engine.config.dashboard = { enabled: true, host: "127.0.0.1", port: 0, allowedHosts: [] };
+	await engine.start();
+	try {
+		writeFileSync(path.join(engine.ledger.dir, "attention.json"), "{ broken");
+		const W1 = { role: "worker", name: "p1" } as const;
+		assert.deepEqual(await engine.call(W1, "attention_list"), []);
+		const r = await httpGet(dashboardPort(logs), "/");
+		assert.equal(r.status, 200);
+		assert.match(r.body, /読めません/);
+	} finally {
+		await engine.stop();
 	}
 });

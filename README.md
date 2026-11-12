@@ -456,6 +456,55 @@ Discord の共通チャンネルで窓口に話しかけるだけです。
 
 ピン留めの **ボード** に、あなた待ち・作業中・次に着手が常に出ています。
 
+### Web で見る（ダッシュボード）
+
+あなた待ち・AI 作業中・次に着手を、GitHub のコメント（無ければ Issue / PR）へのリンク付きで1枚のページに出せます。
+読み取り専用で、回答は今までどおり Discord の A-番号か GitHub の OK コメントです。ボードとは併存し、
+絞り込みは `dle attention`・ボードと同じ条件なので食い違いません。古い A（回答済み・置き換え済み）は出ません。
+開いたままのページは、台帳が変わると 10 秒以内に読み直します。
+
+既定は無効です。`config.json` で有効にします。
+
+```json
+{ "dashboard": { "enabled": true } }
+```
+
+`http://127.0.0.1:4870/`（`port` で変更）で開きます。起動ログ（`engine: ダッシュボード …`）にも URL が出ます。
+待ち受けは `127.0.0.1` / `localhost` / `::1` だけで、認証はありません。それ以外の `host` では起動しません
+（ログに理由が出ます）。ポートが使用中でも engine は起動し続け、ダッシュボードだけが出ません。
+同じ PC の他の OS ユーザーからは見える点に注意してください。
+
+`Host` が名前のときは `localhost` と IP アドレス以外を 421 で断ります（DNS リバインディング対策）。
+SSH ポート転送の `-L 8080:127.0.0.1:4870` なら `localhost:8080` のまま開けます。名前で届く中継（VPN など）を
+使うときは、その名前を `dashboard.allowedHosts` に足します。外出先から見るなら、engine は `127.0.0.1` のまま
+SSH ポート転送か VPN で届けてください。
+
+#### WSL2 から Windows のブラウザで開く
+
+WSL2 上の dle が `127.0.0.1` に待ち受けたページを、Windows 側のブラウザで `http://localhost:4870/` として
+開けるかは、WSL2 の設定に依ります。次の手順で確かめてください。
+
+1. WSL2 で `dashboard.enabled: true` にして engine を起動し、起動ログの URL を確認する
+2. Windows のブラウザで `http://localhost:4870/` を開く
+
+届かないとき:
+
+- `%UserProfile%\.wslconfig` の `[wsl2]` に `localhostForwarding=false` が入っていないか確認する
+  （`false` だと Windows の `localhost` から WSL2 に転送されません。`true` に戻して `wsl --shutdown` で再起動）
+- WSL の mirrored モード（`networkingMode=mirrored`）では、Windows と WSL が同じ `127.0.0.1` を共有します
+- それでも届かないときは、Windows 側で SSH ポート転送を使います
+  （`ssh -L 8080:127.0.0.1:4870 <WSL のユーザー>@<WSL の IP>`、WSL 側で sshd が必要）。`localhost:8080` で開けます
+- `host` を `0.0.0.0` にして WSL の IP で開く方法は、認証が無いため **使えません**（起動しません）
+
+設定の項目:
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `dashboard.enabled` | `false` | ダッシュボードを有効にする |
+| `dashboard.host` | `127.0.0.1` | 待受アドレス（`127.0.0.1` / `localhost` / `::1` のみ） |
+| `dashboard.port` | `4870` | 待受ポート |
+| `dashboard.allowedHosts` | `[]` | 名前の Host を追加で許す（完全一致） |
+
 ### 投稿の見出しと、依頼の印
 
 engine が出す投稿（窓口の返信・A-番号の依頼・マージ完了・お知らせ・CI 失敗・許可確認など）は、1行目が
@@ -983,6 +1032,7 @@ RUNNER_REMOVE
 | `retro` | 5 件 / 7 日 / 3 回 | 振り返りの頻度と、仮ルールにする再現回数（仮置き。振り返りで見直す） |
 | `permissionRelay` | `false` | 許可の確認に Discord から `yes <id>` で答えられるようにする |
 | `board.enabled` | `true` | ボードのピン留め |
+| `dashboard` | 無効 / `127.0.0.1` / 4870 / `[]` | 読み取り専用の Web ダッシュボード（「Web で見る」の節）。`enabled`・`host`・`port`・`allowedHosts` |
 
 文脈量は Claude Code の `~/.claude/sessions/<pid>.json` と会話ログの最後の usage
 （入力＋キャッシュ作成＋キャッシュ読取）から取得する。取得できない場合は画面の `~Nk uncached`、

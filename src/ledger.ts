@@ -119,6 +119,11 @@ interface State {
 	queuedSeen?: Record<string, string[]>;
 }
 
+/** 一覧の絞り込み条件。attention_list・ボード・Web ダッシュボードが同じ条件を使い、食い違わないようにする */
+export const isOpenAttention = (a: Attention) => a.status === "open";
+export const isWorkingTask = (t: Task) => t.status === "ai-working" || t.status === "blocked";
+export const isQueuedTask = (t: Task) => t.status === "queued" || t.status === "inbox";
+
 export const KIND_LABEL: Record<AttentionKind, string> = {
 	interview: "要件確認",
 	merge: "マージ承認",
@@ -384,7 +389,7 @@ export class Ledger {
 	}
 
 	openAttention(): Attention[] {
-		return this.attention().filter((a) => a.status === "open");
+		return this.attention().filter(isOpenAttention);
 	}
 
 	/** attention=新しい依頼、resolved=それに置き換えられて閉じた古い依頼（engine が印を付けるため） */
@@ -550,10 +555,10 @@ export class Ledger {
 						.join("\n")
 				: "  （なし）",
 		);
-		const working = tasks.filter((t) => t.status === "ai-working" || t.status === "blocked");
+		const working = tasks.filter(isWorkingTask);
 		sections.push("■ AI 作業中");
 		sections.push(working.length ? working.map(line).join("\n") : "  （なし）");
-		const queued = tasks.filter((t) => t.status === "queued" || t.status === "inbox");
+		const queued = tasks.filter(isQueuedTask);
 		sections.push("■ 次に着手");
 		sections.push(queued.length ? queued.slice(0, 8).map(line).join("\n") : "  （なし）");
 		const text = sections.join("\n");

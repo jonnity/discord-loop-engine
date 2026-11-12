@@ -179,3 +179,59 @@ test("messageIds の無い既存形式の attention.json（messageId だけ）�
 	assert.equal(again.attention()[0]?.messageId, "m1");
 	assert.equal(again.attention()[0]?.messageIds, undefined);
 });
+
+test("ボードの出力は変更前（origin/main）と同一: 置き換え済み・9件以上の queued・phase・blocked・done を含む台帳", () => {
+	const l = fresh();
+	const t = l.createTask({ project: "k", title: "a", issue: "1" });
+	const input = {
+		taskId: t.id,
+		project: "k",
+		issue: "1",
+		pr: "",
+		kind: "merge" as const,
+		title: "a",
+		url: "u",
+		summary: "",
+	};
+	l.addAttention(input);
+	l.addAttention(input); // A-1 は置き換えられて閉じる
+	l.addAttention({ ...input, kind: "interview" });
+	l.resolveAttention("A-3", "OK");
+	l.addAttention({ ...input, taskId: "T-9", pr: "5", issue: "", kind: "blocked" });
+	assert.deepEqual(
+		l.openAttention().map((a) => a.id),
+		["A-2", "A-4"],
+	);
+	for (let i = 0; i < 9; i++) {
+		const q = l.createTask({ project: "q", title: `q${i}`, issue: String(10 + i) });
+		if (i === 2) l.updateTask(q.id, { phase: "impl" }, "x");
+	}
+	l.createTask({ project: "b", title: "blk", issue: "30", status: "blocked" });
+	const w = l.createTask({ project: "w", title: "work", issue: "", status: "ai-working" });
+	l.updateTask(w.id, { phase: "review" }, "x");
+	const d = l.createTask({ project: "d", title: "done", issue: "40" });
+	l.updateTask(d.id, { status: "done" }, "x");
+	// 期待値は変更前の renderBoard が同じ台帳に出した全文（9件目の queued と done は出ない）
+	assert.equal(
+		l.renderBoard(),
+		[
+			"📋 ボード（10/22 10:15 更新）",
+			"■ あなた待ち",
+			"  A-2 [k] #1 マージ承認",
+			"  A-4 [k] 要対応 → PR #5",
+			"■ AI 作業中",
+			"  T-0011 [b] #30 blk",
+			"  T-0012 [w] work（review）",
+			"■ 次に着手",
+			"  T-0001 [k] #1 a",
+			"  T-0002 [q] #10 q0",
+			"  T-0003 [q] #11 q1",
+			"  T-0004 [q] #12 q2（impl）",
+			"  T-0005 [q] #13 q3",
+			"  T-0006 [q] #14 q4",
+			"  T-0007 [q] #15 q5",
+			"  T-0008 [q] #16 q6",
+		].join("\n"),
+	);
+	assert.equal(readFileSync(path.join(l.dir, "board.md"), "utf8"), `${l.renderBoard()}\n`);
+});
