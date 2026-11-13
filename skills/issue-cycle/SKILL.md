@@ -880,7 +880,8 @@ harness:merge-ok は動画なしも再依頼の開始時/完了時に外れる�
 - 2: 引数/設定/雛形の未置換、6: ffprobe/ffmpeg/入力/容量。外部副作用前に止まる。道具導入・再録画等を行う。
 - 4: 通知、7: 投稿後の A/リンク/再取得照合/head/完成 PATCH、5: ラベル確認。最新 pending は inbox が missing-notify として返す。
   最新が自分の失敗した依頼の pending なら、原因を直せたときだけ再実行し、直せなければ blocked にする。
-  失敗 A は取下げ保証なし。OK を返しても未完了依頼はマージできない。A の偽回答や台帳編集で取り下げない。
+  失敗 A は取下げ保証なし。OK を返しても未完了依頼はそのままではマージできない。A の偽回答や台帳編集で取り下げない。
+  動画ありの pending（7）で、その A に本人の Discord の OK が既にあるときだけ、再依頼せず `harness-phase {n} awaiting-merge --pr <PR> --adopt-pending <A>` で完了できる（下の「未完了依頼の採用」）。
 - 完成後の失敗では merge-ok 除去・awaiting 維持/復元・同コメントの pending 化を試す。
   通信断等で復旧未確認なら worktree 内の git 管理外状態ファイルに残り harness-merge が拒否する。
   通信回復後も再読取り・全手順の成功までマージしない。再依頼が成功したとき状態ファイルが消える。
@@ -888,7 +889,7 @@ harness:merge-ok は動画なしも再依頼の開始時/完了時に外れる�
   SIGKILL/親の無信号終了は trap 保証なし。残存子を止めてから所有一時領域だけ回収する。
 
 自動解消できなければ失敗段階・必要な対応を秘密なしで別本文にまとめ、`harness-phase {n} blocked --comment-file ...`。
-blocked 通知失敗も成功にしない。原因解消後は動画準備から新コメント・新通知・新 A で再依頼し、旧 receipt/A を流用しない。
+blocked 通知失敗も成功にしない。原因解消後は動画準備から新コメント・新通知・新 A で再依頼する。別の head・別の A へは旧 receipt/A を流用しない（同じ A が本人 OK 済みで同じ pending コメントに結び付く未完了を `--adopt-pending` で完了することは、別 A への付け替えではない）。
 
 コメント雛形（動画欄は自動生成。入力に架空 URL を書かない）:
 
@@ -949,6 +950,14 @@ CI/mergeable/hook の拒否だけで同じ依頼/head なら、元の同じ A �
 新 head/新依頼には新回答が必要。拒否理由に従って直す（迂回しない）。「🔵 マージ完了」の Discord 通知は、`done` の報告を受けた
 engine が出すので、ここでは送らない。
 
+### 未完了依頼の採用（動画の再取得照合に失敗した pending）
+
+即時配送で本人の OK（meta.attention つき）を受けて `harness-merge --chat-approval ... --attention <A>` が `request-failed` または `recovery-unconfirmed` で拒否されたときだけ、
+同じ A で `harness-phase {n} awaiting-merge --pr <PR> --adopt-pending <A>` を**1回だけ**実行する（`<PR>` は `harness-merge` と同じ PR）。終了0なら同じ `harness-merge` を再実行する。
+非0・`採用不可 reason=...` は従来の Phase 5-4 の失敗仕分けへ進む（再試行を繰り返さない・手動 PATCH・復旧ファイルの手削除・GitHub 直接マージはしない）。
+採用は、動画ありの pending・現 head 一致・本人 OK 済みの同じ A（その pending コメントに結び付く）のときだけ成立し、完成本文に「照合は未了」と明記する。CI・mergeable・requiredChecks・beforeMerge・head と A の再検証は `harness-merge` が従来どおり行う。
+tick の `harness-inbox` が `adoptable-pending` を返したときは「採用できる」と窓口へ報告するだけで、採用はしない（窓口の明示の指示があるときだけ上の手順を実行する）。
+
 **head 変更前の確認**: main 取り込み、rebase、amend、競合修正、CI red の Codex 再依頼の直前には inbox を再読取りする。
 前 tick の空結果は使わない。GitHub NG を優先し、判定不能・走査非0なら head を変えない。
 未処理 OK があればまず現 head で harness-merge を試す。CI 待ちだけなら同じ head/A のまま待つ。
@@ -971,8 +980,9 @@ git -C "$WT" fetch origin && git -C "$WT" merge origin/<base>
 Step 0、tick、即時配送は逐次処理する。`harness-inbox` の終了値が非0なら部分 JSONL を採用しない。
 - `merge-ng` は Phase 6 NG の既存処理。GitHub OK より台帳の非 OK 回答（resolvedAt）が新しければ `chat-not-approved` として共通通知へ回す。それ以外の `merge-ok` は GitHub の経路を優先し、台帳異常で新 A を作らない。
 - `chat-merge-ok` は同じ tick の Phase 6。open A は回答待ちで通知も再依頼もしない。
+- `adoptable-pending` は動画の照合に失敗して未完了だが、本人 OK 済みの A で採用できる印。採用せず窓口へ報告する（採用は Phase 6 の「未完了依頼の採用」）。
 - `missing-attention` は正常台帳と attentionSeq の確認後の実不在だけ。同じ WT で現在のレビュー・humanChecks・依頼本文を再構成して Phase 5-4 を実行する。
-  動画がある案件は現 head と合意範囲を照合し必要なら撮り直す。終了0、新完成marker、新 A を確認する。旧 OK の付け替えは禁止。
+  動画がある案件は現 head と合意範囲を照合し必要なら撮り直す。終了0、新完成marker、新 A を確認する。別 A・別 head への旧 OK の付け替えは禁止（同じ A の採用は付け替えではない）。
 - `attention-unavailable`（attention-seq-behind を含む）/`attention-mismatch` はその tick で再読取りし、home・設定・権限・scope を確認する。
   自動解消できなければ `harness-phase {n} blocked --comment-file ...` で必要な対応を通知する。missing とみなした自動再依頼はしない。
 - pending＋復旧ファイルなしは異常で request-failed。pending＋復旧ファイルありは対象 phase の非0終了なら request-failed、終了0でも pending のまま、または終了値不明なら recovery-unconfirmed。
@@ -991,6 +1001,7 @@ Phase 5-4 はフォアグラウンドなので実行中の tick 処理はない�
 実際の chat を受けていない unavailable/mismatch は info へ流さず、上記の再確認と blocked に進む。
 
 PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼む、の2つを出口として案内する。
+理由が request-failed / recovery-unconfirmed のときは、pending のままでは GitHub の OK も通らないので前者を案内せず、「動画ありで本人の OK が Discord にあれば `--adopt-pending` で完了できる」と「出し直し」を案内する。
 後者は worker が Phase 5-4 で新 A を発行する。resolved の古い A への再入力や台帳の直接編集は促さない。非 OK だけで毎 tick 新 A を自動発行しない。
 本文は trim 後、owners のリテラルな `<名前> が Discord で回答。` を先頭から1回だけ除き、先頭の `A-<番号>`（回答先と一致するものだけ。違えば非 OK）と区切りを除いたうえで、先頭語が `OK` `ok` `Ok`（全角含む）で直後が空白・`。` `.` `!` `！`・括弧・終端のときだけ OK と読む。`OKではない` `OK、ただし…` `ok? まだ` は非 OK。A 付き・小文字・全角で始まる新規形は、残りが空・`です`・owners と完全一致の署名 `（Discord: <名前>）` だけのときに限る。
 前置きの名前は Discord の表示名で、owners（GitHub login）と完全に一致するときだけ除く。表示名を変えると前置き付き回答は非 OK になり、上記の出口へ回る。
@@ -1069,7 +1080,12 @@ chat_rejection() (
     [ "$existing" = posted ] || exit 1
     exit "$route"
   fi
-  printf -v body '#%s / PR #%s: %s / %s: %s。現在の依頼: %s。現在の完成依頼を確認し、PR に GitHub で『OK』とコメントするか、窓口に『#%s の承認依頼を出し直して』と頼む。' "$issue" "$pr" "$display" "$reason" "$sentence" "$url" "$issue"
+  case "$reason" in
+  request-failed|recovery-unconfirmed)
+    printf -v body '#%s / PR #%s: %s / %s: %s。現在の依頼: %s。承認依頼が未完了です。動画ありで本人の OK が Discord にあれば、worker が harness-phase %s awaiting-merge --pr %s --adopt-pending <A> で完了できます。それ以外は、窓口に『#%s の承認依頼を出し直して』と頼む。' "$issue" "$pr" "$display" "$reason" "$sentence" "$url" "$issue" "$pr" "$issue" ;;
+  *)
+    printf -v body '#%s / PR #%s: %s / %s: %s。現在の依頼: %s。現在の完成依頼を確認し、PR に GitHub で『OK』とコメントするか、窓口に『#%s の承認依頼を出し直して』と頼む。' "$issue" "$pr" "$display" "$reason" "$sentence" "$url" "$issue" ;;
+  esac
   make_body() {
     marker="$(jq -nc --arg key "$key" --arg state "$1" '{key:$key,state:$state}')" || return 1
     jq -n --arg body "$body" --arg marker "$marker" '{body:($body+"\n\n<!-- harness:chat-rejection "+$marker+" -->")}' > "$temp/body.json"

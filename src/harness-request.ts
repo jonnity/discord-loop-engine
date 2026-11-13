@@ -1,7 +1,14 @@
 // awaiting-merge の外部書込みは直列化する。未確認の復旧をローカルにも残す。
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { type RecoveryExitCode, run, validTime } from "./harness-approval.ts";
+import { type RecoveryExitCode, run } from "./harness-approval.ts";
+import {
+	patchComment,
+	prHead,
+	rememberRecovery as rememberRecoveryFiles,
+	resetLabels as resetIssueLabels,
+	validateComment as validateCommentResponse,
+} from "./harness-completion.ts";
 import { resolveHarnessProject } from "./harness-project.ts";
 import {
 	formatReceiptFailure,
@@ -93,59 +100,12 @@ async function gateNote(currentHeadSha: string): Promise<string> {
 	if (n > 0) return build(n);
 	return Array.from(build(0)).slice(0, NOTE_MAX).join("");
 }
-async function rememberRecovery() {
-	for (const state of states) {
-		await mkdir(path.dirname(state), { recursive: true });
-		await writeFile(state, JSON.stringify({ issue, pr, stage: "復旧未確認" }), { mode: 0o600 });
-	}
-}
-async function patch(body: string) {
-	const input = path.join(temp, "patch.json");
-	await writeFile(input, JSON.stringify({ body }), { mode: 0o600 });
-	return object(
-		JSON.parse(await gh("api", `repos/${repo}/issues/comments/${commentId}`, "--method", "PATCH", "--input", input)),
-	);
-}
-async function labels() {
-	const data = object(JSON.parse(await gh("issue", "view", issue, "--json", "labels")));
-	if (!Array.isArray(data.labels) || data.labels.some((l) => typeof object(l).name !== "string"))
-		throw Error("labels 不正");
-	return data.labels.map((l) => String(object(l).name));
-}
-async function resetLabels() {
-	const current = await labels();
-	const args: string[] = [];
-	for (const label of current)
-		if (label.startsWith("harness:") && label !== "harness:awaiting-merge") args.push("--remove-label", label);
-	if (!current.includes("harness:awaiting-merge")) args.push("--add-label", "harness:awaiting-merge");
-	if (args.length) await gh("issue", "edit", issue, ...args);
-	const result = await labels();
-	if (
-		!result.includes("harness:awaiting-merge") ||
-		result.some((l) => l.startsWith("harness:") && l !== "harness:awaiting-merge")
-	)
-		throw Error("labels 未確認");
-}
-async function currentHead() {
-	const value = await gh("pr", "view", pr, "--json", "headRefOid", "-q", ".headRefOid");
-	if (!/^[a-f0-9]{40}$/.test(value)) throw Error("head 不正");
-	return value;
-}
-function validateComment(c: Record<string, unknown>, body: string, id?: number) {
-	if (
-		!Number.isSafeInteger(c.id) ||
-		Number(c.id) <= 0 ||
-		(id !== undefined && c.id !== id) ||
-		typeof c.html_url !== "string" ||
-		!c.html_url.startsWith(`https://github.com/${repo}/`) ||
-		c.body !== body ||
-		object(c.user).login !== login ||
-		!validTime(c.created_at) ||
-		!validTime(c.updated_at) ||
-		Date.parse(c.created_at) > Date.parse(c.updated_at)
-	)
-		throw Error("comment 応答不正");
-}
+const rememberRecovery = () => rememberRecoveryFiles(states, issue, pr);
+const patch = (body: string) => patchComment(gh, repo, commentId, temp, body);
+const resetLabels = () => resetIssueLabels(gh, issue);
+const currentHead = () => prHead(gh, pr);
+const validateComment = (c: Record<string, unknown>, body: string, id?: number) =>
+	validateCommentResponse(c, body, { repo, login }, id);
 async function main() {
 	try {
 		await run(path.join(bin, "harness-notify"), ["--check-target", "--event", "merge-request"]);
@@ -291,6 +251,6 @@ main().catch(async (error: unknown) => {
 		}
 	}
 	console.error(
-		`harness-phase: ${primary}${stage} 失敗（exit ${code}）。${recoveryFailed ? "復旧状態は未確認。" : ""}${attention === "不明" ? "A は取下げ未確認" : `この ${attention} の承認依頼は未完了です`}。OK を返してもマージできません。原因解消後に再依頼してください。`,
+		`harness-phase: ${primary}${stage} 失敗（exit ${code}）。${recoveryFailed ? "復旧状態は未確認。" : ""}${attention === "不明" ? "A は取下げ未確認" : `この ${attention} の承認依頼は未完了です`}。OK を返してもそのままではマージできません。原因解消後に再依頼してください。動画ありで本人の OK が Discord にある未完了は、\`harness-phase <issue> awaiting-merge --pr <PR> --adopt-pending <A>\` で完了できます。`,
 	);
 });

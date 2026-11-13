@@ -1659,3 +1659,24 @@ test("U80e: UI 変更の型は安全柵を弱めず、Phase 6 NG の既存手順
 	assert.ok(template.includes("【動きのない動画の場合だけ"));
 	assert.ok(!template.includes("UI 変更"));
 });
+
+test("#75 T9: 未完了依頼の採用手順・拒否理由・1回だけ・失敗仕分け・付け替えとの区別がスキルとREADMEにある", () => {
+	const readme = readFileSync(new URL("../README.md", import.meta.url), "utf8");
+	const phase6 = section(skill, "### 未完了依頼の採用", "**head 変更前の確認**");
+	for (const word of [
+		"`request-failed` または `recovery-unconfirmed`",
+		"--adopt-pending <A>",
+		"**1回だけ**",
+		"同じ `harness-merge` を再実行",
+		"Phase 5-4 の失敗仕分け",
+		"`adoptable-pending`",
+		"採用はしない",
+	])
+		assert.ok(phase6.includes(word), word);
+	assert.ok(skill.includes("同じ A の採用は付け替えではない"));
+	assert.ok(readme.includes("--adopt-pending"));
+	assert.ok(readme.includes("別 A への付け替えではありません"));
+	// README は時点依存の A-番号や作業ファイルへのリンクを持たない。
+	const adoption = readme.slice(readme.indexOf("動画の再取得照合に失敗して未完了のままの依頼"));
+	assert.doesNotMatch(adoption.split("\n")[0] ?? "", /A-[0-9]|\.harness\//);
+});
