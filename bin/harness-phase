@@ -9,6 +9,7 @@
 # 使い方:
 #   harness-phase <issue> <phase> [--comment-file F | --comment TEXT] [--pr N] [--file F]
 #                 [--summary TEXT] [--notify]
+#   harness-phase <issue> awaiting-merge --pr N --adopt-pending A-n
 #
 # phase:
 #   queued | interview | designing | spec-review | implementing | impl-review | awaiting-merge | blocked | done
@@ -18,6 +19,9 @@
 #   blocked        : --comment(-file) 必須。Issue にコメントし「要対応」
 #   done           : harness:* ラベルを全部外す（「マージ完了」の通知は、done の報告を受けた engine が出す）
 #   その他         : ラベルの付け替えのみ。--notify を付けると「着手/お知らせ」を通知
+#
+# --adopt-pending: 動画の再取得照合に失敗して未完了のままの承認依頼を、本人が Discord で OK 済みの同じ A で完了にする
+#   （本文・--file などとは併用しない。照合は未了と本文に明記される。merge の判定は harness-merge が従来どおり行う）。
 #
 # --summary は Discord embed に出す短い要約（省略時はコメント冒頭 300 文字）。
 
@@ -34,15 +38,16 @@ if [ -z "$ISSUE" ] || [ -z "$PHASE" ]; then
 fi
 shift 2
 
-COMMENT="" COMMENT_FILE="" PR="" FILE="" SUMMARY="" NOTIFY=0
+COMMENT="" COMMENT_FILE="" PR="" FILE="" SUMMARY="" NOTIFY=0 ADOPT=""
 while [ $# -gt 0 ]; do
-	case "$1" in --comment|--comment-file|--pr|--file|--summary) [ $# -ge 2 ] || exit 2 ;; esac
+	case "$1" in --comment|--comment-file|--pr|--file|--summary|--adopt-pending) [ $# -ge 2 ] || exit 2 ;; esac
 	case "$1" in
 	--comment) COMMENT="$2"; shift 2 ;;
 	--comment-file) COMMENT_FILE="$2"; shift 2 ;;
 	--pr) PR="$2"; shift 2 ;;
 	--file) FILE="$2"; shift 2 ;;
 	--summary) SUMMARY="$2"; shift 2 ;;
+	--adopt-pending) ADOPT="$2"; shift 2 ;;
 	--notify) NOTIFY=1; shift ;;
 	*)
 		echo "harness-phase: 不明な引数 $1" >&2
@@ -56,6 +61,14 @@ for p in "${PHASES[@]}" "done"; do [ "$p" = "$PHASE" ] && valid=1; done
 if [ "$valid" = 0 ]; then
 	echo "harness-phase: 不明なフェーズ $PHASE" >&2
 	exit 2
+fi
+
+if [ -n "$ADOPT" ]; then
+	if [ "$PHASE" != awaiting-merge ] || [ -z "$PR" ] || [[ ! "$ADOPT" =~ ^A-[1-9][0-9]*$ ]] \
+		|| [ -n "$COMMENT$COMMENT_FILE$FILE$SUMMARY" ] || [ "$NOTIFY" = 1 ]; then
+		echo "harness-phase: --adopt-pending は awaiting-merge と --pr と A-番号だけで使います（本文・--file・--summary・--notify とは併用できません）" >&2
+		exit 2
+	fi
 fi
 
 # 添付は engine の cwd から見えないので、絶対パスにしてから渡す。無ければ通知を出さず失敗する
@@ -84,6 +97,7 @@ awaiting-merge)
 	fi
 	;;
 esac
+[ -z "$ADOPT" ] || gate=0
 if [ "$gate" = 1 ] && [ -z "$COMMENT" ]; then
 	echo "harness-phase: $PHASE は人間ゲートのため、読むべき本文（--comment / --comment-file）が必須です" >&2
 	exit 2
@@ -133,6 +147,22 @@ trap cleanup EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
+if [ -n "$ADOPT" ]; then
+	media_tmp="$(mktemp -d)" || exit 1
+	node "$SCRIPT_DIR/../src/harness-adopt.ts" "$ISSUE" "$PR" "$ADOPT" "$media_tmp" &
+	convert_pid=$!
+	rc=0
+	wait "$convert_pid" || rc=$?
+	convert_pid=""
+	[ "$rc" != 0 ] || {
+		# 表示用台帳報告は通常の完成経路と同じく best effort。
+		DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
+		if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
+			"$SCRIPT_DIR/dle" notify --event phase --phase awaiting-merge --issue "$ISSUE" --pr "$PR" --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" >/dev/null 2>&1 || true
+		fi
+	}
+	exit "$rc"
+fi
 video_error() {
 	echo "harness-phase: 動画準備失敗: $*（exit 6）。対応後に再実行してください。" >&2
 	exit 6

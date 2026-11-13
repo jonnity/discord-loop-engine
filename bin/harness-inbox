@@ -8,6 +8,7 @@
 #   {"issue":12,"kind":"merge-ng","pr":34,"url":...,"body":...}  差し戻し（"NG..." / Request changes）
 #   {"issue":12,"kind":"stale-notify","pr":34,"head":"abc1234"}  承認依頼後に head が進んだのに再依頼していない
 #   {"issue":12,"kind":"missing-notify","pr":34}                 awaiting-merge なのに依頼コメントが無い
+#   {"issue":12,"kind":"adoptable-pending","pr":34,"attention":"A-5"}  動画の照合に失敗して未完了だが、本人が OK 済みの A で採用できる（採用はしない。報告のみ）
 #
 # 返事として扱うのは harness.json の owners（既定: リポジトリ owner）の発言だけ。
 # 第三者のコメントで承認・仕様決定が進まないようにするため。
@@ -46,6 +47,7 @@ for n in $(gh issue list --state open --label harness:awaiting-merge --json numb
 	jq -c --argjson n "$n" --argjson pr "$pr" '
 		if .ownersUnavailable then {issue:$n,pr:$pr,kind:"attention-unavailable",reason:"attention-unavailable",url:.url}
 		elif .verdict.kind == "merge-ng" then {issue:$n,pr:$pr,kind:"merge-ng",url:.verdict.url,body:.verdict.body}
+		elif .pendingAdoption.state == "adoptable" then {issue:$n,pr:$pr,kind:"adoptable-pending",attention:.pendingAdoption.attention,url:.url}
 		elif .status != "ready" then ({issue:$n,pr:$pr,kind:.status,url:.url} + (if .requestState then {requestState:.requestState} else {} end))
 		elif .githubApprovalBlocked then {issue:$n,pr:$pr,kind:"chat-not-approved",attention:.attentionCheck.attention,reason:.attentionCheck.reason,url:.url}
 		elif .verdict then {issue:$n,pr:$pr,kind:.verdict.kind,url:.verdict.url,body:.verdict.body}

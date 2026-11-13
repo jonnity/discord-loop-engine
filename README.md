@@ -278,7 +278,8 @@ A 付き・小文字・全角で始まる回答は、OK 語の後ろが空・`�
 現在の A の有効な非 OK 回答は GitHub の OK（コメント・Approve・merge-ok ラベルの付与時刻）と比べ、下記の条件なら GitHub 経路も止め、同じ共通通知へ回します。台帳を照合できない場合の GitHub 承認経路は従来どおりです。owners が読めない場合はスナップショットの ownersUnavailable で故障を伝え、inbox は承認判定より先に attention-unavailable を返し、マージも GitHub 経路を含め拒否します。
 解釈: 比較は保存された時刻を絶対時刻に変換し、engine の時計の遅れに5分の余裕を持たせ、`resolvedAt >= GitHub OK の時刻 − 5分` なら止めます。GitHub OK と同時刻、5分前の境界も止める側です。余裕は `src/harness-approval.ts` の定数 GITHUB_APPROVAL_CLOCK_SKEW_MS で定義します。時計自体を同期するものではなく、5分を超えるずれや読取り後の更新による限界は残ります。
 現在の完成依頼を確認して PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼んでください。
-後者は worker が正式な新 A を発行し新回答を待ちます。resolved の古い A への再入力や旧 OK の付け替えはしません。
+後者は worker が正式な新 A を発行し新回答を待ちます。resolved の古い A への再入力や、別の A・別の head への旧 OK の付け替えはしません。
+動画の再取得照合に失敗して未完了のままの依頼で、その A に本人の Discord の OK が既にあるときだけ、再依頼せず `harness-phase <issue> awaiting-merge --pr <PR> --adopt-pending <A>` で完了できます（同じ A・同じ依頼コメント・同じ head のまま完成させるだけで、別 A への付け替えではありません）。完成本文には「動画の再取得照合は未了」と明記され、CI・mergeable・requiredChecks・beforeMerge と head・A の再検証は `harness-merge` が従来どおり行います。採用は明示のコマンドだけで行い、`harness-inbox` の `adoptable-pending` は採用できることの報告です。
 通知の正本は認証 login 自身の Issue コメントの claimed/posted/failed-or-unknown です。他者の同じキーでは抑制せず、結果不明でも自動再送しません。
 Phase 5-4 はフォアグラウンドで、終了前に届いた OK は終了後に処理します。終了0・完成marker・復旧ファイル消失後なら info 0回で回収します。
 pending の異常や非0終了、完成 marker と復旧ファイルが残って終了値不明の状態は失敗仕分けへ送り、自動解消できなければ blocked にします。
@@ -299,7 +300,7 @@ pending の異常や非0終了、完成 marker と復旧ファイルが残って
 |---|---|
 | 2/6 | 引数・雛形/設定、動画の道具・入力・容量を直す。準備失敗は副作用前停止 |
 | 4 | 通知失敗/結果不明。静的未設定なら副作用なし、投稿後なら最新 pending と追跡 awaiting が残る |
-| 7 | A/リンク/再取得照合/head/完成 PATCH 失敗。依頼未完了、旧 receipt/A を流用しない |
+| 7 | A/リンク/再取得照合/head/完成 PATCH 失敗。依頼未完了。別 head・別 A へは旧 receipt/A を流用しない（本人 OK 済みの動画あり pending は `--adopt-pending` で完了できる） |
 | 5 | ラベル編集/確認失敗。merge-ok 除去・awaiting 復元・同コメントの pending 化と再読取りを試す |
 | 中断 | 所有 PID/PGID・送信結果・一時物を調べ、子を止めてから所有領域だけ回収。共有 engine は停止しない |
 
@@ -439,6 +440,7 @@ plugin/engine/worker の更新後、A-番号の承認を得てから窓口が書
 | 🙆‍♂️ を付けても進まない | 付けた人が `allowedUserIds` にいるか、マージ承認の投稿か（要件確認・要対応などは文字で返す）、すでに対応済みでないか。engine のログの `リアクションを無視`（理由）と、起動時の `リアクションで OK`（設定の絵文字）を見る。受け付けられた（「OK として受け付けました」が返った）のにマージされないときは、head が動いた・CI が通っていないなど `harness-merge` の検査で止まっている（新しい承認依頼を出し直す）。受け付けた回答は取り消せない |
 | Discord に何も届かない | `dle status` の Discord 欄。`close 4014` なら Message Content Intent が無効、`トークンが無効` なら .env |
 | 「セッションが engine に繋がっていません」と届く | `tmux attach -t dle` で該当ウィンドウを開き、表示されている確認に答える |
+| auto が `harness-merge` を「レビューなしのマージ」として拒否して worker が止まる | 窓口の「許可済み」はチャンネル経由で worker の許可にはなりません。原因は未確定です（スキルの `(cd "$WT" && harness-merge …)` の複合形が許可規則に当たらず分類器へ回る、auto が一部の許可規則を外す、分類器の判定が規則より優先される、のいずれか）。暫定: tmux で worker の画面を開き、承認記録（本人の OK）が揃っていることを確かめたうえで1回だけ許可する。切り分けは、無害なスタブを PATH に置き、`claude -p --permission-mode auto --allowedTools 'Bash(harness-merge:*)'` で単純形・`cd` 付き・`--chat-approval` 付き・`\|\| exit 1` だけの形を各1回実行して拒否の有無を比べる。直接マージや `git push` の広い許可規則は足さない（`harness-merge` は承認記録が無ければ通らない） |
 | 「許可の確認で止まっています」と届く | 同じく tmux で答える。worker は auto で動くので、出るのは auto でも確認が出るもの（危険な `rm` など）。内容を確かめて答える。`permissions.allow` に足すと auto の分類器を通らずに実行されるので、push・削除・送信を含む広い規則は足さない |
 | 窓口が返事をしない | `dle restart concierge`。台帳は残っているので続きから再開する |
 | 設定を見直したい | `~/.discord-loop-engine/projects/<名前>/harness.json` を直して `dle restart <名前>`。窓口に「kishimen-tool の設定を見直して」と頼んでもよい |

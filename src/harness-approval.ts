@@ -46,17 +46,21 @@ interface ApprovalInput {
 	labelEvents?: unknown[];
 	prUrl: string;
 }
-export function evaluateApproval(p: ApprovalInput) {
-	const candidates = p.comments
+// 本人が投稿した最新の承認依頼コメント（完成・未完了のどちらも）。
+function latestRequest(comments: unknown[], login: string, issue: string) {
+	return comments
 		.map(object)
 		.filter(
 			(c) =>
-				object(c.user).login === p.login &&
+				object(c.user).login === login &&
 				typeof c.body === "string" &&
-				new RegExp(`<!-- harness:(?:gate|pending) phase=awaiting-merge issue=${p.issue}(?: | -->)`).test(c.body),
+				new RegExp(`<!-- harness:(?:gate|pending) phase=awaiting-merge issue=${issue}(?: | -->)`).test(c.body),
 		)
-		.sort((a, b) => Number(a.id) - Number(b.id));
-	const latest = candidates.at(-1);
+		.sort((a, b) => Number(a.id) - Number(b.id))
+		.at(-1);
+}
+export function evaluateApproval(p: ApprovalInput) {
+	const latest = latestRequest(p.comments, p.login, p.issue);
 	const body = String(latest?.body ?? "");
 	const url = String(latest?.html_url ?? p.prUrl);
 	const markers = body.split(/\r?\n/).filter((line) => line.includes("<!-- harness:"));
@@ -226,7 +230,7 @@ export function run(
 	});
 }
 export const gh = (...args: string[]) => run("gh", args);
-async function loadApproval(issue: string, pr: string, tolerateOwners = false) {
+export async function loadApproval(issue: string, pr: string, tolerateOwners = false) {
 	const repo = await gh("repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner");
 	const login = await gh("api", "user", "--jq", ".login");
 	if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || !login) throw Error("repo/login が不正です");
@@ -275,7 +279,15 @@ async function loadApproval(issue: string, pr: string, tolerateOwners = false) {
 			: [],
 		prUrl: prData.url,
 	});
-	return { result, owners, ownersUnavailable };
+	return {
+		result,
+		owners,
+		ownersUnavailable,
+		repo,
+		login,
+		head: prData.headRefOid,
+		comments,
+	};
 }
 export async function approvalSnapshot(issue: string, pr: string) {
 	return (await loadApproval(issue, pr)).result;
@@ -397,20 +409,128 @@ export function evaluateAttention(p: {
 		return unavailable;
 	}
 }
+// 台帳（dle attention --all --json と発行番号）を読む。pending の採用判定と完成依頼の A 照合が共有する。
+export async function readLedger() {
+	const project = await resolveHarnessProject();
+	const snapshot: unknown = JSON.parse(
+		await run(path.resolve(import.meta.dirname, "../bin/dle"), ["attention", "--all", "--json"]),
+	);
+	const sequence = await readAttentionSequence(dleHome());
+	return { project, snapshot, sequence };
+}
+export type AdoptionRefusal =
+	| "no-pending"
+	| "head-changed"
+	| "no-video-pending"
+	| "attention-not-approved"
+	| "attention-not-bound"
+	| "attention-superseded"
+	| "owners-unavailable"
+	| "unavailable";
+export type PendingAdoption = { state: "adoptable"; attention: string } | { state: "none"; reason: AdoptionRefusal };
+// 動画ありの仮コメントだけが持つ固定文（harness-request の仮コメントと同じ文字列）。
+export const VIDEO_PENDING_SENTENCE = "動画: Discord メッセージリンクを作成中です。承認依頼は未完了です。";
+export type AdoptionVerdict =
+	| {
+			state: "adoptable";
+			attention: string;
+			comment: { id: number; url: string; body: string; createdAt: string; sha: string };
+	  }
+	| { state: "none"; reason: AdoptionRefusal };
+// 動画の再取得照合に失敗して未完了のままの承認依頼を、本人の OK 済みの同じ A で完了にしてよいか。
+// attention を省くと、仮コメントの URL に結び付く最新の merge A を台帳から探す（inbox 用）。
+export function evaluateAdoption(p: {
+	issue: string;
+	pr: string;
+	head: string;
+	login: string;
+	project: string;
+	owners: readonly string[];
+	ownersUnavailable?: boolean;
+	comments: unknown[];
+	snapshot: unknown;
+	sequence: number;
+	attention?: string;
+}): AdoptionVerdict {
+	const none = (reason: AdoptionRefusal): AdoptionVerdict => ({ state: "none", reason });
+	if (p.ownersUnavailable) return none("owners-unavailable");
+	const latest = latestRequest(p.comments, p.login, p.issue);
+	const approval = evaluateApproval({ ...p, owners: [...p.owners], reviews: [], labels: [], prUrl: "" });
+	if (!latest || approval.requestState !== "pending") return none("no-pending");
+	const body = String(latest.body);
+	const sha = /sha=([a-f0-9]{40}) -->$/m.exec(body)?.[1] ?? "";
+	if (sha !== p.head) return none("head-changed");
+	if (!body.includes(VIDEO_PENDING_SENTENCE)) return none("no-video-pending");
+	const url = String(latest.html_url);
+	let attention = p.attention;
+	try {
+		if (!attention) {
+			const ids = validateAttentionSnapshot(p.snapshot)
+				.items.filter((item) => item.kind === "merge" && item.url === url)
+				.map((item) => item.id)
+				.sort((a, b) => (BigInt(a.slice(2)) < BigInt(b.slice(2)) ? -1 : 1));
+			attention = ids.at(-1);
+		}
+		if (!attention) return none("attention-not-bound");
+		const check = evaluateAttention({
+			gate: { attention },
+			project: p.project,
+			issue: p.issue,
+			pr: p.pr,
+			owners: p.owners,
+			snapshot: p.snapshot,
+			sequence: p.sequence,
+		});
+		if (check.state === "unavailable") return none("unavailable");
+		if (check.state === "missing") return none("attention-not-bound");
+		if (check.state === "mismatch")
+			return none(check.reason === "attention-superseded" ? "attention-superseded" : "attention-not-bound");
+		if (check.state !== "approved") return none("attention-not-approved");
+		const item = validateAttentionSnapshot(p.snapshot).items.find((i) => i.id === attention);
+		if (item?.url !== url || typeof item.messageId !== "string") return none("attention-not-bound");
+		return {
+			state: "adoptable",
+			attention,
+			comment: { id: Number(latest.id), url, body, createdAt: String(latest.created_at), sha },
+		};
+	} catch {
+		return none("unavailable");
+	}
+}
 export async function approvalSnapshotWithAttention(issue: string, pr: string) {
-	const { result, owners, ownersUnavailable } = await loadApproval(issue, pr, true);
+	const { result, owners, ownersUnavailable, login, head, comments } = await loadApproval(issue, pr, true);
 	let attentionCheck: AttentionCheck = { state: "not-applicable" };
+	let ledger: Awaited<ReturnType<typeof readLedger>> | undefined;
 	if (ownersUnavailable) attentionCheck = { state: "unavailable", reason: "attention-unavailable" };
 	else if (result.gate?.attention) {
 		try {
-			const project = await resolveHarnessProject();
-			const snapshot: unknown = JSON.parse(
-				await run(path.resolve(import.meta.dirname, "../bin/dle"), ["attention", "--all", "--json"]),
-			);
-			const sequence = await readAttentionSequence(dleHome());
-			attentionCheck = evaluateAttention({ gate: result.gate, project, issue, pr, owners, snapshot, sequence });
+			ledger = await readLedger();
+			attentionCheck = evaluateAttention({ gate: result.gate, issue, pr, owners, ...ledger });
 		} catch {
 			attentionCheck = { state: "unavailable", reason: "attention-unavailable" };
+		}
+	}
+	// 未完了の依頼にだけ、採用できるかを添える。台帳を読めなければ採用不可（fail closed）。
+	let pendingAdoption: PendingAdoption | undefined;
+	if (result.requestState === "pending") {
+		try {
+			ledger ??= await readLedger();
+			const verdict = evaluateAdoption({
+				issue,
+				pr,
+				head,
+				login,
+				owners,
+				ownersUnavailable,
+				comments,
+				...ledger,
+			});
+			pendingAdoption =
+				verdict.state === "adoptable"
+					? { state: "adoptable", attention: verdict.attention }
+					: { state: "none", reason: verdict.reason };
+		} catch {
+			pendingAdoption = { state: "none", reason: "unavailable" };
 		}
 	}
 	// GitHub と engine の保存時刻を同じ絶対時刻として比較する。台帳照合不能時は既存の GitHub 経路を保つ。
@@ -426,6 +546,7 @@ export async function approvalSnapshotWithAttention(issue: string, pr: string) {
 		attentionCheck,
 		...(ownersUnavailable ? { ownersUnavailable: true } : {}),
 		...(githubApprovalBlocked ? { githubApprovalBlocked: true } : {}),
+		...(pendingAdoption ? { pendingAdoption } : {}),
 	};
 }
 if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href)

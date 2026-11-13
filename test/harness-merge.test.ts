@@ -94,7 +94,12 @@ for (const projectSource of ["env", "config", "root"]) {
 			mkdirSync(src);
 			copyFileSync(path.join(root, "bin/harness-phase"), path.join(bin, "harness-phase"));
 			copyFileSync(path.join(root, "src/harness-request.ts"), path.join(src, "harness-request.ts"));
-			for (const file of ["harness-approval.ts", "harness-project.ts", "notification-receipt.ts"])
+			for (const file of [
+				"harness-approval.ts",
+				"harness-completion.ts",
+				"harness-project.ts",
+				"notification-receipt.ts",
+			])
 				symlinkSync(path.join(root, "src", file), path.join(src, file));
 			symlinkSync(path.join(root, "bin/harness-config"), path.join(bin, "harness-config"));
 			writeFileSync(
@@ -571,7 +576,12 @@ test("M2: 差し替えengine結果のA欠落/不正/source誤りを7で拒否し
 			mkdirSync(bin);
 			mkdirSync(src);
 			copyFileSync(path.join(root, "src/harness-request.ts"), path.join(src, "harness-request.ts"));
-			for (const file of ["harness-approval.ts", "harness-project.ts", "notification-receipt.ts"])
+			for (const file of [
+				"harness-approval.ts",
+				"harness-completion.ts",
+				"harness-project.ts",
+				"notification-receipt.ts",
+			])
 				symlinkSync(path.join(root, "src", file), path.join(src, file));
 			symlinkSync(path.join(root, "bin/harness-config"), path.join(bin, "harness-config"));
 			writeFileSync(
@@ -930,7 +940,12 @@ test("T4: フォアグラウンドphaseの終了前に届いたOKを終了0の�
 		mkdirSync(path.join(s.dir, "src"));
 		copyFileSync(path.join(root, "bin/harness-phase"), path.join(s.dir, "bin/harness-phase"));
 		copyFileSync(path.join(root, "src/harness-request.ts"), path.join(s.dir, "src/harness-request.ts"));
-		for (const file of ["harness-approval.ts", "harness-project.ts", "notification-receipt.ts"])
+		for (const file of [
+			"harness-approval.ts",
+			"harness-completion.ts",
+			"harness-project.ts",
+			"notification-receipt.ts",
+		])
 			symlinkSync(path.join(root, "src", file), path.join(s.dir, "src", file));
 		symlinkSync(path.join(root, "bin/harness-config"), path.join(s.dir, "bin/harness-config"));
 		writeFileSync(

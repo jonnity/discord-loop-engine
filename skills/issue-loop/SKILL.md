@@ -164,7 +164,7 @@ Phase 5-4 はフォアグラウンドなので実行中の tick 処理はない�
 pending＋復旧ファイルなしは request-failed。pending＋復旧ファイルありは非0終了で request-failed、終了0または不明なら recovery-unconfirmed。
 完成 marker＋復旧ファイル＋対象 phase の終了値なしも Phase 5-4 の失敗仕分けへ送り、自動解消できなければ blocked。
 復旧ファイルは cwd と WT の両方で symlink も存在とする。プロセス台帳を作らず、別 Issue の終了値や単に記録がないことを実行中の証拠にしない。
-原因が続いたまま tick ごとに仮コメント・Discord 投稿・A-番号を増やさない。旧 OK の付け替えは禁止。
+原因が続いたまま tick ごとに仮コメント・Discord 投稿・A-番号を増やさない。別 A・別 head への旧 OK の付け替えは禁止（同じ A の採用は付け替えではない）。
 通知には PR に GitHub で『OK』とコメントするか、窓口に『#n の承認依頼を出し直して』と頼む、の出口を必ず含める。
 理由の正本は Issue。通知のURLは現在の依頼先PRコメントURLを使い、現在のA や marker 全文は表示しない。認証済み login 自身の claimed/posted/failed-or-unknown を照合し、他者の同じキーでは抑制しない。
 通知/記録未確認なら自動再送せず handoff に残して停止する。

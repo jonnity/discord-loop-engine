@@ -39,7 +39,15 @@ reject() {
 		jq -nc --arg attention "$ATTENTION" --arg reason "$reason" --arg url "$fallback_url" \
 			'{kind:"chat-rejection",attention:(if ($attention | test("^A-[1-9][0-9]*$")) then $attention else null end),reason:$reason,url:$url}' >&2
 	fi
-	echo "harness-merge: $reason。マージしません。現在の依頼: $current_url。現在の完成依頼を確認し、PR に GitHub で『OK』とコメントするか、窓口に『#$ISSUE の承認依頼を出し直して』と頼んでください。" >&2
+	case "$reason" in
+	# 未完了の依頼は GitHub の OK でも通らないので、その案内は出さない。
+	request-failed | recovery-unconfirmed)
+		echo "harness-merge: $reason。マージしません。現在の依頼: $current_url。承認依頼が未完了です。動画ありで本人の OK が Discord にあれば、worker が harness-phase $ISSUE awaiting-merge --pr <PR> --adopt-pending <A> で完了できます。それ以外は、窓口に『#$ISSUE の承認依頼を出し直して』と頼んでください。" >&2
+		;;
+	*)
+		echo "harness-merge: $reason。マージしません。現在の依頼: $current_url。現在の完成依頼を確認し、PR に GitHub で『OK』とコメントするか、窓口に『#$ISSUE の承認依頼を出し直して』と頼んでください。" >&2
+		;;
+	esac
 	return 1
 }
 invalid() { reject invalid-arguments || true; exit 2; }
