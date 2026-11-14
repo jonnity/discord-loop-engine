@@ -1680,3 +1680,11 @@ test("#75 T9: 未完了依頼の採用手順・拒否理由・1回だけ・失�
 	const adoption = readme.slice(readme.indexOf("動画の再取得照合に失敗して未完了のままの依頼"));
 	assert.doesNotMatch(adoption.split("\n")[0] ?? "", /A-[0-9]|\.harness\//);
 });
+
+test("窓口スキルは返信だけの回答と、返信先と本文の A の食い違いでの聞き返しを案内する", () => {
+	assert.match(conciergeSkill, /本文に無くても、返信だけで `meta\.attention` が付く/);
+	assert.match(
+		conciergeSkill,
+		/`meta\.attention_conflict=1`[\s\S]{0,200}`meta\.reply_attention`[\s\S]{0,100}`meta\.text_attention`[\s\S]{0,200}`attention_answer` しない/,
+	);
+});

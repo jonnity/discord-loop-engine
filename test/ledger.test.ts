@@ -180,6 +180,34 @@ test("messageIds の無い既存形式の attention.json（messageId だけ）�
 	assert.equal(again.attention()[0]?.messageIds, undefined);
 });
 
+test("attentionByMessageId は messageIds のどれでも・対応済みでも引け、旧形式や空文字では誤一致しない", () => {
+	const l = fresh();
+	const base = {
+		taskId: "",
+		project: "k",
+		issue: "1",
+		pr: "5",
+		title: "x",
+		url: "u",
+		summary: "",
+		kind: "merge" as const,
+	};
+	const a = l.addAttention(base).attention;
+	const b = l.addAttention({ ...base, issue: "2" }).attention;
+	const old = l.addAttention({ ...base, issue: "3" }).attention; // messageId が無い旧形式
+	l.setAttentionMessage(a.id, "m1", ["m1", "m2"]);
+	l.setAttentionMessage(b.id, "m9");
+	assert.equal(l.attentionByMessageId("m1")?.id, a.id);
+	assert.equal(l.attentionByMessageId("m2")?.id, a.id);
+	assert.equal(l.attentionByMessageId("m9")?.id, b.id);
+	l.resolveAttention(a.id, "OK");
+	assert.equal(l.attentionByMessageId("m2")?.status, "resolved");
+	assert.equal(l.attentionByMessageId("zzz"), undefined);
+	assert.equal(l.attentionByMessageId(""), undefined);
+	assert.equal(l.attentionByMessageId("undefined"), undefined);
+	assert.notEqual(old.id, "");
+});
+
 test("ボードの出力は変更前（origin/main）と同一: 置き換え済み・9件以上の queued・phase・blocked・done を含む台帳", () => {
 	const l = fresh();
 	const t = l.createTask({ project: "k", title: "a", issue: "1" });

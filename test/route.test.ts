@@ -1,6 +1,8 @@
 // Discord からの発言の扱いが保証すること:
 // - 許可リスト外・Bot・webhook・対象外チャンネルの発言は窓口に渡さない
 // - engine の A-番号付き投稿への返信は、その A-番号への返事として渡る
+// - 返信だけ（本文に A-番号なし）でも、台帳の逆引きか見出しから A-番号が決まり、台帳が見出しより優先される
+// - 返信先と本文先頭の A が食い違うと meta.attention を付けず、両方を載せる。A の無い投稿への返信は通常メッセージ
 // - 「A-4 OK」のように番号から書き始めても、その A-番号への返事になる
 // - CI（webhook）の通知への返信は、プロジェクトと Issue/PR を付けて渡る
 // - 許可確認の返事は、待っている request_id にだけ結び付く
@@ -238,4 +240,108 @@ test("sanitizeUser は改行・引用符・$・バッククォート・<>・--> 
 	assert.equal(sanitizeUser("田中 太郎", "1"), "田中 太郎");
 	assert.equal(sanitizeUser("   ", "42"), "42");
 	assert.equal(sanitizeUser("a".repeat(100), "1").length, 32);
+});
+
+const withLedger = (table: Record<string, string>) => ({
+	...ctx(),
+	attentionOfMessage: (id: string) => table[id],
+});
+const headed = (id: string, a = "A-4") => ({
+	id,
+	channel_id: CH,
+	content: `**[kishimen-tool]** 🟢 ${a} マージ承認｜#12 票を破棄`,
+});
+
+test("返信だけ（本文に A なし）でも、台帳の逆引きで返信先の A として渡る", () => {
+	const r = route(
+		base({ content: "OK", message_reference: { message_id: "b2" }, referenced_message: headed("b2", "（続き）") }),
+		withLedger({ b2: "A-4" }),
+	);
+	assert.equal(r.action === "deliver" && r.meta.attention, "A-4");
+	assert.equal(r.action === "deliver" && r.meta.attention_conflict, undefined);
+});
+
+test("referenced_message が無くても message_reference だけで台帳解決でき、見出し無しの文面になる", () => {
+	const r = route(base({ content: "OK", message_reference: { message_id: "b2" } }), withLedger({ b2: "A-4" }));
+	assert.equal(r.action === "deliver" && r.meta.attention, "A-4");
+	assert.match(r.action === "deliver" ? r.content : "", /A-4 の投稿に返信しました/);
+});
+
+test("台帳が引けなくても見出しの A で解決する（attentionOfMessage 省略時も）", () => {
+	const m = base({ content: "OK", referenced_message: headed("b1") });
+	assert.equal((route(m, withLedger({})) as { meta: Record<string, string> }).meta.attention, "A-4");
+	assert.equal((route(m, ctx()) as { meta: Record<string, string> }).meta.attention, "A-4");
+});
+
+test("A の無い投稿・台帳に無い ID への返信は通常メッセージ。本文先頭に A があればそれ", () => {
+	const plain = { id: "b3", channel_id: CH, content: "ただの雑談" };
+	const r = route(
+		base({ content: "OK", message_reference: { message_id: "b3" }, referenced_message: plain }),
+		withLedger({}),
+	);
+	assert.equal(r.action === "deliver" && r.meta.attention, undefined);
+	const r2 = route(
+		base({ content: "A-7 OK", message_reference: { message_id: "b3" }, referenced_message: plain }),
+		withLedger({}),
+	);
+	assert.equal(r2.action === "deliver" && r2.meta.attention, "A-7");
+});
+
+test("返信先の A と本文の A が一致すれば、その A。表記ゆれ（a4）も同一視する", () => {
+	const r = route(base({ content: "a4 OK", referenced_message: headed("b1") }), ctx());
+	assert.equal(r.action === "deliver" && r.meta.attention, "A-4");
+	assert.equal(r.action === "deliver" && r.meta.attention_conflict, undefined);
+});
+
+test("食い違いでは meta.attention を付けず両方を載せ、返信先由来の issue / pr は付けない", () => {
+	const m = base({
+		content: "A-5 OK",
+		referenced_message: {
+			...headed("b1"),
+			embeds: [
+				{
+					fields: [
+						{ name: "Issue", value: "[#12](u)" },
+						{ name: "PR", value: "[#34](u)" },
+					],
+				},
+			],
+		},
+	});
+	const r = route(m, ctx());
+	assert.equal(r.action, "deliver");
+	if (r.action !== "deliver") return;
+	assert.equal(r.meta.attention, undefined);
+	assert.equal(r.meta.reply_attention, "A-4");
+	assert.equal(r.meta.text_attention, "A-5");
+	assert.equal(r.meta.attention_conflict, "1");
+	assert.equal(r.meta.issue, undefined);
+	assert.equal(r.meta.pr, undefined);
+	assert.equal(r.meta.project, "kishimen-tool");
+});
+
+test("台帳の A と見出しの A が違うときは台帳を採る。文中の A は食い違い扱いにしない", () => {
+	const r = route(
+		base({ content: "OK", referenced_message: headed("b1", "A-4"), message_reference: { message_id: "b1" } }),
+		withLedger({ b1: "A-9" }),
+	);
+	assert.equal(r.action === "deliver" && r.meta.attention, "A-9");
+	const r2 = route(base({ content: "kishimen の A-5 は？", referenced_message: headed("b1") }), ctx());
+	assert.equal(r2.action === "deliver" && r2.meta.attention, "A-4");
+	assert.equal(r2.action === "deliver" && r2.meta.attention_conflict, undefined);
+});
+
+test("転送（type=1）は台帳の A に当たる ID でも見出しの A でも返信扱いにせず、type=0 と省略は解決する", () => {
+	const l = withLedger({ b1: "A-4" });
+	const mk = (type?: number) =>
+		base({ content: "OK", message_reference: { message_id: "b1", type }, referenced_message: headed("b1") });
+	const att = (type?: number) => {
+		const r = route(mk(type), l);
+		return r.action === "deliver" ? r.meta.attention : "ignored";
+	};
+	assert.equal(att(1), undefined);
+	assert.equal(att(0), "A-4");
+	assert.equal(att(undefined), "A-4");
+	const fwd = route(mk(1), l);
+	assert.equal(fwd.action === "deliver" && fwd.meta.project, undefined);
 });
