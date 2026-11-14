@@ -489,6 +489,7 @@ export class Engine {
 			allowedUserIds: this.config.allowedUserIds,
 			channelIds: this.config.channelIds,
 			pendingPermissions: this.pendingPermissions,
+			attentionOfMessage: (id) => this.ledger.attentionByMessageId(id)?.id,
 		});
 		if (r.action === "ignore") return;
 		if (r.action === "permission") {
@@ -514,6 +515,18 @@ export class Engine {
 			if (att.issue) meta.issue = att.issue;
 			if (att.pr) meta.pr = att.pr;
 			content += `\n\n（${att.id}: [${att.project}] ${KIND_LABEL[att.kind]}${att.issue ? ` #${att.issue}` : ""} ${att.title} / ${att.status === "open" ? "未対応" : "対応済み"}）`;
+		}
+		if (meta.attention_conflict) {
+			// 返信先と本文の A が違う。どちらにも決めず、両方の中身と状態を添えて窓口に聞き返させる
+			const describe = (label: string, id: string | undefined) => {
+				const x = this.ledger.attention().find((y) => y.id === id);
+				return x
+					? `（${label} ${x.id}: [${x.project}] ${KIND_LABEL[x.kind]}${x.issue ? ` #${x.issue}` : ""} ${x.title} / ${x.status === "open" ? "未対応" : "対応済み"}）`
+					: `（${label} ${id}: 台帳に無い）`;
+			};
+			const replied = this.ledger.attention().find((y) => y.id === meta.reply_attention);
+			if (replied) meta.project = replied.project; // 見出しが読めない返信先でも project を補う
+			content += `\n\n${describe("返信先", meta.reply_attention)}\n${describe("本文の", meta.text_attention)}\nどちらの A への回答か確認が必要です。`;
 		}
 		const how = this.deliver("concierge", content, meta);
 		// /clear の最中に届いたものは、この後そのまま渡すので直近のやり取りには入れない（二重になるため）

@@ -13,6 +13,8 @@ export interface DiscordMessage {
 	attachments?: { url: string }[];
 	embeds?: { footer?: { text?: string }; fields?: { name: string; value: string }[] }[];
 	referenced_message?: DiscordMessage | null;
+	/** type: 0=返信（省略も同じ）、1=転送（FORWARD） */
+	message_reference?: { message_id?: string; channel_id?: string; type?: number } | null;
 }
 
 // engine の投稿と harness-notify（webhook）の投稿は、どちらも本文先頭が "**[<project>]** ..." になっている。
@@ -69,6 +71,8 @@ export interface RouteContext {
 	allowedUserIds: string[];
 	channelIds: string[];
 	pendingPermissions: Map<string, string>;
+	/** メッセージ ID → A-番号（台帳の逆引き）。省略時は返信先の見出しだけで解決する */
+	attentionOfMessage?: (messageId: string) => string | undefined;
 }
 
 export type RouteResult =
@@ -106,22 +110,42 @@ export function route(msg: DiscordMessage, ctx: RouteContext): RouteResult {
 		user_id: author.id,
 		source: isDm ? "dm" : "channel",
 	};
-	const ref = parsePost(msg.referenced_message);
+	// 転送（type=1）は返信ではないので、台帳の逆引きも見出しの解析もしない（転送元の A への回答とは読まない）
+	const isForward = msg.message_reference?.type === 1;
+	const ref = isForward ? null : parsePost(msg.referenced_message);
+	// 台帳（正本）を見出しより先に引く。見出しが読めない返信先（削除済み・旧形式）でも解決できる。
+	// 別チャンネルかどうかは見ず、message ID だけで引く
+	const refId = isForward ? undefined : (msg.message_reference?.message_id ?? msg.referenced_message?.id);
+	const ledgerAtt = refId ? ctx.attentionOfMessage?.(refId) : undefined;
+	const replyAtt = ledgerAtt ?? ref?.attention;
+	// 「A-4 OK」のように番号から書き始めた場合も、その依頼への返事として扱う（本文の先頭だけ。文中は見ない）
+	const lead = LEADING_ATTENTION_RE.exec(text);
+	const textAtt = lead ? `A-${lead[1]}` : undefined;
+	const conflict = !!(replyAtt && textAtt && replyAtt !== textAtt);
 	if (ref) {
 		meta.project = ref.project;
-		if (ref.attention) meta.attention = ref.attention;
-		if (ref.issue) meta.issue = ref.issue;
-		if (ref.pr) meta.pr = ref.pr;
+		// 食い違い時は返信先の持ち物を本文の A の依頼と取り違えないよう issue / pr を付けない
+		if (!conflict) {
+			if (ref.issue) meta.issue = ref.issue;
+			if (ref.pr) meta.pr = ref.pr;
+		}
 		if (ref.event) meta.event = ref.event;
 	}
-	// 「A-4 OK」のように番号から書き始めた場合も、その依頼への返事として扱う
-	const lead = LEADING_ATTENTION_RE.exec(text);
-	if (lead && !meta.attention) meta.attention = `A-${lead[1]}`;
+	if (conflict) {
+		// どちらも採用しない。meta.attention を付けないので worker への誤配送も起きない
+		meta.reply_attention = replyAtt as string;
+		meta.text_attention = textAtt as string;
+		meta.attention_conflict = "1";
+	} else if (replyAtt ?? textAtt) {
+		meta.attention = (replyAtt ?? textAtt) as string;
+	}
 
 	const lines = [
 		ref
 			? `Discord で ${who} が「[${ref.project}] ${ref.headline}」に返信しました:`
-			: `Discord で ${who} からメッセージが届きました:`,
+			: ledgerAtt
+				? `Discord で ${who} が ${ledgerAtt} の投稿に返信しました:`
+				: `Discord で ${who} からメッセージが届きました:`,
 		text,
 	];
 	if (attachments.length) lines.push("", "添付:", ...attachments.map((u) => `- ${u}`));

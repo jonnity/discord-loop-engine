@@ -283,6 +283,66 @@ test("窓口と worker で渡されるツールが違い、Discord の発言は�
 	}
 });
 
+test("確認依頼への返信だけで A として窓口に届く（分割投稿の2通目・対応済み・食い違い・通常メッセージ）", async () => {
+	const { engine, home, discord } = setupEngine();
+	await engine.start();
+	const c = startChannel(home, { DLE_ROLE: "concierge" });
+	try {
+		await c.rpc("initialize", { protocolVersion: "2025-06-18", capabilities: {} });
+		await until(() => engine.sessions.has("concierge"));
+		const mk = (issue: string, pr: string, ids: string[]) => {
+			const a = engine.ledger.addAttention({
+				taskId: "",
+				project: "kishimen-tool",
+				issue,
+				pr,
+				kind: "merge",
+				title: `依頼${issue}`,
+				url: "u",
+				summary: "",
+			}).attention;
+			engine.ledger.setAttentionMessage(a.id, ids[0] as string, ids.length > 1 ? ids : undefined);
+			return a.id;
+		};
+		const a1 = mk("12", "34", ["r1", "r2"]);
+		const a2 = mk("13", "35", ["r3"]);
+		const reply = (content: string, to: string) =>
+			msg(content, { message_reference: { message_id: to }, id: `x${Math.random()}` });
+		const meta = (e: { meta?: unknown }) => e.meta as Record<string, string>;
+
+		discord(reply("OK", "r1"));
+		const e1 = await c.event((p) => meta(p).attention === a1);
+		assert.equal(meta(e1).kind, "merge");
+		assert.equal(meta(e1).pr, "34");
+		assert.match(e1.content, /未対応/);
+
+		discord(reply("OK", "r2")); // 2通目への返信も同じ A
+		await c.event((p) => meta(p).attention === a1);
+
+		engine.ledger.resolveAttention(a1, "OK");
+		discord(reply("OK", "r1"));
+		const e2 = await c.event((p) => meta(p).attention === a1 && meta(p).attention_status === "resolved");
+		assert.match(e2.content, /対応済み/);
+
+		discord(reply(`${a2} OK`, "r1"));
+		const e3 = await c.event((p) => meta(p).attention_conflict === "1");
+		assert.equal(meta(e3).attention, undefined);
+		assert.equal(meta(e3).reply_attention, a1);
+		assert.equal(meta(e3).text_attention, a2);
+		assert.equal(meta(e3).project, "kishimen-tool");
+		assert.match(e3.content, /依頼12/);
+		assert.match(e3.content, /依頼13/);
+		assert.match(e3.content, /確認が必要/);
+
+		discord(reply("ただの返信", "zzz"));
+		const e4 = await c.event((p) => /ただの返信/.test(String(p.content)));
+		assert.equal(meta(e4).attention, undefined);
+	} finally {
+		c.stop();
+		await engine.stop();
+	}
+});
+
 test("承認依頼は A-番号付きで投稿され、「A-1 OK」が窓口経由で worker に届き、done で振り返りが頼まれる", async () => {
 	const { engine, rest, home, discord } = setupEngine(1);
 	await engine.start();
