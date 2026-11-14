@@ -34,6 +34,7 @@ description: discord-loop-engine の窓口として振る舞う。ユーザー�
 | 届いたもの | すること |
 |---|---|
 | `meta.attention` がある（A-番号への返事） | 下の「A-番号への返事」 |
+| `meta.attention_conflict=1`（返信先の A と本文の A が食い違う） | `meta.reply_attention` と `meta.text_attention` を並べ、「どちらの A への回答ですか」とユーザーに聞き返す（reply に A-番号と選択肢を入れる）。`attention_answer` しない |
 | `meta.kind=notice`（engine からのお知らせ） | 台帳は engine が更新済み。Discord に重ねて投稿しない。必要なら覚えておくだけ |
 | `meta.kind=handoff`（/clear 前の直近のやり取り） | 読んで覚えておくだけ。返事はしない |
 | `meta.kind=retro`（振り返りの依頼） | `/discord-loop-engine:retrospective` を実行 |
@@ -76,6 +77,9 @@ meta.issue が空で meta.pr がある PR 用の A は worker が `harness-merge
 
 A-番号は engine が worker の「人の判断が要る」報告に付けたもの（要件確認・マージ承認・要対応）。
 
+A-番号が本文に無くても、返信だけで `meta.attention` が付く（A-番号の投稿に Discord の返信で答えた場合。分割投稿のどの通でも同じ）。
+返信を根拠に回答してよい。返信先と本文先頭の A が違うときは engine が `meta.attention_conflict=1` で知らせるので、上の表のとおり聞き返す。
+
 1. 返事の中身を読み、その A-番号への回答として成り立っているか確かめる（`meta.attention_status` が
    「対応済み」なら、もう答えが出ていることを伝える）。マージ承認の投稿への 🙆‍♂️ リアクションは
    engine が直接 OK として記録・配送し、`meta.kind=notice` で知らせる。重ねて `attention_answer` しない
@@ -86,7 +90,7 @@ A-番号は engine が worker の「人の判断が要る」報告に付けた�
      （判定側が先頭の `OK` を読むため）。包む前に、返事の A が `meta.attention` と一致すること、否定・保留が続かないことを確かめる
    - OK でない・曖昧な返事（NG・保留・条件付き・OK と読むか迷うもの）は `OK` を前置きせず、本文をそのまま入れて末尾に
      「（Discord: <meta.user>）」を付ける
-   - 返事の A-番号が `meta.attention` と違うときは `attention_answer` せず、ユーザーに聞き返す
+   - 返事の A-番号が `meta.attention` と違うときは `attention_answer` せず、ユーザーに聞き返す（本文の先頭の A は engine が `meta.attention_conflict` で知らせる。文中に書かれた A はここで確認する）
 3. マージ承認の「OK」は、engine が配送した meta.attention を worker が
    Issue の A なら `harness-merge {meta.issue} --chat-approval "<本文>" --attention "{meta.attention}"` に渡す。
    A の meta.pr が正整数で、その PR の head が branchPrefix+{meta.issue}（既定 `fix/issue-{meta.issue}`。prefix は `harness-config '.branchPrefix' fix/issue-`）でない（`gh pr view {meta.pr} --json headRefName -q .headRefName` で確認）ときだけ `harness-merge {meta.issue} --pr {meta.pr} --chat-approval "<本文>" --attention "{meta.attention}"` を使う。

@@ -391,6 +391,12 @@ export class Ledger {
 		writeAtomic(path.join(this.dir, "attention.md"), `# あなた待ち\n\n${md}\n`);
 	}
 
+	/** 投稿のメッセージ ID から A を引く（分割投稿の2通目以降・対応済みも含む）。空文字や旧形式の undefined では一致させない */
+	attentionByMessageId(messageId: string): Attention | undefined {
+		if (!messageId) return undefined;
+		return this.attention().find((x) => (x.messageIds ?? (x.messageId ? [x.messageId] : [])).includes(messageId));
+	}
+
 	openAttention(): Attention[] {
 		return this.attention().filter(isOpenAttention);
 	}
