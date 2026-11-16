@@ -90,7 +90,7 @@ export const CONFIG_TEMPLATE = {
 	permissionRelay: false,
 	tmuxSession: "dle",
 	workspaceDir: "~/dle/workspaces",
-	concierge: { model: "sonnet", refresh: { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 } },
+	concierge: { model: "sonnet", refresh: { enabled: true, maxTokens: 150000, maxEvents: 40, contextPercent: 15 } },
 	worker: {
 		model: "sonnet",
 		extraArgs: [],
@@ -98,7 +98,7 @@ export const CONFIG_TEMPLATE = {
 		permissionMode: DEFAULT_WORKER_PERMISSION_MODE as WorkerPermissionMode | null,
 		refresh: {
 			enabled: true,
-			maxTokens: 100000,
+			maxTokens: 150000,
 			contextPercent: 15,
 			idleSeconds: 180,
 			cooldownMinutes: 30,
@@ -255,7 +255,7 @@ export function loadConfig(home = dleHome()): Config {
 			refresh: {
 				// 旧設定で maxEvents: 0 にしていた利用者は、明示しない限り無効のままにする。
 				enabled: typeof cr.enabled === "boolean" ? cr.enabled : cr.maxEvents !== 0,
-				maxTokens: nonnegative(cr.maxTokens, 100000),
+				maxTokens: nonnegative(cr.maxTokens, 150000),
 				maxEvents: nonnegative(cr.maxEvents, 40),
 				contextPercent: percent(cr.contextPercent),
 			},
@@ -269,7 +269,7 @@ export function loadConfig(home = dleHome()): Config {
 			limit,
 			refresh: {
 				enabled: typeof wr.enabled === "boolean" ? wr.enabled : true,
-				maxTokens: nonnegative(wr.maxTokens, 100000),
+				maxTokens: nonnegative(wr.maxTokens, 150000),
 				contextPercent: percent(wr.contextPercent),
 				idleSeconds: num(wr.idleSeconds, 180),
 				cooldownMinutes: num(wr.cooldownMinutes, 30),

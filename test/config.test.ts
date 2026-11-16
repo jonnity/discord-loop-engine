@@ -43,12 +43,12 @@ test("雛形の git は空で、未設定として読まれる（個人情報を
 	assert.equal(load({ git: CONFIG_TEMPLATE.git }).git ?? null, null);
 });
 
-test("refresh の既定値は有効・100k・180秒・30分、Codex の待機上限は120分", () => {
+test("refresh の既定値は有効・150k・180秒・30分、Codex の待機上限は120分", () => {
 	const c = load({});
-	assert.deepEqual(c.concierge.refresh, { enabled: true, maxTokens: 100000, maxEvents: 40, contextPercent: 15 });
+	assert.deepEqual(c.concierge.refresh, { enabled: true, maxTokens: 150000, maxEvents: 40, contextPercent: 15 });
 	assert.deepEqual(c.worker.refresh, {
 		enabled: true,
-		maxTokens: 100000,
+		maxTokens: 150000,
 		contextPercent: 15,
 		idleSeconds: 180,
 		cooldownMinutes: 30,
@@ -56,13 +56,13 @@ test("refresh の既定値は有効・100k・180秒・30分、Codex の待機上
 	});
 	assert.deepEqual(CONFIG_TEMPLATE.concierge.refresh, {
 		enabled: true,
-		maxTokens: 100000,
+		maxTokens: 150000,
 		maxEvents: 40,
 		contextPercent: 15,
 	});
 	assert.deepEqual(CONFIG_TEMPLATE.worker.refresh, {
 		enabled: true,
-		maxTokens: 100000,
+		maxTokens: 150000,
 		contextPercent: 15,
 		idleSeconds: 180,
 		cooldownMinutes: 30,
@@ -84,7 +84,7 @@ test("負数・文字列・範囲外は既定値に戻し、0 のトークン閾
 		},
 	});
 	assert.equal(c.concierge.refresh.maxEvents, 40);
-	assert.equal(c.concierge.refresh.maxTokens, 100000);
+	assert.equal(c.concierge.refresh.maxTokens, 150000);
 	assert.equal(c.concierge.refresh.contextPercent, 15);
 	assert.equal(c.worker.refresh.enabled, false);
 	assert.equal(c.worker.refresh.maxTokens, 0);
@@ -173,4 +173,18 @@ test("T1: worker.permissionMode の既定と値", () => {
 test("T5: worker.permissionMode の不正値は設定エラー", () => {
 	for (const permissionMode of ["bypassPermissions", "dontAsk", "plan", "Auto", 1, true])
 		assert.throws(() => load({ worker: { permissionMode } }), /worker\.permissionMode/, String(permissionMode));
+});
+
+test("worker/窓口の明示閾値と無効値fallbackを保持し、強制設定を配布しない", () => {
+	for (const value of [0, 100000, 200000]) {
+		const c = load({ worker: { refresh: { maxTokens: value } }, concierge: { refresh: { maxTokens: value } } });
+		assert.equal(c.worker.refresh.maxTokens, value);
+		assert.equal(c.concierge.refresh.maxTokens, value);
+	}
+	for (const value of [-1, "150000", null]) {
+		const c = load({ worker: { refresh: { maxTokens: value } }, concierge: { refresh: { maxTokens: value } } });
+		assert.equal(c.worker.refresh.maxTokens, 150000);
+		assert.equal(c.concierge.refresh.maxTokens, 150000);
+	}
+	assert.equal("forceMaxTokens" in CONFIG_TEMPLATE.worker.refresh, false);
 });

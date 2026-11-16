@@ -92,6 +92,10 @@ test("refresh OFFの起動・初期prompt・再接続・通常wake・上限抑�
 				[],
 			);
 			assert.deepEqual(phases, []);
+			assert.equal(
+				calls.some((args) => args.includes("-e")),
+				false,
+			);
 		}
 	}
 });

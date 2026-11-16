@@ -10,6 +10,7 @@ import "./isolate.ts";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_WORKER_LIMIT, type WorkerLimit } from "../src/limit.ts";
+import { pressure } from "../src/refresh.ts";
 import { type LimitedEntry, type RefreshResult, type SessionTarget, Supervisor, shq } from "../src/supervisor.ts";
 
 function setup(opts: { windows?: string[] | null; live?: Set<string>; pane?: string } = {}) {
@@ -1484,4 +1485,61 @@ test("上限の起こし: N worker が同じ tick であきらめても通知は
 	await h.sup.tick();
 	assert.equal(h.gaveUps.length, 2);
 	assert.equal(h.limits.length, 2);
+});
+
+test("150kの量・画面fallback境界は実判定とpressureが一致する", async () => {
+	const settings = { maxTokens: 150000, maxEvents: 0, contextPercent: 15 };
+	for (const tokens of [149999, 150000, 150001]) {
+		const h = refreshSetup({ worker: true, maxTokens: settings.maxTokens, tokens });
+		await h.sup.tick();
+		h.advance();
+		await h.sup.tick();
+		assert.equal(h.typed().includes("/clear"), pressure(settings, tokens, null, null, 0).overThreshold);
+	}
+	for (const [label, tokens] of [
+		["149.9", 149900],
+		["150", 150000],
+	] as const) {
+		const h = refreshSetup({ worker: true, maxTokens: 150000, tokens: null, pane: `~${label}k uncached\n❯ ` });
+		await h.sup.tick();
+		h.advance();
+		await h.sup.tick();
+		assert.equal(h.typed().includes("/clear"), pressure(settings, null, tokens, null, 0).overThreshold);
+	}
+});
+
+test("量を読む間に実入力や確認画面が出たらclear直前の再確認で拒否する", async () => {
+	for (const pane of ["❯ typed", "Do you want to proceed?\n❯ ", "esc to interrupt\n❯ "]) {
+		const options = {
+			worker: true,
+			pane: "history\n❯ ",
+			onReadTranscript: () => {
+				options.pane = pane;
+			},
+		};
+		const h = refreshSetup(options);
+		await h.sup.tick();
+		h.advance();
+		await h.sup.tick();
+		assert.deepEqual(h.typed(), []);
+	}
+});
+
+test("送信前にsessionの状態・cwd・画面安定性・取得可否が変わってもclearしない", async () => {
+	for (const patch of [
+		{ status: "busy" },
+		{ cwd: "/another" },
+		{ pane: "changed history\n❯ " },
+		{ failCommand: "capture-pane" },
+	]) {
+		const options: Parameters<typeof refreshSetup>[0] = {
+			worker: true,
+			onReadTranscript: () => Object.assign(options, patch),
+		};
+		const h = refreshSetup(options);
+		await h.sup.tick();
+		h.advance();
+		await h.sup.tick();
+		assert.deepEqual(h.typed(), []);
+	}
 });

@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { appendFile, chmod, lstat, mkdir } from "node:fs/promises";
 import path from "node:path";
 import type { ContextReadReason } from "./context.ts";
+import type { PromptReason, PromptState } from "./refresh-prompt.ts";
 
 export type RefreshReason =
 	| "refresh-disabled"
@@ -56,6 +57,8 @@ export interface RefreshDecision extends RefreshPressure {
 	notObserved: string[];
 	result?: boolean;
 	readReasons?: ContextReadReason[];
+	promptState?: PromptState;
+	promptReason?: PromptReason;
 }
 
 export interface RefreshCoverage {
@@ -123,7 +126,16 @@ export class RefreshDiagnostics {
 		this.onError = onError;
 		try {
 			const hash = createHash("sha256");
-			for (const name of ["refresh", "supervisor", "context", "engine", "projects", "config", "protocol"])
+			for (const name of [
+				"refresh",
+				"refresh-prompt",
+				"supervisor",
+				"context",
+				"engine",
+				"projects",
+				"config",
+				"protocol",
+			])
 				hash.update(readFileSync(new URL(`./${name}.ts`, import.meta.url)));
 			this.implementationHash = hash.digest("hex");
 		} catch {
@@ -170,7 +182,15 @@ export class RefreshDiagnostics {
 
 	record(row: RefreshDecision): Promise<void> {
 		return this.enqueue(async () => {
-			const key = JSON.stringify([row.session, row.primaryReason, row.blockers, row.notObserved, row.readReasons]);
+			const key = JSON.stringify([
+				row.session,
+				row.primaryReason,
+				row.blockers,
+				row.notObserved,
+				row.readReasons,
+				row.promptState,
+				row.promptReason,
+			]);
 			const previous = this.pending.get(row.project);
 			if (
 				previous &&

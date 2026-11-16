@@ -1023,8 +1023,8 @@ RUNNER_REMOVE
 | `channelIds` | — | 中継するチャンネル（先頭が投稿先） |
 | `allowedUserIds` | — | 発言を受け取る人（あなただけにする） |
 | `concierge.model` | `sonnet` | 窓口のモデル |
-| `concierge.refresh` | 有効 / 100k / 40 件 / 残り15% | `enabled`・`maxTokens`・`maxEvents`・`contextPercent`。文脈量または件数が閾値に達したら engine が待機中に `/clear` し、`concierge refresh` で挨拶を出さず再開。`enabled: false` で無効。旧形式の `maxEvents: 0` だけでも全無効を維持。件数だけ無効にするには `enabled: true, maxEvents: 0` |
-| `worker.refresh` | 有効 / 100k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
+| `concierge.refresh` | 有効 / 150k / 40 件 / 残り15% | `enabled`・`maxTokens`・`maxEvents`・`contextPercent`。文脈量または件数が閾値に達したら engine が待機中に `/clear` し、`concierge refresh` で挨拶を出さず再開。`enabled: false` で無効。旧形式の `maxEvents: 0` だけでも全無効を維持。件数だけ無効にするには `enabled: true, maxEvents: 0` |
+| `worker.refresh` | 有効 / 150k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
 | `worker.limit` | `enabled: true` / `tailLines: 12` / `wakeIntervalMinutes: 30` / `wakeMaxAttempts: 5` | `enabled`・`patterns`・`resetPatterns`・`tailLines`・`wakeIntervalMinutes`（正の数）・`wakeMaxAttempts`（0 以上の整数。0 は自動で起こさない）。使用量の上限の表示を画面から探し、止まった worker を固定間隔で起こし直す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
@@ -1048,6 +1048,14 @@ RUNNER_REMOVE
 engine 起動直後も同じ秒数待ち、整理の成功・失敗後は30分（worker は設定可）冷却する。
 内部ファイルの形式変更などで待機を確認できない場合は見送る。
 `/clear` は sessionId の変化を最大15秒確認してから再開し、確認できない場合は再開プロンプトを送らない。
+
+idle 整理の token 既定値は worker・窓口とも150,000（150k、k=1000）で、ちょうど閾値に達した場合も対象になる。
+既存設定の明示値（100000・200000・0など）はそのまま保持し、config.json を自動で書き換えない。
+未指定または不正値の fallback だけが100kから150kになるため、100k以上150k未満の token 起因の整理は遅くなる。
+窓口の40件条件と、token 不明時の残り15%判定は引き続き独立して働く。
+既定変更を避ける場合は本人が両方の `refresh.maxTokens: 100000` を明示し、通常の更新手順で反映する。
+更新・再起動と戻し操作は本人が安全な時機に行い、実効値を coverage と稼働版で確認する。
+phase 遷移からの強制整理や強制用の設定キーは提供しない。
 
 idle の worker を engine が起こす。worker は idle だと次の心拍か人の入力まで Discord の回答や dispatch を読まないので、
 engine が A-番号の回答・dispatch・`harness:queued` の追加（60 秒ごとに `gh issue list`）・保留分の払い出し・再接続を検知したら、
@@ -1083,10 +1091,10 @@ coverage には inactive・native・onboard・設定無効・起動エラーも�
 接続断とウィンドウ欠落は decision に記録する。ソースの fingerprint は `implementationHash` で照合できるが、
 実際に読み込まれた worker/plugin の版・認証・配布元は運用者が別に確認する。
 
-decision は通常の巡回につき最大1件、同じ対象の量読取は30秒に最大1回で重ねない。
+decision は通常の巡回につき最大1件、同じ対象の独立観測は20秒以上あけ、実行中の観測に重ねない（通常の tick は30秒）。
 busy 中も最新 usage を独立して読み、`overThreshold` と、実際の見送り順に従う `primaryReason`、
 独立観測で分かった併存理由 `blockers` を記録する。量不明は `null`、未読は `notObserved`、
-内部ファイルの読取結果は `readReasons` で表す。`source` は transcript / screen / unknown。
+内部ファイルの読取結果は `readReasons` で表す。入力欄の分類は任意の `promptState` / `promptReason` で表す。`source` は transcript / screen / unknown。
 割合しか読めない場合は token 値に換算しない。観測は整理の許可に使わず、失敗・2秒の timeout でも通常の判定を続ける。
 通常 idle の整理は worker の保存応答を待たず、既存の再開プロンプトを送る。
 
@@ -1094,6 +1102,38 @@ busy 中も最新 usage を独立して読み、`overThreshold` と、実際の�
 理由変更・整理結果・5分経過・正常終了（INT/TERM/HUP）で保存する。journal は理由の変化だけを短く記録し、Discord 通知は増やさない。
 本文・回答・絶対パスは診断へ保存しない。`count × 30秒` は正確な阻害時間ではなく、クラッシュ直前の未保存区間は欠測になる。
 証拠の自動削除は行わない。比較完了まで必要な入力と診断を私有の永続領域へ保全し、容量・保持期間・バックアップは運用者が管理する。
+
+### 入力欄の一度限りの匿名化診断
+
+薄い候補文字と実入力を安全に区別できる実機署名は未登録のため、候補らしく見えても空欄扱いしない。
+通常の空欄判定は維持し、整理の直前にも session・画面・activity・wake の競合を再確認する。
+起こしや `/clear` 成功確認の入力判定も従来の厳密なままになる。
+
+本人が実画面を目視し、稼働 engine と同じ絶対パスの home と pane-id（`%`＋整数）を確認してから、
+レビューしたソースで次を一度だけ実行する。engine の更新・再起動は不要。
+
+```bash
+: "${DLE_HOME:?稼働engineと同じ絶対パスを設定してください}"
+: "${ISSUE61_PANE:?確認したpane-idを設定してください}"
+node src/refresh-prompt.ts sample --home "$DLE_HOME" --pane "$ISSUE61_PANE"
+```
+
+Linux/WSL2 の tmux と `/proc/self/fd` が必要。helper は既存paneを読むだけで、入力や台帳を変えない。
+可視paneの属性付き capture は1回、読取全体は最大2秒、出力は64KiBまでに制限する。
+`DLE_HOME/refresh/prompt-once-v1/`（0700）の `claim.json`（0600）を先に排他的に作るので、
+並行実行・再実行・再起動後にも同じhomeで再採取しない。symlink・不適切な所有者/権限は拒否する。
+
+`sample.json`（0600）には固定schema・時刻・正規化したtmux版・サイズ・入力欄内のcursor・
+空白/匿名spanの配置・数値の文字属性・固定分類だけを保存する。会話・候補・実入力・status・cwd・pane-id・
+OSCタイトル/リンクは保存せず、本文のhashやbase64も作らない。単一行ASCII入力枠に限定し、
+複数行・全角/絵文字・折返し・未知の形や属性は `unknown` として肯定しない。
+終了値は保存成功0、取得/保存失敗1、不正引数2、既採取3。stdout は固定結果だけで、画面や例外本文を出さない。
+失敗時はclaimと固定理由の `failure.json` を保持する。保存先障害や強制終了でsampleが欠落・不完全でも、
+claimを自動で消したり再試行したりしない。再診断の必要性は本人が判断する。
+
+目視した「空欄＋候補」または「実入力」を匿名sampleの属性・cursorと照合し、実入力との区別を確認してから
+数値/enumだけの合成fixtureへ還元する。実際の文や写真をリポジトリへ移さない。
+診断の保存成功は候補原因や整理許可の証明ではなく、識別できなければ判定を緩めない。
 
 ### 文脈整理の基準取得と比較
 
