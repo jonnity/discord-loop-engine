@@ -8,6 +8,8 @@ import { type ClaudeSession, type ContextInspection, contextReader, type Transcr
 import { DEFAULT_WORKER_LIMIT, detectLimit, type WorkerLimit } from "./limit.ts";
 import { pressure, type RefreshDecision, type RefreshPressure, type RefreshReason } from "./refresh.ts";
 
+import { strictEmptyPrompt as emptyPrompt, inspectPrompt, type PromptEvidence } from "./refresh-prompt.ts";
+
 import { withinDirectory } from "./worktrees.ts";
 
 const RESTART_WINDOW_MS = 10 * 60_000;
@@ -59,16 +61,6 @@ export interface RefreshTarget {
 	waitForCodex: boolean;
 	codexIgnoreAfterMinutes: number;
 	cwd: string;
-}
-
-function emptyPrompt(pane: string): boolean {
-	const lines = pane.split("\n").slice(-15);
-	const index = lines.findLastIndex((line) => /^\s*❯/.test(line));
-	if (index < 0 || !/^\s*❯\s*$/.test(lines[index] ?? "")) return false;
-	// 区切り線より上に続きの入力があれば、先頭行が空でも割り込まない。
-	const below = lines.slice(index + 1);
-	const divider = below.findIndex((line) => /^\s*[─━-]{3,}\s*$/.test(line));
-	return (divider < 0 ? below : below.slice(0, divider)).every((line) => !line.trim());
 }
 
 /** 入力欄（末尾 15 行の最後の ❯ 行）の文字。❯ 行が無い、または区切り線までの下に続きの入力があれば null */
@@ -191,7 +183,8 @@ interface SlotState {
 }
 
 interface RefreshDecisionContext {
-	session: string;
+	prompt?: PromptEvidence;
+	session?: string;
 	pressure?: RefreshPressure;
 }
 
@@ -955,7 +948,10 @@ export class Supervisor {
 			d.notObserved = d.notObserved.filter((key) => key !== "screen");
 			if (pane.stdout.includes(WORKING_MARK)) d.blockers.push("screen-working");
 			if (PERMISSION_PROMPTS.some((p) => pane.stdout.includes(p))) d.blockers.push("permission-prompt");
-			if (!emptyPrompt(pane.stdout)) d.blockers.push("input-not-empty");
+			const prompt = inspectPrompt(pane.stdout);
+			d.promptState = prompt.state;
+			d.promptReason = prompt.reason;
+			if (prompt.state !== "empty") d.blockers.push("input-not-empty");
 		}
 		const current = await this.session(t.name, d);
 		let transcript: TranscriptContext | null = null;
@@ -1022,14 +1018,20 @@ export class Supervisor {
 		const job = Promise.all([Promise.race([observation, timeout]).finally(() => clearTimeout(timer)), completed])
 			.then(([d, actual]) => {
 				if (actual.context) {
-					if (d.session !== actual.context.session) {
+					if (actual.context.session !== undefined && d.session !== actual.context.session) {
 						// 独立観測がclear後の別sessionへ進んでいたら、その量と阻害理由を旧sessionへ混ぜない。
 						Object.assign(d, { tokens: null, source: "unknown", remainingPercent: null, overThreshold: null });
 						d.blockers = [];
 						d.readReasons = [];
+						delete d.promptState;
+						delete d.promptReason;
 						d.notObserved.push("observation-session-changed");
 					}
-					d.session = actual.context.session;
+					if (actual.context.session !== undefined) d.session = actual.context.session;
+					if (actual.context.prompt) {
+						d.promptState = actual.context.prompt.state;
+						d.promptReason = actual.context.prompt.reason;
+					}
 					if (actual.context.pressure) {
 						Object.assign(d, actual.context.pressure);
 						d.notObserved = d.notObserved.filter((key) => !["session", "screen", "transcript"].includes(key));
@@ -1085,13 +1087,15 @@ export class Supervisor {
 			if (!pane.ok) return skip("capture-unknown");
 			if (pane.stdout.includes(WORKING_MARK)) return skip("screen-working");
 			if (PERMISSION_PROMPTS.some((p) => pane.stdout.includes(p))) return skip("permission-prompt");
-			if (!emptyPrompt(pane.stdout)) return skip("input-not-empty");
+			const prompt = inspectPrompt(pane.stdout);
+			detail = { prompt };
+			if (prompt.state !== "empty") return skip("input-not-empty");
 			const current = await this.session(t.name);
 			if (!current) {
 				this.contextUnknown(t, s, "unreadable");
 				return skip("session-unknown");
 			}
-			detail = { session: current.session.sessionId };
+			detail = { session: current.session.sessionId, prompt };
 			if (current.session.status !== "idle") return skip("session-busy");
 			if (path.resolve(current.session.cwd) !== path.resolve(r.cwd)) return skip("cwd-mismatch");
 			const transcript = await this.o.readTranscript(current.session);
@@ -1122,6 +1126,22 @@ export class Supervisor {
 			} else s.unknownSession = null;
 			if (!reason)
 				return skip(r.maxTokens > 0 && tokens === null && screen.left === null ? "context-unknown" : "below-threshold");
+			// 別sessionへの切替や直接入力も、送信直前に読み直して拒否する。
+			const latest = await this.session(t.name);
+			if (!latest || latest.pid !== current.pid || latest.session.sessionId !== current.session.sessionId)
+				return skip("session-unknown");
+			if (latest.session.status !== "idle") return skip("session-busy");
+			if (path.resolve(latest.session.cwd) !== path.resolve(r.cwd)) return skip("cwd-mismatch");
+			const finalPane = await this.o.tmux(["capture-pane", "-p", "-t", this.target(t.name)]);
+			if (!finalPane.ok) return skip("capture-unknown");
+			if (finalPane.stdout.includes(WORKING_MARK)) return skip("screen-working");
+			if (PERMISSION_PROMPTS.some((p) => finalPane.stdout.includes(p))) return skip("permission-prompt");
+			detail.prompt = inspectPrompt(finalPane.stdout);
+			if (detail.prompt.state !== "empty") return skip("input-not-empty");
+			if (finalPane.stdout !== pane.stdout) {
+				detail.prompt = { state: "unknown", reason: "unstable" };
+				return skip("input-not-empty");
+			}
 			// ファイルや tmux を読む間に入力が届いていたら、古い待機判定では clear しない。
 			if (this.o.now() - this.o.activity(t.name).lastAt < idleMs) return skip("activity-race");
 			// 上の await の間に wakeTick が送信を始めていたら見送る。ここから refreshing を立てるまでは同期（check-and-set）。

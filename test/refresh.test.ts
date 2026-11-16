@@ -1,9 +1,10 @@
 import "./isolate.ts";
 import assert from "node:assert/strict";
-import { mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import { pathToFileURL } from "node:url";
 import { loadConfig } from "../src/config.ts";
 import { Ledger, type Project } from "../src/ledger.ts";
 import { refreshCoverage, sessionTargets } from "../src/projects.ts";
@@ -144,7 +145,7 @@ test("coverageはtargetsに現れないinactiveとnative/not-ready/OFFを区別�
 			],
 		);
 		assert.deepEqual(coverage[0]?.settings, {
-			maxTokens: 100000,
+			maxTokens: 150000,
 			maxEvents: 40,
 			contextPercent: 15,
 			idleSeconds: 180,
@@ -165,6 +166,91 @@ test("coverageはtargetsに現れないinactiveとnative/not-ready/OFFを区別�
 		assert.equal(refreshCoverage(cfg, [ready], [stopped])[1]?.reason, "startup-error");
 		cfg.worker.refresh.enabled = false;
 		assert.equal(refreshCoverage(cfg, [ready], [])[1]?.reason, "refresh-disabled");
+	} finally {
+		await rm(home, { recursive: true, force: true });
+	}
+});
+
+test("入力分類の変化は別集約となり、解析moduleの変更はimplementationHashを変える", async () => {
+	const root = await mkdtemp(path.join(os.tmpdir(), "refresh-hash-"));
+	try {
+		const source = path.join(root, "src");
+		await mkdir(source);
+		for (const name of [
+			"refresh",
+			"refresh-prompt",
+			"supervisor",
+			"context",
+			"engine",
+			"projects",
+			"config",
+			"protocol",
+		])
+			await writeFile(path.join(source, `${name}.ts`), await readFile(new URL(`../src/${name}.ts`, import.meta.url)));
+		const { RefreshDiagnostics: Writer } = (await import(
+			pathToFileURL(path.join(source, "refresh.ts")).href
+		)) as typeof import("../src/refresh.ts");
+		const row: RefreshDecision = {
+			project: "worker",
+			session: "s",
+			at: 0,
+			tokens: 150000,
+			source: "transcript",
+			remainingPercent: null,
+			overThreshold: true,
+			primaryReason: "input-not-empty",
+			blockers: ["input-not-empty"],
+			notObserved: [],
+			promptState: "typed",
+			promptReason: "real-input",
+		};
+		const before = new Writer(path.join(root, "before"));
+		await before.record(row);
+		await before.record({ ...row, promptState: "unknown", promptReason: "unrecognized-style", at: 1 });
+		await before.close();
+		await writeFile(path.join(source, "refresh-prompt.ts"), "// 合成変更\n");
+		const after = new Writer(path.join(root, "after"));
+		await after.record(row);
+		await after.close();
+		const read = async (dir: string) =>
+			(await readFile(path.join(root, dir, "refresh/decisions/1970-01-01.jsonl"), "utf8"))
+				.trim()
+				.split("\n")
+				.map((line) => JSON.parse(line));
+		const a = await read("before"),
+			b = await read("after");
+		assert.equal(a.length, 2);
+		assert.deepEqual(
+			a.map((r) => r.promptState),
+			["typed", "unknown"],
+		);
+		assert.notEqual(a[0].implementationHash, "unknown");
+		assert.notEqual(a[0].implementationHash, b[0].implementationHash);
+	} finally {
+		await rm(root, { recursive: true, force: true });
+	}
+});
+
+test("既定150kはready workerと窓口のtargetとcoverageへ配線される", async () => {
+	const home = await mkdtemp(path.join(os.tmpdir(), "refresh-default-"));
+	try {
+		await writeFile(path.join(home, "config.json"), JSON.stringify({ channelIds: ["1"], allowedUserIds: ["2"] }));
+		const cfg = loadConfig(home),
+			ledger = new Ledger(home);
+		await mkdir(path.dirname(ledger.profilePath("worker")), { recursive: true });
+		await writeFile(ledger.profilePath("worker"), "{}");
+		const projects: Project[] = [
+			{ name: "worker", path: home, repo: "x/y", active: true, mode: "harness", addedAt: "" },
+		];
+		const targets = sessionTargets(cfg, projects, ledger);
+		assert.deepEqual(
+			targets.map((t) => t.refresh?.maxTokens),
+			[150000, 150000],
+		);
+		assert.deepEqual(
+			refreshCoverage(cfg, projects, targets, ledger).map((c) => c.settings?.maxTokens),
+			[150000, 150000],
+		);
 	} finally {
 		await rm(home, { recursive: true, force: true });
 	}

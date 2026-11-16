@@ -18,14 +18,20 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { isAttentionAnswerOk } from "../src/attention-read.ts";
 import type { Config } from "../src/config.ts";
-import { Engine, limitGaveUpText, limitNoticeText, restartMode } from "../src/engine.ts";
+import type { Engine as EngineType } from "../src/engine.ts";
+
 import type { Run } from "../src/projects.ts";
 import { type EngineMessage, lineReader, PROTOCOL_VERSION } from "../src/protocol.ts";
 import { DEFAULT_REACTION_EMOJI, type DiscordMessage, parsePost } from "../src/route.ts";
 import { Supervisor } from "../src/supervisor.ts";
+
+const engineSource = process.env.REFRESH_BASELINE_SOURCE ?? path.resolve("src");
+const { Engine, limitGaveUpText, limitNoticeText, restartMode } = (await import(
+	pathToFileURL(path.join(engineSource, "engine.ts")).href
+)) as typeof import("../src/engine.ts");
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
 const SERVER = path.join(ROOT, "channel", "server.ts");
@@ -886,7 +892,19 @@ test("worker の clear 中の A-番号付き返信は保留され、rules → ou
 	try {
 		await until(() => engine.sessions.has("worker"));
 		engine.ledger.setRules("人の承認を待つ");
-		engine.ledger.createTask({ project: "worker", title: "実装中", status: "ai-working" });
+		const task = engine.ledger.createTask({ project: "worker", title: "実装中", status: "ai-working" });
+		engine.ledger.updateTask(task.id, { phase: "implementing", waiting: "CI完了", next: "検査結果を照合する" });
+		const answered = engine.ledger.addAttention({
+			project: "worker",
+			kind: "interview",
+			title: "決定事項",
+			url: "",
+			issue: "1",
+			pr: "",
+			taskId: task.id,
+			summary: "方針",
+		});
+		engine.ledger.resolveAttention(answered.attention.id, "採用する");
 		engine.ledger.addAttention({
 			project: "worker",
 			kind: "merge",
@@ -1913,7 +1931,7 @@ const GATES = [
 	["setup", "⚙️", "設定の確認"],
 ] as const;
 
-const openGate = async (engine: Engine, event: string, issue: string, extra: Record<string, string> = {}) =>
+const openGate = async (engine: EngineType, event: string, issue: string, extra: Record<string, string> = {}) =>
 	(await engine.call(CLI, "notify", { event, project: "proj", issue, title: `題${issue}`, ...extra })) as {
 		attention: string;
 		message_id: string;
@@ -2090,7 +2108,7 @@ test("T18-6: IssueなしPRのdone/closed/owner NGはそのmerge Aだけを整理
 });
 
 // --- idle の worker を起こす（#32） ---------------------------------------------------------
-function wakeStub(engine: Engine) {
+function wakeStub(engine: EngineType) {
 	const log: string[] = [];
 	engine.supervisor = {
 		requestWake: (n: string, r: string) => log.push(`request ${n} ${r}`),
@@ -2434,8 +2452,8 @@ const rx = (messageId: string, o: Record<string, unknown> = {}) => ({
 const settle = () => new Promise((r) => setTimeout(r, 40));
 const receipts = (rest: ReturnType<typeof fakeRest>) =>
 	sends(rest).filter((c) => c.content?.includes("を OK として受け付けました"));
-const workerEvents = (engine: Engine) => engine.ledger.drain("proj");
-const statusOf = (engine: Engine, id: string) => engine.ledger.attention().find((a) => a.id === id);
+const workerEvents = (engine: EngineType) => engine.ledger.drain("proj");
+const statusOf = (engine: EngineType, id: string) => engine.ledger.attention().find((a) => a.id === id);
 
 test("オーナーの 🙆‍♂️ で、マージ承認が文字の回答と同じ経路（台帳・worker・タスク・✅）で OK になり、受付が1回返る", async () => {
 	const { engine, rest, reaction } = setupEngine();

@@ -277,3 +277,20 @@ test("独立診断のI/O例外・timeoutでもengine単独の通常idle整理は
 		}
 	}
 });
+
+test("通常と独立観測は同じ厳密入力分類を使い、候補や実入力ではclearしない", async () => {
+	for (const [pane, state] of [
+		["❯ typed", "typed"],
+		["❯ \x1b[2;90mghost\x1b[0m", "unknown"],
+	] as const) {
+		const f = fixture({ pane });
+		await f.tick(180000);
+		assert.equal(f.decisions.at(-1)?.primaryReason, "input-not-empty");
+		assert.equal(f.decisions.at(-1)?.promptState, state);
+		assert.deepEqual(f.sends(), []);
+	}
+	const f = fixture();
+	await f.tick(180000);
+	assert.equal(f.decisions.at(-1)?.promptState, "empty");
+	assert.equal(f.decisions.at(-1)?.promptReason, "strict-empty");
+});
