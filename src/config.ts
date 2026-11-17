@@ -32,11 +32,15 @@ export interface GitIdentity {
 export interface WorkerRefresh {
 	enabled: boolean;
 	maxTokens: number;
+	/** harness-phase の遷移直後に、この量を超えていたら強制で整理する。0 で強制だけ無効。optional（型付きの既存リテラルを壊さない。省略は 250000） */
+	forceMaxTokens?: number;
 	contextPercent: number;
 	idleSeconds: number;
 	cooldownMinutes: number;
 	codexIgnoreAfterMinutes: number;
 }
+
+export const DEFAULT_FORCE_MAX_TOKENS = 250000;
 
 export interface Config {
 	models?: ModelOverrides;
@@ -99,6 +103,7 @@ export const CONFIG_TEMPLATE = {
 		refresh: {
 			enabled: true,
 			maxTokens: 150000,
+			forceMaxTokens: DEFAULT_FORCE_MAX_TOKENS,
 			contextPercent: 15,
 			idleSeconds: 180,
 			cooldownMinutes: 30,
@@ -202,6 +207,12 @@ export function loadConfig(home = dleHome()): Config {
 		permissionMode = DEFAULT_WORKER_PERMISSION_MODE;
 		errors.push(`worker.permissionMode: ${WORKER_PERMISSION_MODES.join(" / ")}、または null（フラグを渡さない）`);
 	}
+	// 強制整理の閾値は明示値の不正を黙って既定へ戻さない（戻すと、止めたつもりの強制整理が有効になる）
+	const forceRaw = (
+		(raw.worker as Record<string, unknown> | null | undefined)?.refresh as Record<string, unknown> | null | undefined
+	)?.forceMaxTokens;
+	if (forceRaw !== undefined && !(typeof forceRaw === "number" && Number.isSafeInteger(forceRaw) && forceRaw >= 0))
+		errors.push("worker.refresh.forceMaxTokens: 0 以上の整数にしてください（0 で強制整理だけ無効）");
 	if (errors.length) throw new Error(`設定が不正です（${file}）:\n- ${errors.join("\n- ")}`);
 	const channelIds = raw.channelIds as string[];
 	const c = (raw.concierge ?? {}) as Record<string, unknown>;
@@ -270,6 +281,7 @@ export function loadConfig(home = dleHome()): Config {
 			refresh: {
 				enabled: typeof wr.enabled === "boolean" ? wr.enabled : true,
 				maxTokens: nonnegative(wr.maxTokens, 150000),
+				forceMaxTokens: typeof forceRaw === "number" ? forceRaw : DEFAULT_FORCE_MAX_TOKENS,
 				contextPercent: percent(wr.contextPercent),
 				idleSeconds: num(wr.idleSeconds, 180),
 				cooldownMinutes: num(wr.cooldownMinutes, 30),

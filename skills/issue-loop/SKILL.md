@@ -372,6 +372,50 @@ clear 後は「起動時」の状態把握と「心拍の選択」からやり�
 フェーズや決定事項はここに書かない（GitHub が正）。このファイルは1件1行・現在値だけを保ち、
 完了した Issue の行は消す。heartbeat_intervalは実予約と同じ15min/60min/120minにする。
 
+検証規則（保存・engine の検証・復帰・テストで同じ）:
+
+- 必須は `## loop_meta` の1節だけ（行頭の見出し行がちょうど1回）。heartbeat_interval などの中身の行は engine は検査しない
+- `## subscribed_prs`・`## ci_retry_count`・`## stall` は任意。ただし保存するときは該当が無くても見出しだけは出す
+  （空の節は見出し行のみ。`none` などの値行を足さない）。この3節が無い旧形式・手書きの handoff も拒否されない
+- 4見出しのどれかが2回以上あれば不正。これ以外の見出し・行は拒否も解釈もしない（`codex_unavailable` 等の追加行を壊さない）
+- 復帰するときは「無くても動く」を保つ。loop_meta だけの handoff でも、任意の3節は空として読む
+
+キューが空のときの最小の例:
+
+```
+## loop_meta
+- heartbeat_interval: 15min
+## subscribed_prs
+## ci_retry_count
+## stall
+```
+
+## 強制整理（harness-phase の `refreshBoundary`）
+
+`harness-phase` が遷移を終えた直後に、文脈量が閾値（`worker.refresh.forceMaxTokens`、既定 250000）を超え、
+Codex 実行中・CI 待ち・人の回答待ちのどれでもないと engine が確認できたときだけ、stdout に1行の JSON
+（`{"refreshBoundary":{"boundary_id":"…","expires_at":…,"issue":"…","phase":"…"}}`）を出す。出なければ従来どおり進める。
+出たら、次の手順を**この順に**行う（60秒以内。期限が切れたら通常どおり進める）。
+
+1. `harness-phase` を次の工程と複合して実行しない。出たら、次の Codex・レビュー・CI 操作を始めない。
+   Agent から遷移させた場合は、結果と boundary を親の worker へ返し、Agent 側では次の工程を始めない。
+   `report`・別のフェーズ遷移・dispatch への応答もこの間は行わない（engine が割り込みとして検出し、ticket が失効する）
+2. 実行中の Codex・Agent・CI・人の回答待ちがあるなら、checkpoint を申請せずに通常どおり進める（ticket は期限で失効する）
+3. 上の検証規則に従い、登録 main の `.harness/handoff.md` に現在値を保存する（`loop_meta` は必ず書く）。
+   フェーズや要件の決定はここへ移さない。未公開の設計判断は先に GitHub へ記録する
+4. 同じ project の未完了 Task 全件について、`tasks_list`（または `task_get`）で現在の `next` を読み、
+   `next` 配列の要素 `{task_id, expected, text}` を作る。`expected` には読んだ現在値をそのまま入れる。
+   自分が進めていない・把握していない Task（窓口が積んだ inbox / queued など）は、`text` を `expected` と同じ値にして返す（変更しない）。
+   変更する `text` は、前後に空白・改行が無い・空でない・`-` 単独でない・`## 経緯` を含まない・4000文字以内・孤立サロゲートを含まない
+   こと。遷移した Issue の Task が未完了なら、その `next` は保存後に非空であること
+5. 保存した handoff の SHA-256 とバイト数、`boundary_id`、`next` を `refresh_checkpoint` へ渡す
+6. 応答が `accepted: true` なら、**以後ツールを使わずにそのターンを終える**（engine が `/clear` して再開のプロンプトを入れる。
+   accepted は clear の成功を意味しない）。`accepted: false` のときは、`reason` が何であっても（`next-text-invalid`・`checkpoint-race`・`checkpoint-invalid`・`phase-expired` など）、
+   整理せず通常どおり進める。engine は拒否のたびに ticket を破棄するので、修正して再送しても必ず `phase-expired` になる（失敗した機会は再試行されない）
+
+復帰（clear 後）は上の「起動時」と同じ。`tasks.next` と `.harness/handoff.md` を読み、心拍は `CronList` で確かめて無ければ張り直す。
+GitHub の状態が正本で、食い違えば GitHub を優先する。
+
 ## 終了条件
 
 - Dependabot の監視対象なら、Issue キューが空でも心拍を60分 `0 * * * *`、無変化2時間後120分 `0 */2 * * *`で保持する。

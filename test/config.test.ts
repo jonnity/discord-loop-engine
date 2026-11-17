@@ -49,6 +49,7 @@ test("refresh の既定値は有効・150k・180秒・30分、Codex の待機上
 	assert.deepEqual(c.worker.refresh, {
 		enabled: true,
 		maxTokens: 150000,
+		forceMaxTokens: 250000,
 		contextPercent: 15,
 		idleSeconds: 180,
 		cooldownMinutes: 30,
@@ -63,6 +64,7 @@ test("refresh の既定値は有効・150k・180秒・30分、Codex の待機上
 	assert.deepEqual(CONFIG_TEMPLATE.worker.refresh, {
 		enabled: true,
 		maxTokens: 150000,
+		forceMaxTokens: 250000,
 		contextPercent: 15,
 		idleSeconds: 180,
 		cooldownMinutes: 30,
@@ -186,5 +188,36 @@ test("worker/窓口の明示閾値と無効値fallbackを保持し、強制設�
 		assert.equal(c.worker.refresh.maxTokens, 150000);
 		assert.equal(c.concierge.refresh.maxTokens, 150000);
 	}
-	assert.equal("forceMaxTokens" in CONFIG_TEMPLATE.worker.refresh, false);
+	// 強制整理の閾値は worker だけ。窓口には持たせない
+	assert.equal("forceMaxTokens" in CONFIG_TEMPLATE.concierge.refresh, false);
+	assert.equal("forceMaxTokens" in load({}).concierge.refresh, false);
+});
+
+test("T1: forceMaxTokens は既定250000で、idle の150000と独立に上書き・0・全体OFFを保持する", () => {
+	assert.equal(load({}).worker.refresh.forceMaxTokens, 250000);
+	assert.equal(load({}).worker.refresh.maxTokens, 150000);
+	for (const value of [0, 100000, 200000]) {
+		const c = load({ worker: { refresh: { forceMaxTokens: value } } });
+		assert.equal(c.worker.refresh.forceMaxTokens, value);
+		assert.equal(c.worker.refresh.maxTokens, 150000);
+	}
+	// 全体OFFでも強制の値は保持される（enabled=false が idle・強制の両方を止める）
+	const off = load({ worker: { refresh: { enabled: false } } }).worker.refresh;
+	assert.equal(off.enabled, false);
+	assert.equal(off.forceMaxTokens, 250000);
+	// idle を0にしても強制の閾値には影響しない
+	assert.equal(load({ worker: { refresh: { maxTokens: 0 } } }).worker.refresh.forceMaxTokens, 250000);
+	assert.equal(
+		load({ worker: { refresh: { forceMaxTokens: 0, maxTokens: 120000 } } }).worker.refresh.maxTokens,
+		120000,
+	);
+});
+
+test("T1: forceMaxTokens の不正な明示値は黙って既定へ戻さず、設定エラーにする", () => {
+	for (const value of [-1, "250000", null, 1.5, Number.MAX_SAFE_INTEGER + 2, true, [], {}])
+		assert.throws(
+			() => load({ worker: { refresh: { forceMaxTokens: value } } }),
+			/worker\.refresh\.forceMaxTokens/,
+			JSON.stringify(value),
+		);
 });

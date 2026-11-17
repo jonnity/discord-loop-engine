@@ -7,6 +7,13 @@ export type PropertySchema = { description?: string } & (
 	| { type: "number" }
 	| { type: "array"; items: PropertySchema }
 	| { type: "object" }
+	/** properties を持つ入れ子の object。要素の形を公開 schema と engine の入口検査で同じ定義から出す（refresh_checkpoint の next） */
+	| {
+			type: "object";
+			properties: Record<string, PropertySchema>;
+			required?: string[];
+			additionalProperties: false;
+	  }
 	| { type: ["object", "string"] }
 );
 
@@ -354,9 +361,42 @@ export const TOOLS: ToolDef[] = [
 				body: s(""),
 				file: s(""),
 				phase: s(""),
+				from_phase: s("遷移前のフェーズ（harness-phase が読んだラベルから。強制整理の境界の識別に使う）"),
+				transition_id: s("harness-phase の呼出しごとの UUID（再送の識別）"),
 			},
 		},
 		roles: ["cli"],
+	},
+	{
+		name: "refresh_checkpoint",
+		description:
+			"harness-phase が返した整理の境界（refreshBoundary）を受けたときだけ、引継ぎ（.harness/handoff.md の保存済みの hash と bytes）と Task.next を engine へ渡す。受理されたらツールを使わずにターンを終える（その後 engine が /clear して再開する）",
+		inputSchema: {
+			type: "object",
+			additionalProperties: false,
+			properties: {
+				boundary_id: { ...s("refreshBoundary の boundary_id"), minLength: 1 },
+				handoff_sha256: { ...s("保存した .harness/handoff.md の SHA-256（小文字の16進）"), minLength: 1 },
+				handoff_bytes: { type: "number", description: "保存した .harness/handoff.md のバイト数" },
+				next: {
+					type: "array",
+					description:
+						"同 project の未完了 Task 全件。expected は直前に読んだ現在の next、text は新しい next（変えないなら expected と同じ値）",
+					items: {
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							task_id: { ...s("Task の ID"), minLength: 1 },
+							expected: s("読んだ現在の next（空は空文字）"),
+							text: s("保存する next（変えないなら expected と同じ）"),
+						},
+						required: ["task_id", "expected", "text"],
+					},
+				},
+			},
+			required: ["boundary_id", "handoff_sha256", "handoff_bytes", "next"],
+		},
+		roles: ["worker"],
 	},
 	{
 		name: "restart",

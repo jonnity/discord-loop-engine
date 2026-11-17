@@ -107,6 +107,15 @@ export interface Learning {
 	promoted: boolean;
 }
 
+/** harness-phase の通知ごとに記録する、プロジェクト・Issue 別の前回の遷移先（強制整理の境界の識別に使う） */
+export interface PhaseRefreshSeen {
+	/** done も名前のまま保存する */
+	phase: string;
+	sequence: number;
+	/** transition_id の無い通知（手動・旧版）で更新したときは省く */
+	transitionId?: string;
+}
+
 interface State {
 	taskSeq: number;
 	attentionSeq: number;
@@ -120,6 +129,8 @@ interface State {
 	defaultBranches: Record<string, string>;
 	/** プロジェクトごとの、前回 queueTick で見えた harness:queued の Issue 番号（任意項目。無ければ初回） */
 	queuedSeen?: Record<string, string[]>;
+	/** プロジェクト → Issue 番号 → 前回の遷移（任意項目。旧 state.json には無い） */
+	phaseRefreshSeen?: Record<string, Record<string, PhaseRefreshSeen>>;
 }
 
 /** 一覧の絞り込み条件。attention_list・ボード・Web ダッシュボードが同じ条件を使い、食い違わないようにする */
@@ -187,6 +198,37 @@ export class Ledger {
 			defaultBranches: {},
 			...readJson<Partial<State>>(path.join(this.dir, "state.json"), {}),
 		};
+	}
+
+	/**
+	 * phaseRefreshSeen を厳格に読む。state() は壊れた JSON を空として隠すため、保存前の判定には使わない
+	 * （壊れたファイルを初回とみなして上書きしない）。ファイルが無いのは初回として空を返す。壊れていれば投げる。
+	 */
+	strictPhaseSeen(): Record<string, Record<string, PhaseRefreshSeen>> {
+		const file = path.join(this.dir, "state.json");
+		if (!existsSync(file)) return {};
+		const raw: unknown = JSON.parse(readFileSync(file, "utf8"));
+		if (typeof raw !== "object" || raw === null || Array.isArray(raw)) throw new Error("state.json の形が不正です");
+		const seen = (raw as { phaseRefreshSeen?: unknown }).phaseRefreshSeen;
+		if (seen === undefined) return {};
+		if (typeof seen !== "object" || seen === null || Array.isArray(seen))
+			throw new Error("phaseRefreshSeen が不正です");
+		for (const issues of Object.values(seen)) {
+			if (typeof issues !== "object" || issues === null || Array.isArray(issues))
+				throw new Error("phaseRefreshSeen が不正です");
+			for (const v of Object.values(issues as Record<string, unknown>)) {
+				const e = v as Partial<PhaseRefreshSeen> | null;
+				if (
+					typeof e !== "object" ||
+					e === null ||
+					typeof e.phase !== "string" ||
+					!Number.isSafeInteger(e.sequence) ||
+					(e.transitionId !== undefined && typeof e.transitionId !== "string")
+				)
+					throw new Error("phaseRefreshSeen が不正です");
+			}
+		}
+		return seen as Record<string, Record<string, PhaseRefreshSeen>>;
 	}
 
 	saveState(patch: Partial<State>) {

@@ -181,6 +181,8 @@ async function cmdStart() {
 		if (shuttingDown) return;
 		shuttingDown = true;
 		log("engine: 停止します");
+		// 待機中の強制整理と、その読取子（tmux）を止めてから診断を書き切る。未実行の ticket は再起動後に復活させない
+		supervisor.cancelPhaseRefreshes();
 		await engine?.stop();
 		await supervisor.flushRefreshDiagnostics();
 		await diagnostics.close();
@@ -381,7 +383,19 @@ async function cmdMode(name: string | undefined, mode: string | undefined, flags
 async function cmdNotify(flags: Record<string, string | boolean>) {
 	const config = loadConfig(home);
 	const args: Record<string, unknown> = {};
-	for (const k of ["project", "event", "title", "url", "issue", "pr", "body", "file", "phase"]) {
+	for (const k of [
+		"project",
+		"event",
+		"title",
+		"url",
+		"issue",
+		"pr",
+		"body",
+		"file",
+		"phase",
+		"from_phase",
+		"transition_id",
+	]) {
 		if (typeof flags[k] === "string") args[k] = flags[k];
 	}
 	// engine の cwd からは相対パスが見えないので、呼び出し側の cwd で絶対パスにしてから渡す

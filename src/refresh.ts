@@ -39,7 +39,21 @@ export type RefreshReason =
 	| "wake-race"
 	| "refresh-success"
 	| "refresh-failed"
-	| "decision-unknown";
+	| "decision-unknown"
+	| "phase-duplicate"
+	| "phase-unverified"
+	| "phase-expired"
+	| "phase-superseded"
+	| "checkpoint-missing"
+	| "checkpoint-invalid"
+	| "checkpoint-race"
+	| "human-wait"
+	| "ci-wait"
+	| "ci-unknown"
+	| "worker-active";
+
+/** 整理の契機。旧い診断行は trigger を持たず、idle として読む */
+export type RefreshTrigger = "idle" | "phase";
 
 export interface RefreshPressure {
 	tokens: number | null;
@@ -56,6 +70,9 @@ export interface RefreshDecision extends RefreshPressure {
 	blockers: RefreshReason[];
 	notObserved: string[];
 	result?: boolean;
+	trigger?: RefreshTrigger;
+	/** この判定で比べた閾値（強制整理なら forceMaxTokens） */
+	thresholdTokens?: number;
 	readReasons?: ContextReadReason[];
 	promptState?: PromptState;
 	promptReason?: PromptReason;
@@ -72,6 +89,8 @@ export interface RefreshCoverage {
 		cooldownMinutes: number;
 		codexIgnoreAfterMinutes: number;
 		waitForCodex: boolean;
+		/** worker だけ。窓口には無い */
+		forceMaxTokens?: number;
 	} | null;
 	mode?: string;
 	ready?: boolean;
@@ -96,6 +115,64 @@ export function pressure(
 		remainingPercent,
 		overThreshold: reached ? true : r.maxTokens > 0 && tokens === null && remainingPercent === null ? null : false,
 	};
+}
+
+/**
+ * 強制整理の量の比較。「超えて」なので > で、idle の >=（pressure）とは別に持つ。
+ * 割合や件数からは換算せず、トークン量が読めないときは null（見送り）。
+ */
+export function forcePressure(
+	forceMaxTokens: number,
+	transcript: number | null,
+	screen: number | null,
+): RefreshPressure {
+	const tokens = transcript ?? screen;
+	let source: RefreshPressure["source"] = "unknown";
+	if (transcript !== null) source = "transcript";
+	else if (screen !== null) source = "screen";
+	let overThreshold: boolean | null = null;
+	if (forceMaxTokens <= 0) overThreshold = false;
+	else if (tokens !== null) overThreshold = tokens > forceMaxTokens;
+	return { tokens, source, remainingPercent: null, overThreshold };
+}
+
+export type HandoffCheck = { ok: true } | { ok: false; reason: "loop-meta-missing" | "duplicate-section" };
+
+const HANDOFF_SECTIONS = ["## loop_meta", "## subscribed_prs", "## ci_retry_count", "## stall"];
+
+/**
+ * handoff の検証規則（保存・engine の検証・復帰・試験が同じ関数を使う）。
+ * 必須は loop_meta だけ。他の見出し・行は検査しない（既存の追加行 codex_limit_until 等を壊さないため）。
+ */
+export function checkHandoff(text: string): HandoffCheck {
+	const lines = text.split(/\r?\n/);
+	for (const heading of HANDOFF_SECTIONS) {
+		const count = lines.filter((line) => line === heading).length;
+		if (count > 1) return { ok: false, reason: "duplicate-section" };
+		if (heading === "## loop_meta" && count === 0) return { ok: false, reason: "loop-meta-missing" };
+	}
+	return { ok: true };
+}
+
+export type NextTextRule = "untrimmed" | "empty" | "dash" | "section-heading" | "too-long" | "ill-formed";
+export type NextTextCheck = { ok: true } | { ok: false; rule: NextTextRule };
+
+export const NEXT_TEXT_MAX = 4000;
+
+/**
+ * Task.next に書く text の事前検査。ledger は保存を `${next || "-"}`、読込を非貪欲の正規表現で切り出して trim するので、
+ * 往復で値が変わる入力と、経緯の節を壊す入力をここで弾く。並びは診断の優先順（複数に当たるときは最初のもの）。
+ * Why not isWellFormed: tsconfig の lib が ES2023 で型が通らない。u フラグ付きの \p{Surrogate} は孤立サロゲートだけに一致する。
+ */
+export function checkNextText(text: string): NextTextCheck {
+	const ng = (rule: NextTextRule): NextTextCheck => ({ ok: false, rule });
+	if (text !== text.trim()) return ng("untrimmed");
+	if (text === "") return ng("empty");
+	if (text === "-") return ng("dash");
+	if (text.includes("## 経緯")) return ng("section-heading");
+	if (text.length > NEXT_TEXT_MAX) return ng("too-long");
+	if (/\p{Surrogate}/u.test(text)) return ng("ill-formed");
+	return { ok: true };
 }
 
 interface Aggregate extends RefreshDecision {
@@ -134,6 +211,7 @@ export class RefreshDiagnostics {
 				"engine",
 				"projects",
 				"config",
+				"phase-wait",
 				"protocol",
 			])
 				hash.update(readFileSync(new URL(`./${name}.ts`, import.meta.url)));
@@ -183,6 +261,8 @@ export class RefreshDiagnostics {
 	record(row: RefreshDecision): Promise<void> {
 		return this.enqueue(async () => {
 			const key = JSON.stringify([
+				row.trigger ?? "idle",
+				row.thresholdTokens ?? null,
 				row.session,
 				row.primaryReason,
 				row.blockers,
@@ -200,7 +280,7 @@ export class RefreshDiagnostics {
 				await this.append("decisions", previous.firstAt, previous);
 				this.pending.delete(row.project);
 			}
-			const journalKey = JSON.stringify([row.session, row.primaryReason]);
+			const journalKey = JSON.stringify([row.trigger ?? "idle", row.session, row.primaryReason]);
 			if (this.journalKeys.get(row.project) !== journalKey || row.result !== undefined) {
 				this.journal(`[${row.project}] refresh: ${row.primaryReason}`);
 			}
