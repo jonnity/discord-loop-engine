@@ -227,3 +227,78 @@ test("#25: dle notify --file の相対パスは呼び出し側の cwd で絶対�
 		rmSync(home, { recursive: true, force: true });
 	}
 });
+
+test("T11: dle notify --from_phase/--transition_id は engine へ文字列で届き、許可外のフラグと json は届かず、--json は refreshBoundary を含む結果をそのまま出す", async () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-phase-"));
+	const socket = path.join(home, "engine.sock");
+	writeFileSync(
+		path.join(home, "config.json"),
+		JSON.stringify({ socketPath: socket, channelIds: ["900"], allowedUserIds: ["111"] }),
+	);
+	const result = {
+		task: "T-1",
+		refreshBoundary: {
+			boundary_id: "11111111-2222-3333-4444-555555555555",
+			expires_at: 1234,
+			project: "p",
+			issue: "7",
+			phase: "implementing",
+		},
+	};
+	const received: Record<string, unknown>[] = [];
+	const server = net.createServer((s) => {
+		s.on("error", () => {});
+		s.on(
+			"data",
+			lineReader<{ type: string; id?: string; args?: Record<string, unknown> }>((m) => {
+				if (m.type === "hello") s.write(`${JSON.stringify({ type: "welcome", protocol: PROTOCOL_VERSION })}\n`);
+				if (m.type === "call") {
+					received.push(m.args ?? {});
+					s.end(`${JSON.stringify({ type: "result", id: m.id, ok: true, data: result })}\n`);
+				}
+			}),
+		);
+	});
+	await new Promise<void>((r) => server.listen(socket, r));
+	try {
+		const uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+		const r = await new Promise<{ code: number; stdout: string; stderr: string }>((resolve) =>
+			execFile(
+				path.resolve("bin/dle"),
+				[
+					"notify",
+					"--json",
+					"--event",
+					"phase",
+					"--phase",
+					"implementing",
+					"--issue",
+					"7",
+					"--project",
+					"p",
+					"--from_phase",
+					"designing",
+					"--transition_id",
+					uuid,
+					"--unknown_flag",
+					"x",
+				],
+				{ timeout: 5000, env: { ...process.env, DLE_HOME: home, DLE_SOCKET: socket } },
+				(err, stdout, stderr) => resolve({ code: err ? Number(err.code) : 0, stdout, stderr }),
+			),
+		);
+		assert.equal(r.code, 0, r.stderr);
+		assert.deepEqual(received[0], {
+			project: "p",
+			event: "phase",
+			issue: "7",
+			phase: "implementing",
+			from_phase: "designing",
+			transition_id: uuid,
+		});
+		assert.deepEqual(JSON.parse(r.stdout), result);
+	} finally {
+		await new Promise<void>((r) => server.close(() => r()));
+		rmSync(home, { recursive: true, force: true });
+	}
+});

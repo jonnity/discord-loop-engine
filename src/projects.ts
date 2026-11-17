@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
 	type Config,
+	DEFAULT_FORCE_MAX_TOKENS,
 	DEFAULT_WORKER_PERMISSION_MODE,
 	DLE_TOOLS_RULE,
 	expandHome,
@@ -21,12 +22,30 @@ import { type SessionTarget, shq } from "./supervisor.ts";
 
 import { resolveWorktreeRoot } from "./worktrees.ts";
 
-export type Run = (cmd: string, args: string[]) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+/** 強制整理の読取だけが期限・出力上限・中断を渡す。省略した既存の呼出しは従来どおり（上限 10MiB・期限なし） */
+export interface RunOptions {
+	timeoutMs?: number;
+	maxBuffer?: number;
+	signal?: AbortSignal;
+}
 
-export const run: Run = (cmd, args) =>
+export type Run = (
+	cmd: string,
+	args: string[],
+	opts?: RunOptions,
+) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+
+export const run: Run = (cmd, args, opts) =>
 	new Promise((resolve) => {
-		execFile(cmd, args, { maxBuffer: 10 * 1024 * 1024 }, (err, stdout, stderr) =>
-			resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
+		execFile(
+			cmd,
+			args,
+			{
+				maxBuffer: opts?.maxBuffer ?? 10 * 1024 * 1024,
+				...(opts?.timeoutMs ? { timeout: opts.timeoutMs, killSignal: "SIGKILL" as const } : {}),
+				...(opts?.signal ? { signal: opts.signal } : {}),
+			},
+			(err, stdout, stderr) => resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
 		);
 	});
 
@@ -325,6 +344,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 					? {
 							refresh: {
 								...cfg.worker.refresh,
+								forceMaxTokens: cfg.worker.refresh.forceMaxTokens ?? DEFAULT_FORCE_MAX_TOKENS,
 								prompt: initialPrompt,
 								worktreeRoot,
 								maxEvents: 0,
@@ -353,6 +373,7 @@ export function refreshCoverage(
 		cooldownMinutes: r.cooldownMinutes,
 		codexIgnoreAfterMinutes: r.codexIgnoreAfterMinutes,
 		waitForCodex: r.waitForCodex,
+		...(r.forceMaxTokens !== undefined ? { forceMaxTokens: r.forceMaxTokens } : {}),
 	});
 	const concierge = targets.find((t) => t.name === "concierge");
 	return [
@@ -401,6 +422,7 @@ export function refreshCoverage(
 							cooldownMinutes: cfg.worker.refresh.cooldownMinutes,
 							codexIgnoreAfterMinutes: cfg.worker.refresh.codexIgnoreAfterMinutes,
 							waitForCodex: true,
+							forceMaxTokens: cfg.worker.refresh.forceMaxTokens ?? DEFAULT_FORCE_MAX_TOKENS,
 						},
 			};
 		}),

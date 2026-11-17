@@ -4,6 +4,7 @@
 //   （LLM の判断を挟まないので、通知の漏れが起きない）
 // - 窓口からの指示・回答は、worker がいなければ outbox に積み、起動したら渡す（忘れない）
 
+import { createHash, randomUUID } from "node:crypto";
 import {
 	accessSync,
 	chmodSync,
@@ -16,10 +17,11 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { lstat, open } from "node:fs/promises";
 import net, { type Socket } from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import type { Config } from "./config.ts";
+import { type Config, DEFAULT_FORCE_MAX_TOKENS } from "./config.ts";
 import { isLoopbackHost, startDashboard } from "./dashboard.ts";
 import { isObject, parseStrictJson } from "./harness-json.ts";
 import { resolveModels, validateModels } from "./harness-models.ts";
@@ -33,6 +35,7 @@ import {
 	type TaskStatus,
 } from "./ledger.ts";
 import { type DiscordReceipt, inspectReceipt, object, type ReceiptFailure } from "./notification-receipt.ts";
+import { hasHumanWait, readCiWait } from "./phase-wait.ts";
 import {
 	run as defaultRun,
 	ensureLabels,
@@ -43,6 +46,7 @@ import {
 	sessionTargets,
 } from "./projects.ts";
 import { type ClientMessage, lineReader, type Meta, PROTOCOL_VERSION, type Role, send } from "./protocol.ts";
+import { checkHandoff, checkNextText, type NextTextRule, type RefreshReason } from "./refresh.ts";
 import type { DiscordApi } from "./rest.ts";
 import {
 	codePoints,
@@ -55,7 +59,7 @@ import {
 	route,
 	sanitizeUser,
 } from "./route.ts";
-import type { RefreshResult, Supervisor } from "./supervisor.ts";
+import type { PhaseBoundary, RefreshResult, Supervisor } from "./supervisor.ts";
 import { validateToolArguments } from "./tool-validation.ts";
 import { resolveWorktreeRoot } from "./worktrees.ts";
 
@@ -109,6 +113,21 @@ const PHASE_STATUS: Record<string, TaskStatus> = {
 	"awaiting-merge": "waiting-human",
 	blocked: "waiting-human",
 	done: "done",
+};
+
+/** harness-phase の遷移元として受け付けるフェーズ（done は遷移先にしかならない） */
+const FROM_PHASES = Object.keys(PHASE_STATUS).filter((k) => k !== "done");
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+/** 整理の機会（ticket）の有効時間。この間に checkpoint が来なければ、通常どおり作業を続けさせる */
+const PHASE_TICKET_MS = 60_000;
+const HANDOFF_MAX_BYTES = 64 * 1024;
+
+/** checkpoint の拒否応答。text や本文は含めない */
+export type RefreshCheckpointRejected = {
+	accepted: false;
+	reason: "next-text-invalid" | "checkpoint-invalid" | "checkpoint-race" | "phase-expired";
+	task_id?: string;
+	rule?: NextTextRule;
 };
 
 // profile.hooks に書けるフェーズ（bin/harness-hook と揃える）
@@ -197,6 +216,10 @@ export class Engine {
 	private dashboard: { url: string; close(): Promise<void> } | null = null;
 	// 窓口との直近のやり取り。/clear の後に渡し直して、会話の続きが分かるようにする
 	private recentChat: string[] = [];
+	// 強制整理の機会（メモリだけ。再起動後に復活させない）と、割り込みを検出する世代番号
+	private phasePending = new Map<string, PhaseBoundary & { timer: ReturnType<typeof setTimeout> }>();
+	private phaseGeneration = new Map<string, number>();
+	private phaseController = new AbortController();
 
 	constructor(o: EngineOptions) {
 		this.config = o.config;
@@ -286,6 +309,11 @@ export class Engine {
 		await this.dashboard?.close();
 		this.dashboard = null;
 		if (this.boardTimer) clearTimeout(this.boardTimer);
+		for (const p of this.phasePending.values()) clearTimeout(p.timer);
+		this.phasePending.clear();
+		this.phaseController.abort();
+		// 待機中の強制整理も止める（止めないと engine のソケットを閉じる前に wake が通りうる） // テストの代役 supervisor には無いことがある
+		this.supervisor?.cancelPhaseRefreshes?.();
 		for (const s of this.sessions.values()) s.socket.destroy();
 		await new Promise<void>((r) => (this.server ? this.server.close(() => r()) : r()));
 		if (existsSync(this.config.socketPath)) unlinkSync(this.config.socketPath);
@@ -370,6 +398,7 @@ export class Engine {
 			since: new Date().toISOString(),
 		};
 		this.sessions.set(name, session);
+		this.bump(name);
 		send(socket, {
 			type: "welcome",
 			role: msg.role,
@@ -392,6 +421,7 @@ export class Engine {
 	 * /clear の最中なら outbox に溜めて "held"（起動していないわけではないので、そう扱わない）
 	 */
 	deliver(name: string, content: string, meta: Meta): "sent" | "queued" | "held" {
+		this.bump(name);
 		if (this.refreshing.has(name)) {
 			this.ledger.enqueue(name, { content, meta });
 			return "held";
@@ -446,6 +476,7 @@ export class Engine {
 	 * reconnect だけは supervisor 側で積む（ここからは呼ばない）。
 	 */
 	private requestWake(project: string, reason: string) {
+		this.bump(project);
 		if (!this.supervisor) return;
 		this.supervisor.requestWake(project, reason);
 		this.supervisor.wakeTick().catch(() => {});
@@ -718,6 +749,9 @@ export class Engine {
 				this.scheduleBoard();
 				return t;
 			}
+			case "refresh_checkpoint":
+				if (who.role !== "worker") throw new Error("refresh_checkpoint は worker だけが使えます");
+				return this.refreshCheckpoint(who.name, a);
 			case "attention_answer":
 				conciergeOnly();
 				return this.answerAttention(str(a.id), str(a.answer));
@@ -1137,7 +1171,12 @@ export class Engine {
 				});
 			}
 			this.scheduleBoard();
-			return { task: task?.id ?? null };
+			// 強制整理の機会。失敗しても phase の台帳報告は成功のまま返す（GitHub の遷移を巻き戻さない）
+			const refreshBoundary = await this.phaseOpportunity(project, issue, phase, a).catch((e: Error) => {
+				this.log(`engine: 強制整理の判定に失敗 ${e.message}`);
+				return null;
+			});
+			return { task: task?.id ?? null, ...(refreshBoundary ? { refreshBoundary } : {}) };
 		}
 
 		// それ以外（着手・お知らせ）は台帳にだけ残す。投稿はボードの更新で足りる
@@ -1148,6 +1187,217 @@ export class Engine {
 			});
 		this.scheduleBoard();
 		return { task: task?.id ?? null };
+	}
+
+	// --- harness-phase の遷移直後の強制整理 ---------------------------------------------------------
+
+	private generation(project: string): number {
+		return this.phaseGeneration.get(project) ?? 0;
+	}
+
+	/** 配送・再接続・phase/report/Task の更新・wake 要求のたびに進める。整理の機会の後に割り込みがあったことの検出に使う */
+	private bump(project: string) {
+		this.phaseGeneration.set(project, this.generation(project) + 1);
+	}
+
+	private forceLimit(project: string): number {
+		const t = this.targets().find((x) => x.name === project);
+		if (!t?.refresh || project === "concierge") return 0;
+		return t.refresh.forceMaxTokens ?? DEFAULT_FORCE_MAX_TOKENS;
+	}
+
+	/**
+	 * phase 通知1回を、整理の機会にするかを決める。ticket を返すのは、実際の遷移で、worker が超過しており、
+	 * 人待ち・Codex・CI 待ちのどれでもないと確認できたときだけ。判定は台帳の項目・tmux・GitHub から読み、推測しない。
+	 * 強制が無効な project では何も読まず何も書かない（OFF の挙動を変えない）。
+	 */
+	private async phaseOpportunity(project: string, issue: string, phase: string, a: Record<string, unknown>) {
+		if (!issue || !Object.hasOwn(PHASE_STATUS, phase) || this.forceLimit(project) <= 0) return null;
+		const sup = this.supervisor;
+		const skip = (reason: RefreshReason, session?: string) => {
+			sup?.recordPhaseDecision(project, reason, { session: session ?? null });
+			return null;
+		};
+		const transitionId = UUID_PATTERN.test(str(a.transition_id)) ? str(a.transition_id) : "";
+		const from = FROM_PHASES.includes(str(a.from_phase)) ? str(a.from_phase) : "";
+		// 読み・比較・書きは同期。seen の保存前に await を挟むと、同時の通知で二重に機会を作る
+		let all: ReturnType<Ledger["strictPhaseSeen"]>;
+		try {
+			all = this.ledger.strictPhaseSeen();
+		} catch {
+			this.log("engine: state.json を厳格に読めないため強制整理を見送ります");
+			return skip("phase-unverified");
+		}
+		const prev = all[project]?.[issue];
+		if ((transitionId && prev?.transitionId === transitionId) || prev?.phase === phase) return skip("phase-duplicate");
+		const seen = { phase, sequence: (prev?.sequence ?? 0) + 1, ...(transitionId ? { transitionId } : {}) };
+		try {
+			this.ledger.saveState({ phaseRefreshSeen: { ...all, [project]: { ...all[project], [issue]: seen } } });
+		} catch {
+			this.log("engine: phase の記録を保存できないため強制整理を見送ります");
+			return skip("phase-unverified");
+		}
+		this.bump(project);
+		const old = this.phasePending.get(project);
+		if (old) {
+			clearTimeout(old.timer);
+			this.phasePending.delete(project);
+			sup?.recordPhaseDecision(project, "phase-superseded", { session: old.sessionId });
+		}
+		if (PHASE_STATUS[phase] === "waiting-human") return skip("human-wait");
+		if (!transitionId || !from || from === phase || (prev && prev.phase !== from)) return skip("phase-unverified");
+		if (!sup || this.sessions.get(project)?.role !== "worker") return skip("channel-offline");
+		if (hasHumanWait(this.ledger, project)) return skip("human-wait");
+		const generation = this.generation(project);
+		const probe = await sup.phaseProbe(project);
+		if (!probe.ok) return skip(probe.reason);
+		const withSession = { session: probe.sessionId, pressure: probe.pressure };
+		const decide = (reason: RefreshReason) => {
+			sup.recordPhaseDecision(project, reason, withSession);
+			return null;
+		};
+		if (probe.pressure.overThreshold === null) return decide("context-unknown");
+		if (probe.pressure.overThreshold !== true) return decide("below-threshold");
+		if (probe.codex === "busy") return decide("codex-busy");
+		if (probe.codex === "unknown") return decide("codex-unknown");
+		const repo = this.ledger.projects().find((p) => p.name === project)?.repo ?? "";
+		const ci = await readCiWait(repo, this.exec, this.phaseController.signal);
+		if (ci === "busy") return decide("ci-wait");
+		if (ci === "unknown") return decide("ci-unknown");
+		if (generation !== this.generation(project) || hasHumanWait(this.ledger, project))
+			return decide("phase-superseded");
+		const now = Date.now();
+		const boundary: PhaseBoundary = {
+			id: randomUUID(),
+			project,
+			issue,
+			phase,
+			sequence: seen.sequence,
+			pid: probe.pid,
+			sessionId: probe.sessionId,
+			requestedAt: now,
+			expiresAt: now + PHASE_TICKET_MS,
+			generation,
+		};
+		const timer = setTimeout(() => {
+			if (this.phasePending.get(project)?.id !== boundary.id) return;
+			this.phasePending.delete(project);
+			sup.recordPhaseDecision(project, "phase-expired", withSession);
+		}, PHASE_TICKET_MS);
+		timer.unref();
+		this.phasePending.set(project, { ...boundary, timer });
+		return { boundary_id: boundary.id, expires_at: boundary.expiresAt, project, issue, phase };
+	}
+
+	/** 固定の main/.harness/handoff.md を、symlink を辿らず通常ファイルとして読む。hash・bytes が合わなければ null */
+	private async readHandoff(repoPath: string, bytes: number, sha256: string): Promise<string | null> {
+		const file = path.join(repoPath, ".harness", "handoff.md");
+		try {
+			const dir = await lstat(path.dirname(file));
+			if (!dir.isDirectory() || dir.isSymbolicLink()) return null;
+			const link = await lstat(file);
+			if (!link.isFile() || link.isSymbolicLink()) return null;
+			const handle = await open(file, constants.O_RDONLY | constants.O_NOFOLLOW);
+			try {
+				const info = await handle.stat();
+				// lstat と開いた実体が同じでなければ、読む間に差し替えられている
+				if (!info.isFile() || info.dev !== link.dev || info.ino !== link.ino) return null;
+				if (info.size <= 0 || info.size > HANDOFF_MAX_BYTES || info.size !== bytes) return null;
+				const buffer = Buffer.alloc(info.size);
+				const { bytesRead } = await handle.read(buffer, 0, info.size, 0);
+				if (bytesRead !== info.size) return null;
+				if (createHash("sha256").update(buffer).digest("hex") !== sha256) return null;
+				return new TextDecoder("utf-8", { fatal: true }).decode(buffer);
+			} finally {
+				await handle.close();
+			}
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * worker が整理の前に引継ぎ（handoff と Task.next）を渡す口。検証・保存・再読取りが全部通ったときだけ、
+	 * supervisor の強制整理へ渡す。accepted は clear の成功を意味しない（worker は以後ツールを使わず、ターンを終える）。
+	 */
+	private async refreshCheckpoint(project: string, a: Record<string, unknown>): Promise<unknown> {
+		const sup = this.supervisor;
+		const ticket = this.phasePending.get(project);
+		const reject = (
+			diag: RefreshReason,
+			reason: RefreshCheckpointRejected["reason"],
+			extra: Partial<RefreshCheckpointRejected> = {},
+		): RefreshCheckpointRejected => {
+			// 失敗した機会は再試行しない。worker は止まっていないので、通常どおり作業を続けられる
+			if (ticket && this.phasePending.get(project)?.id === ticket.id) {
+				clearTimeout(ticket.timer);
+				this.phasePending.delete(project);
+			}
+			sup?.recordPhaseDecision(project, diag, { session: ticket?.sessionId ?? null });
+			return { accepted: false, reason, ...extra };
+		};
+		if (!ticket || ticket.id !== str(a.boundary_id) || !sup) return reject("checkpoint-missing", "phase-expired");
+		if (Date.now() > ticket.expiresAt) return reject("phase-expired", "phase-expired");
+		if (ticket.generation !== this.generation(project)) return reject("phase-superseded", "phase-expired");
+		const p = this.ledger.projects().find((x) => x.name === project);
+		if (!p) return reject("checkpoint-invalid", "checkpoint-invalid");
+		const bytes = a.handoff_bytes as number;
+		const sha = str(a.handoff_sha256);
+		const handoff = await this.readHandoff(p.path, bytes, sha);
+		const check = handoff === null ? null : checkHandoff(handoff);
+		if (!check?.ok) return reject("checkpoint-invalid", "checkpoint-invalid");
+		// ここから Task の照合・保存・再読取りまでは同期（窓口の task_update・worker の report と交互に走らせない）
+		const items = a.next as { task_id: string; expected: string; text: string }[];
+		const ids = items.map((i) => i.task_id);
+		if (new Set(ids).size !== ids.length) return reject("checkpoint-invalid", "checkpoint-invalid");
+		const open = this.ledger.tasks().filter((t) => t.project === project && t.status !== "done");
+		if (!ids.every((id) => open.some((t) => t.id === id)) || open.some((t) => !ids.includes(t.id)))
+			return reject("checkpoint-race", "checkpoint-race");
+		const current = new Map(open.map((t) => [t.id, t.next]));
+		if (items.some((i) => current.get(i.task_id) !== i.expected)) return reject("checkpoint-race", "checkpoint-race");
+		const finalNext = new Map(items.map((i) => [i.task_id, i.text]));
+		for (const i of items) {
+			if (i.text === i.expected) continue;
+			const r = checkNextText(i.text);
+			if (!r.ok) return reject("checkpoint-invalid", "next-text-invalid", { task_id: i.task_id, rule: r.rule });
+		}
+		const own = open.find((t) => t.issue === ticket.issue);
+		if (own && finalNext.get(own.id) === "")
+			return reject("checkpoint-invalid", "next-text-invalid", { task_id: own.id, rule: "empty" });
+		try {
+			for (const i of items) {
+				if (i.text !== i.expected)
+					this.ledger.updateTask(i.task_id, { next: i.text }, "引継ぎ: 整理の前に next を保存");
+			}
+		} catch {
+			return reject("checkpoint-invalid", "checkpoint-invalid");
+		}
+		const saved = new Map(this.ledger.tasks().map((t) => [t.id, t.next]));
+		if (items.some((i) => saved.get(i.task_id) !== i.text)) return reject("checkpoint-race", "checkpoint-race");
+		// 保存後にもう一度 handoff を照合する（保存の間の差替えを検出）
+		if ((await this.readHandoff(p.path, bytes, sha)) !== handoff)
+			return reject("checkpoint-invalid", "checkpoint-invalid");
+		if (this.phasePending.get(project)?.id !== ticket.id || ticket.generation !== this.generation(project))
+			return reject("phase-superseded", "phase-expired");
+		clearTimeout(ticket.timer);
+		this.phasePending.delete(project);
+		const finalCheck = async (signal: AbortSignal): Promise<RefreshReason | null> => {
+			if (this.generation(project) !== ticket.generation) return "phase-superseded";
+			if (hasHumanWait(this.ledger, project)) return "human-wait";
+			const now = this.ledger.tasks().filter((t) => t.project === project && t.status !== "done");
+			if (now.length !== finalNext.size || now.some((t) => finalNext.get(t.id) !== t.next)) return "checkpoint-race";
+			// 送信直前に handoff を取り直す。arm 後に transcript に出ない経路で書き換えられても、clear までに検出する
+			if ((await this.readHandoff(p.path, bytes, sha)) !== handoff) return "checkpoint-invalid";
+			const ci = await readCiWait(p.repo, this.exec, AbortSignal.any([signal, this.phaseController.signal]));
+			if (ci === "busy") return "ci-wait";
+			if (ci === "unknown") return "ci-unknown";
+			return this.generation(project) === ticket.generation ? null : "phase-superseded";
+		};
+		sup
+			.requestPhaseRefresh(ticket, finalCheck)
+			.then((r) => this.log(`engine: [${project}] 強制整理 ${r.success ? "完了" : `見送り（${r.reason}）`}`))
+			.catch((e: Error) => this.log(`engine: 強制整理の失敗 ${e.message}`));
+		return { accepted: true, action: "end-turn", expiresAt: Date.now() + 30_000 };
 	}
 
 	/** worker からの進み具合の報告（harness-phase を通らない作業の記録） */
@@ -1165,6 +1415,7 @@ export class Engine {
 		if (typeof a.pr === "string") patch.pr = a.pr;
 		if (typeof a.next === "string") patch.next = a.next;
 		const t = this.ledger.updateTask(taskId, patch, str(a.note) || undefined);
+		this.bump(t.project);
 		if (patch.status === "done") await this.onTaskDone(t);
 		this.scheduleBoard();
 		return t;

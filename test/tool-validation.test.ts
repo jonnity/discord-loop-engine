@@ -40,16 +40,39 @@ const cases: Record<string, Record<string, string>> = {
 	learnings_promote: { indexes: "N[]!" },
 	rules_set: { content: "S!" },
 	retro_done: { summary: "S!" },
-	notify: { project: "S", event: "S", title: "S", url: "S", issue: "S", pr: "S", body: "S", file: "S", phase: "S" },
+	notify: {
+		project: "S",
+		event: "S",
+		title: "S",
+		url: "S",
+		issue: "S",
+		pr: "S",
+		body: "S",
+		file: "S",
+		phase: "S",
+		from_phase: "S",
+		transition_id: "S",
+	},
 	restart: { name: "S", limited: "B", all: "B", except: "S[]" },
+	refresh_checkpoint: { boundary_id: "S!", handoff_sha256: "S!", handoff_bytes: "N!", next: "R[]!" },
 };
-const valid: Record<string, unknown> = { S: "値", B: false, "O|S": { gate: [] }, "S[]": [], "N[]": [] };
+const valid: Record<string, unknown> = {
+	S: "値",
+	B: false,
+	N: 0,
+	"O|S": { gate: [] },
+	"S[]": [],
+	"N[]": [],
+	"R[]": [],
+};
 const invalid: Record<string, unknown[]> = {
 	S: [123, false, {}, [], null],
 	B: ["false", 0, {}, [], null],
 	"O|S": [[], null, 1, false],
 	"S[]": [{}, "file", null, [1]],
 	"N[]": [{}, "0", null, ["0"]],
+	N: ["1", false, {}, [], null],
+	"R[]": [{}, "file", null, [1], ["x"], [[]]],
 };
 
 function failure(name: string, args: unknown, ...parts: string[]) {
@@ -63,8 +86,8 @@ function failure(name: string, args: unknown, ...parts: string[]) {
 	);
 }
 
-test("共通カタログは26ツールの必須・型・未知キーを検査する", () => {
-	assert.equal(TOOLS.length, 26);
+test("共通カタログは27ツールの必須・型・未知キーを検査する", () => {
+	assert.equal(TOOLS.length, 27);
 	assert.deepEqual(TOOLS.map((t) => t.name).sort(), Object.keys(cases).sort());
 	for (const [name, fields] of Object.entries(cases)) {
 		const schema = TOOLS.find((t) => t.name === name)?.inputSchema;
@@ -92,9 +115,12 @@ test("共通カタログは26ツールの必須・型・未知キーを検査す
 				"O|S": ["object", "string"],
 				"S[]": "array",
 				"N[]": "array",
+				N: "number",
+				"R[]": "array",
 			};
 			assert.deepEqual(property.type, types[kind], `${name}.${key}`);
-			if (property.type === "array") assert.equal(property.items.type, kind === "S[]" ? "string" : "number");
+			if (property.type === "array")
+				assert.equal(property.items.type, kind === "S[]" ? "string" : kind === "R[]" ? "object" : "number");
 			for (const value of invalid[kind] ?? []) {
 				failure(name, { ...args, [key]: value }, Array.isArray(value) && value.length ? `${key}[0]` : key);
 			}
@@ -140,4 +166,42 @@ test("取り違えの候補・本文の空文字と空白のみ・値の保持�
 		next: "",
 	});
 	assert.throws(() => validateToolArguments("unknown", {}), /unknown tool: unknown/);
+});
+
+// T13: 入れ子 object（properties を持つ形）の検査。要素の形を公開 schema と engine の入口検査で同じ定義から出す
+test("T13: refresh_checkpoint の next は要素の未知キー・欠落・型違いを path 付きで拒否し、空文字は schema では通す", () => {
+	const base = { boundary_id: "b", handoff_sha256: "h", handoff_bytes: 1 };
+	const item = { task_id: "T-1", expected: "a", text: "b" };
+	const ok = { ...base, next: [item, { task_id: "T-2", expected: "", text: "" }] };
+	assert.deepEqual(validateToolArguments("refresh_checkpoint", ok), ok);
+	assert.deepEqual(validateToolArguments("refresh_checkpoint", { ...base, next: [] }), { ...base, next: [] });
+	failure("refresh_checkpoint", { ...base, next: [{ ...item, typo: 1 }] }, "next[0].typo", "許可");
+	failure(
+		"refresh_checkpoint",
+		{ ...base, next: [JSON.parse('{"__proto__":1,"task_id":"T-1","expected":"","text":""}')] },
+		"next[0].__proto__",
+	);
+	failure("refresh_checkpoint", { ...base, next: [{ expected: "a", text: "b" }] }, "next[0].task_id", "必要");
+	failure("refresh_checkpoint", { ...base, next: [{ ...item, task_id: "" }] }, "next[0].task_id", "空");
+	failure("refresh_checkpoint", { ...base, next: [{ ...item, expected: 1 }] }, "next[0].expected", "string");
+	failure("refresh_checkpoint", { ...base, next: [{ ...item, text: null }] }, "next[0].text", "string");
+	failure("refresh_checkpoint", { ...base, next: [{ ...item }, "x"] }, "next[1]", "object");
+	failure("refresh_checkpoint", { ...base, next: [[]] }, "next[0]", "object");
+	failure("refresh_checkpoint", { ...base, next: "x" }, "next", "array");
+	failure("refresh_checkpoint", { boundary_id: "b", handoff_sha256: "h", next: [] }, "handoff_bytes", "必要");
+});
+
+test("T13: 入れ子 object の追加で、properties の無い object と O|S の既存の結果は変わらない", () => {
+	assert.deepEqual(
+		validateToolArguments("profile_propose", { mode: "m", summary: "s", profile: { any: [1, { b: 2 }] } }),
+		{
+			mode: "m",
+			summary: "s",
+			profile: { any: [1, { b: 2 }] },
+		},
+	);
+	failure("profile_propose", { mode: "m", summary: "s", profile: [] }, "profile", "object");
+	const roles = Object.fromEntries(TOOLS.map((t) => [t.name, t.roles]));
+	assert.deepEqual(roles.refresh_checkpoint, ["worker"]);
+	assert.deepEqual(roles.notify, ["cli"]);
 });

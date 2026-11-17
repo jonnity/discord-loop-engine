@@ -16,7 +16,7 @@ import os from "node:os";
 import path from "node:path";
 
 // 互換性を壊す変更をしたら上げる。engine と channel のバージョンがずれたまま黙って動かないようにするため。
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 export type Role = "concierge" | "worker" | "cli";
 

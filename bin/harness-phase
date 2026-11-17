@@ -30,6 +30,30 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PHASES=(queued interview designing spec-review implementing impl-review awaiting-merge blocked)
 
+# 読んだ harness:* ラベル（改行区切り）から、既知のフェーズ名だけで一意なら遷移前のフェーズを返す。
+# harness:merge-ok・harness:priority・集合外の harness:* は phase ではないので数えない。0個・2個以上は空（強制整理の対象にしない）。
+phase_from_labels() {
+	local label p found="" count=0
+	while IFS= read -r label; do
+		[ -z "$label" ] && continue
+		for p in "${PHASES[@]}"; do
+			if [ "$label" = "harness:$p" ]; then
+				found="$p"
+				count=$((count + 1))
+			fi
+		done
+	done <<<"$1"
+	[ "$count" = 1 ] && printf '%s' "$found"
+	return 0
+}
+# 呼出しごとの UUID（小文字）。engine が再送と実遷移を見分けるのに使う
+new_transition_id() {
+	local id=""
+	[ -r /proc/sys/kernel/random/uuid ] && id="$(cat /proc/sys/kernel/random/uuid 2>/dev/null || true)"
+	[ -n "$id" ] || id="$(node -p "require('node:crypto').randomUUID()" 2>/dev/null || true)"
+	printf '%s' "$id" | tr 'A-F' 'a-f'
+}
+
 ISSUE="${1:-}"
 PHASE="${2:-}"
 if [ -z "$ISSUE" ] || [ -z "$PHASE" ]; then
@@ -148,6 +172,12 @@ trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 if [ -n "$ADOPT" ]; then
+	# ラベルは harness-adopt が付け替える前に1回だけ読む。読めなければ from_phase を付けないだけで、終了値・順序は変えない
+	adopt_from="" adopt_tid=""
+	if [ -S "${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}" ]; then
+		adopt_from="$(phase_from_labels "$(gh issue view "$ISSUE" --json labels -q '.labels[].name' 2>/dev/null | grep '^harness:' || true)")"
+		adopt_tid="$(new_transition_id)"
+	fi
 	media_tmp="$(mktemp -d)" || exit 1
 	node "$SCRIPT_DIR/../src/harness-adopt.ts" "$ISSUE" "$PR" "$ADOPT" "$media_tmp" &
 	convert_pid=$!
@@ -158,7 +188,7 @@ if [ -n "$ADOPT" ]; then
 		# 表示用台帳報告は通常の完成経路と同じく best effort。
 		DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
 		if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
-			"$SCRIPT_DIR/dle" notify --event phase --phase awaiting-merge --issue "$ISSUE" --pr "$PR" --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" >/dev/null 2>&1 || true
+			"$SCRIPT_DIR/dle" notify --event phase --phase awaiting-merge --issue "$ISSUE" --pr "$PR" ${adopt_from:+--from_phase "$adopt_from"} ${adopt_tid:+--transition_id "$adopt_tid"} --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" >/dev/null 2>&1 || true
 		fi
 	}
 	exit "$rc"
@@ -251,6 +281,12 @@ if [ "$PHASE" = awaiting-merge ] && [ -n "$FILE" ]; then
 	SUMMARY="$(jq -nr --arg text "$SUMMARY" --arg location "$location" --argjson max "$SUMMARY_MAX" '$text[0:($max - ($location | length) - 2)] + "\n\n" + $location')"
 fi
 if [ "$PHASE" = awaiting-merge ]; then
+	# harness-request がラベルを付け替える前に1回だけ読む（読めなければ from_phase を付けないだけ）
+	merge_from="" merge_tid=""
+	if [ -S "${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}" ]; then
+		merge_from="$(phase_from_labels "$(gh issue view "$ISSUE" --json labels -q '.labels[].name' 2>/dev/null | grep '^harness:' || true)")"
+		merge_tid="$(new_transition_id)"
+	fi
 	[ -n "$media_tmp" ] || media_tmp="$(mktemp -d)"
 	printf '%s' "$COMMENT" >"$media_tmp/comment.md"
 	printf '%s' "$SUMMARY" >"$media_tmp/summary.md"
@@ -263,7 +299,7 @@ if [ "$PHASE" = awaiting-merge ]; then
 	# 表示用台帳報告は通常経路末尾と同様に best effort。
 	DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
 	if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
-		"$SCRIPT_DIR/dle" notify --event phase --phase awaiting-merge --issue "$ISSUE" --pr "$PR" --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" >/dev/null 2>&1 || true
+		"$SCRIPT_DIR/dle" notify --event phase --phase awaiting-merge --issue "$ISSUE" --pr "$PR" ${merge_from:+--from_phase "$merge_from"} ${merge_tid:+--transition_id "$merge_tid"} --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" >/dev/null 2>&1 || true
 	fi
 	exit 0
 fi
@@ -340,8 +376,19 @@ fi
 # engine が動いていれば台帳にもフェーズを残す（ボードと「今なにをしているか」のため。失敗してもフェーズ遷移は止めない）
 DLE_SOCK="${DLE_SOCKET:-${DLE_HOME:-$HOME/.discord-loop-engine}/engine.sock}"
 if [ -S "$DLE_SOCK" ] && [ -x "$SCRIPT_DIR/dle" ]; then
-	"$SCRIPT_DIR/dle" notify --event phase --phase "$PHASE" --issue "$ISSUE" --title "$TITLE" --url "$ISSUE_URL" \
+	from_phase="$(phase_from_labels "$current")"
+	notify_json="$("$SCRIPT_DIR/dle" notify --json --event phase --phase "$PHASE" --issue "$ISSUE" --title "$TITLE" --url "$ISSUE_URL" \
+		${from_phase:+--from_phase "$from_phase"} --transition_id "$(new_transition_id)" \
 		${PR:+--pr "$PR"} --project "${DLE_PROJECT:-$("$SCRIPT_DIR/harness-config" .project "$(basename "$("$SCRIPT_DIR/harness-config" --root)")")}" \
-		>/dev/null 2>&1 || true
+		2>/dev/null || true)"
+	# 整理の境界があるときだけ、固定形式の JSON を1行 stdout へ出す（OFF・対象外・失敗・不正な応答では何も出さない）。
+	# 結果を捕捉しても、報告の失敗で遷移を失敗にはしない（GitHub のラベルは変更済み）。
+	boundary="$(jq -c 'select(type == "object") | .refreshBoundary
+		| select(type == "object" and (.boundary_id | type == "string" and test("^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")) and (.expires_at | type == "number"))
+		| {refreshBoundary: {boundary_id, expires_at, issue: (.issue | tostring), phase: (.phase | tostring)}}' <<<"$notify_json" 2>/dev/null || true)"
+	if [ -n "$boundary" ]; then
+		echo "harness-phase: 整理の境界があります。次の工程を始めず、skills の手順で refresh_checkpoint を呼んでください" >&2
+		printf '%s\n' "$boundary"
+	fi
 fi
 echo "harness-phase: #$ISSUE → $PHASE" >&2

@@ -38,7 +38,7 @@ PR 本文を A.summary・通知・scan/inbox へ入れない。人は PR リン�
 | コマンド | 役割 |
 |---|---|
 | `harness-config '<jq>' [既定値]` | `.claude/harness.json` を読む |
-| `harness-phase <n> <phase> [...]` | フェーズ遷移（人間ゲートは通知必須） |
+| `harness-phase <n> <phase> [...]` | フェーズ遷移（人間ゲートは通知必須）。stdout に `refreshBoundary` の JSON が出たら、次の工程を始めず issue-loop の「強制整理」の手順（保存 → `refresh_checkpoint` → ターンを終える）へ進む |
 | `harness-inbox` | 人間の返信・承認/差し戻し・通知の鮮度切れを JSON で拾う |
 | `harness-gate [dir]` | PR 前ゲート（CI と同じ検査を全部回して一覧。最後に `hooks.beforePR`） |
 | `harness-hook <phase> [--issue n] [--pr n] [--dir d]` | profile の `hooks.<phase>` を実行する |

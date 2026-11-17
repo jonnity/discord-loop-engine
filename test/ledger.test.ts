@@ -7,11 +7,12 @@
 // - ボードには「あなた待ち」「作業中」「次に着手」が出る
 import "./isolate.ts";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
 import { Ledger } from "../src/ledger.ts";
+import { checkNextText } from "../src/refresh.ts";
 
 const fresh = () =>
 	new Ledger(mkdtempSync(path.join(os.tmpdir(), "dle-ledger-")), () => new Date("2026-10-22T10:15:00"));
@@ -262,4 +263,57 @@ test("ボードの出力は変更前（origin/main）と同一: 置き換え済�
 		].join("\n"),
 	);
 	assert.equal(readFileSync(path.join(l.dir, "board.md"), "utf8"), `${l.renderBoard()}\n`);
+});
+
+test("T12: checkNextText が通す text は、実の台帳で往復して完全に一致し、経緯は増えた1行だけ", () => {
+	const texts = [
+		"a".repeat(4000),
+		"a\nb",
+		"- 項目\n- 項目2",
+		"a\n## 次にやること\nb",
+		"a\n---\nb",
+		"a\ud83d\ude00b",
+		"ASCII",
+	];
+	for (const text of texts) {
+		assert.deepEqual(checkNextText(text), { ok: true });
+		const l = fresh();
+		const t = l.createTask({ project: "p", title: "t", issue: "1", next: "前の指示" });
+		const before = l.task(t.id);
+		l.updateTask(t.id, { next: text }, "引継ぎ");
+		const after = l.task(t.id);
+		assert.equal(after?.next, text);
+		assert.equal(after?.history.length, (before?.history.length ?? 0) + 1);
+		assert.deepEqual(after?.history.slice(0, -1), before?.history);
+		assert.equal(after?.title, "t");
+		assert.equal(after?.status, before?.status);
+	}
+});
+
+test("T12: next が空のタスクは保存で「-」になり、読込で空文字に戻る（変更しない要素の expected に使える）", () => {
+	const l = fresh();
+	const t = l.createTask({ project: "p", title: "t" });
+	assert.equal(l.task(t.id)?.next, "");
+	assert.match(readFileSync(path.join(l.dir, "tasks", `${t.id}.md`), "utf8"), /## 次にやること\n-\n/);
+});
+
+test("phaseRefreshSeen は任意項目で、無い・旧形式の state.json を空として読み、壊れていれば投げて上書きしない", () => {
+	const l = fresh();
+	assert.deepEqual(l.strictPhaseSeen(), {});
+	l.saveState({ taskSeq: 3 });
+	assert.deepEqual(l.strictPhaseSeen(), {});
+	l.saveState({ phaseRefreshSeen: { p: { "7": { phase: "designing", sequence: 1, transitionId: "x" } } } });
+	assert.deepEqual(l.strictPhaseSeen(), { p: { "7": { phase: "designing", sequence: 1, transitionId: "x" } } });
+	assert.equal(l.state().taskSeq, 3, "旧項目は消えない");
+	const file = path.join(l.dir, "state.json");
+	for (const broken of [
+		"{",
+		"[]",
+		'{"phaseRefreshSeen":[]}',
+		'{"phaseRefreshSeen":{"p":{"7":{"phase":1,"sequence":1}}}}',
+	]) {
+		writeFileSync(file, broken);
+		assert.throws(() => l.strictPhaseSeen(), Error, broken);
+		assert.equal(readFileSync(file, "utf8"), broken, "読むだけでは書き換えない");
+	}
 });

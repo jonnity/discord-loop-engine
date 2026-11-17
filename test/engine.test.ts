@@ -1495,7 +1495,7 @@ test("公開 schema: 全ツールの引数・役割を共有し、CLI 専用ツ�
 		{
 			env: { DLE_ROLE: "worker", DLE_PROJECT: "worker" },
 			names:
-				"tasks_list task_get attention_list board_show profile_propose profile_template profile_get profile_activate report learning_add rules_get",
+				"tasks_list task_get attention_list board_show profile_propose profile_template profile_get profile_activate report learning_add rules_get refresh_checkpoint",
 		},
 		{ env: {}, names: "" },
 	];

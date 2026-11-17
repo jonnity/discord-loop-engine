@@ -1688,3 +1688,37 @@ test("窓口スキルは返信だけの回答と、返信先と本文の A の�
 		/`meta\.attention_conflict=1`[\s\S]{0,200}`meta\.reply_attention`[\s\S]{0,100}`meta\.text_attention`[\s\S]{0,200}`attention_answer` しない/,
 	);
 });
+
+// 強制整理（#61）の手順書。実 worker の挙動はここでは証明できない（実 Claude の確認は人の確認）ので、規則の文言の存在と整合を見る
+test("T3/T12: issue-loop の手順書に handoff の検証規則と expected/text の書き方があり、安全柵を弱めていない", () => {
+	const handoff = section(loopSkill, "## `.harness/handoff.md`", "## 強制整理");
+	assert.match(handoff, /必須は `## loop_meta` の1節だけ/);
+	assert.match(handoff, /見出しだけは出す/);
+	assert.match(handoff, /空の節は見出し行のみ/);
+	assert.match(handoff, /2回以上あれば不正/);
+	assert.match(handoff, /loop_meta だけの handoff でも、任意の3節は空として読む/);
+	const force = section(loopSkill, "## 強制整理", "## 終了条件");
+	for (const word of [
+		"refreshBoundary",
+		"refresh_checkpoint",
+		"`{task_id, expected, text}`",
+		"`expected` には読んだ現在値をそのまま",
+		"`text` を `expected` と同じ値にして返す",
+		"前後に空白・改行が無い",
+		"`## 経緯` を含まない",
+		"4000文字以内",
+		"以後ツールを使わずにそのターンを終える",
+		"次の Codex・レビュー・CI 操作を始めない",
+		"Agent 側では次の工程を始めない",
+		"GitHub の状態が正本",
+		"`reason` が何であっても",
+		"必ず `phase-expired` になる",
+	])
+		assert.ok(force.includes(word), word);
+	// 拒否のたびに ticket が破棄されるので、再送を促す文言を置かない
+	assert.doesNotMatch(force, /作り直す|作り直して|1回だけ/);
+	// 強制整理の手順でも、clear を worker 自身が実行しない・人のマージ承認を飛ばさない
+	assert.doesNotMatch(force, /\/clear を実行|CronCreate\(.*clear/);
+	assert.match(loopSkill, /コンテキストの `\/clear` は engine が行う。cron による自己 clear・自己 resume は予約しない/);
+	assert.match(skill, /refreshBoundary/);
+});

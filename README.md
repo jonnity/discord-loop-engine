@@ -312,7 +312,7 @@ A の取下げは保証しません。架空回答・台帳直接編集で取り
 tick ごとに無条件でコメント・通知・A を増やしません。長い変換は呼出し側 timeout を延長します。
 SIGKILL/親の無信号終了では trap の回収保証はありません。
 
-更新時は engine・plugin・CLI・worker を揃えて再起動します。protocol は2を維持し既存の先頭 message_id/A 出力は互換です。
+更新時は engine・plugin・CLI・worker を揃えて再起動します。protocol は3です（notify の引数と結果、worker 用の `refresh_checkpoint` を足したため。2の接続元は hello で拒否される）。既存の先頭 message_id/A 出力は互換です。
 旧 engine の不完全 receipt を成功扱いしません。認証 login を変えた場合は新 login で再依頼します。
 
 | 受け入れ条件 | 自動確認 | 人の確認 |
@@ -1024,7 +1024,8 @@ RUNNER_REMOVE
 | `allowedUserIds` | — | 発言を受け取る人（あなただけにする） |
 | `concierge.model` | `sonnet` | 窓口のモデル |
 | `concierge.refresh` | 有効 / 150k / 40 件 / 残り15% | `enabled`・`maxTokens`・`maxEvents`・`contextPercent`。文脈量または件数が閾値に達したら engine が待機中に `/clear` し、`concierge refresh` で挨拶を出さず再開。`enabled: false` で無効。旧形式の `maxEvents: 0` だけでも全無効を維持。件数だけ無効にするには `enabled: true, maxEvents: 0` |
-| `worker.refresh` | 有効 / 150k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
+| `worker.refresh` | 有効 / 150k / 強制250k / 残り15% / 180秒 / 30分 | `enabled`・`maxTokens`・`forceMaxTokens`・`contextPercent`・`idleSeconds`・`cooldownMinutes`。ready な harness worker のみ対象。待機が続いたら `/clear` し、`worker.initialPrompt`（既定 `/discord-loop-engine:issue-loop`）で再開する。native と onboard 中は対象外 |
+| `worker.refresh.forceMaxTokens` | 250000 | harness-phase の遷移直後の強制整理の閾値（下記「phase 遷移直後の強制整理」）。0 以上の整数で、`0` は強制だけ無効（idle の整理は残る）。`enabled: false` は idle・強制の両方を止める。負数・文字列・小数など不正な明示値は設定エラー（黙って既定に戻さない）。窓口には無い |
 | `worker.refresh.codexIgnoreAfterMinutes` | 120 | 同じプロジェクト配下の Codex 窓がある間は待つ。engine が窓を観測してからこの分数残り続けたら無視する |
 | `worker.wake` | `{ "enabled": true }` | `enabled`。idle の worker を engine が起こす（下記）。`false` で無効 |
 | `worker.limit` | `enabled: true` / `tailLines: 12` / `wakeIntervalMinutes: 30` / `wakeMaxAttempts: 5` | `enabled`・`patterns`・`resetPatterns`・`tailLines`・`wakeIntervalMinutes`（正の数）・`wakeMaxAttempts`（0 以上の整数。0 は自動で起こさない）。使用量の上限の表示を画面から探し、止まった worker を固定間隔で起こし直す（下記）。`patterns` は行頭アンカー `^` 付きの正規表現（大文字小文字を区別しない）で、既定は暫定 |
@@ -1055,7 +1056,29 @@ idle 整理の token 既定値は worker・窓口とも150,000（150k、k=1000�
 窓口の40件条件と、token 不明時の残り15%判定は引き続き独立して働く。
 既定変更を避ける場合は本人が両方の `refresh.maxTokens: 100000` を明示し、通常の更新手順で反映する。
 更新・再起動と戻し操作は本人が安全な時機に行い、実効値を coverage と稼働版で確認する。
-phase 遷移からの強制整理や強制用の設定キーは提供しない。
+
+### phase 遷移直後の強制整理
+
+idle 整理（上記）は worker が待機に入らないと動かない。harness worker が `harness-phase` で実際にフェーズを変えた直後は、
+その遷移に結び付いた1回の機会として、文脈量が `worker.refresh.forceMaxTokens`（既定250,000。k=1000）を**超えて**いれば
+（ちょうど250,000は対象外。idle の150k は「以上」）、引継ぎを保存させてから既存の `/clear` と再開の処理（idle と同じ実行部分）へ渡す。
+窓口は対象外（idle だけ）。
+
+- 流れ: `harness-phase` が `from_phase`（遷移前のフェーズ。ラベルのうち既知のフェーズ名だけで一意なとき）と呼出しごとの UUID を
+  engine へ報告 → engine が前回の記録と繋がる実遷移か、超過か、除外条件が無いかを確認 → ticket（60秒）があるときだけ stdout に
+  `refreshBoundary` の JSON を1行出す → worker が `.harness/handoff.md` と全 Task の `next` を保存して `refresh_checkpoint` を呼び、
+  応答（`accepted`）を受けたらツールを使わずターンを終える → engine が最大30秒の間に停止点（session idle・入力欄が空・
+  checkpoint 以後に次の作業が無い）を確認できたときだけ `/clear` と再開プロンプトを送る
+- 除外（clear しない）: Codex 実行中（tmux の live な pane。120分を超えても除外）・CI 待ち（open な PR に進行中の checks がある、
+  または読めない）・人の回答待ち（Task の status/phase/waiting と open な Attention。project 全体）・入力中/応答中/状態不明・
+  使用上限中・wake 送信中。判定できないときは整理しない側に倒す。失敗した機会は再試行せず、待っていた worker は既存の起こしで再開する
+- 引継ぎの保全: `refresh_checkpoint` は handoff の hash と bytes、`## loop_meta` の存在（他の3見出しは任意）、各 Task の
+  `expected`（worker が読んだ現在の `next`）と現在値の一致を確かめる。窓口が先に書いた指示は上書きせず、一致しなければ何も書かない
+- 診断: `DLE_HOME/refresh/decisions` に `trigger: "phase"`・`thresholdTokens` つきで1機会につき1行。`trigger` の無い旧行は idle として読む。
+  next・handoff の本文・hash・パス・ticket は保存しない
+- 配布: engine・plugin・CLI・worker の版を揃える必要がある（protocol 3）。更新・再起動は本人が安全な時機に行う。
+  強制だけを止めるには `worker.refresh.forceMaxTokens: 0`。idle の観測（3日）と前後7日の cache read 比較は、実装・マージを待たせない並行の運用確認
+
 
 idle の worker を engine が起こす。worker は idle だと次の心拍か人の入力まで Discord の回答や dispatch を読まないので、
 engine が A-番号の回答・dispatch・`harness:queued` の追加（60 秒ごとに `gh issue list`）・保留分の払い出し・再接続を検知したら、
@@ -1481,7 +1504,7 @@ SIGKILL・マシン停止後は、使用した TMPDIR の一時領域と残る�
 | DLE_HOME の兄弟配置で Bot 用 .env を祖先から外す | `test/worktrees.test.ts` W1/W2 | symlink・他の祖先の .env |
 | WT 内でも main 設定/.env、実行 cwd は WT | `tests/harness/worktrees.sh` W8、config/gate/notify | 各 notify.envFiles・秘密ファイル |
 | 信号時は trap 回収と128+nに限定 | `test/harness-gate.test.ts` G6（各信号3回） | SIGKILL、子孫、回収の遅延 |
-| engine/channel の通信形式・必須項目を維持 | `test/engine.test.ts`、PROTOCOL_VERSION=2 | plugin 更新と実 engine/worker 再起動後の確認 |
+| engine/channel の通信形式・必須項目を維持 | `test/engine.test.ts`、PROTOCOL_VERSION=3（`test/refresh-phase.test.ts`） | plugin 更新と実 engine/worker 再起動後の確認 |
 
 ### 設計品質チェックリストとレビュー
 

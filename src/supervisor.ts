@@ -4,9 +4,16 @@
 
 import { execFile } from "node:child_process";
 import path from "node:path";
-import { type ClaudeSession, type ContextInspection, contextReader, type TranscriptContext } from "./context.ts";
+import { DEFAULT_FORCE_MAX_TOKENS } from "./config.ts";
+import {
+	type BoundaryActivity,
+	type ClaudeSession,
+	type ContextInspection,
+	contextReader,
+	type TranscriptContext,
+} from "./context.ts";
 import { DEFAULT_WORKER_LIMIT, detectLimit, type WorkerLimit } from "./limit.ts";
-import { pressure, type RefreshDecision, type RefreshPressure, type RefreshReason } from "./refresh.ts";
+import { forcePressure, pressure, type RefreshDecision, type RefreshPressure, type RefreshReason } from "./refresh.ts";
 
 import { strictEmptyPrompt as emptyPrompt, inspectPrompt, type PromptEvidence } from "./refresh-prompt.ts";
 
@@ -54,6 +61,8 @@ export interface RefreshTarget {
 	worktreeRoot?: string;
 	prompt: string;
 	maxTokens: number;
+	/** harness-phase の遷移直後の強制整理の閾値。0 で無効。窓口には付けない（付いていても窓口は強制しない） */
+	forceMaxTokens?: number;
 	maxEvents: number;
 	contextPercent: number;
 	idleSeconds: number;
@@ -119,15 +128,63 @@ function screenContext(pane: string): { tokens: number | null; left: number | nu
 	};
 }
 
-export type Tmux = (args: string[]) => Promise<{ ok: boolean; stdout: string; stderr?: string }>;
+/** 強制整理の読取だけが期限と中断を渡す。既存の呼出し（引数1つ）の挙動は変えない */
+export interface TmuxOptions {
+	timeoutMs?: number;
+	signal?: AbortSignal;
+}
+
+export type Tmux = (args: string[], opts?: TmuxOptions) => Promise<{ ok: boolean; stdout: string; stderr?: string }>;
 
 export function tmuxRunner(timeoutMs?: number): Tmux {
-	return (args) =>
+	return (args, opts) =>
 		new Promise((resolve) => {
-			execFile("tmux", args, { timeout: timeoutMs, killSignal: "SIGKILL" }, (err, stdout, stderr) =>
-				resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
+			execFile(
+				"tmux",
+				args,
+				{
+					timeout: opts?.timeoutMs ?? timeoutMs,
+					killSignal: "SIGKILL",
+					...(opts?.signal ? { signal: opts.signal } : {}),
+				},
+				(err, stdout, stderr) => resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
 			);
 		});
+}
+
+/** 強制整理が実際に見る Codex 窓の一覧。window_id・名前・pane_id・pane_dead・cwd・wrapper が付ける @dle_wt */
+const CODEX_PANE_FORMAT = "#{window_id}\t#{window_name}\t#{pane_id}\t#{pane_dead}\t#{pane_current_path}\t#{@dle_wt}";
+
+export type RefreshWaitState = "clear" | "busy" | "unknown";
+
+/**
+ * 強制整理の Codex 判定（純関数）。idle の判定（120分で無視）と違い、時間では除外を解かない。
+ * live な pane が1つでも登録 main / worktreeRoot 配下（cwd か @dle_wt）にあれば busy。
+ * pane_dead=1 だけなら実行中ではない。行が壊れていれば unknown。
+ * Why not harness-codex-status: 「none」が列挙失敗と不在を分けられないので、許可の証拠にできない。
+ */
+export function classifyCodexPanes(stdout: string, roots: string[]): RefreshWaitState {
+	let busy = false;
+	let unknown = false;
+	for (const line of stdout.split("\n")) {
+		if (line === "") continue;
+		const f = line.split("\t");
+		if (f.length !== 6 || !f[0] || !f[1] || !f[2] || (f[3] !== "0" && f[3] !== "1") || !f[4]) {
+			unknown = true;
+			continue;
+		}
+		const cwd = f[4];
+		const wt = f[5] ?? "";
+		const owned = roots.some((root) => withinDirectory(root, cwd) || (wt !== "" && withinDirectory(root, wt)));
+		if (!owned || f[3] !== "0") continue;
+		if (/^codex-(spec|impl)-/.test(f[1])) busy = true;
+		// supervisor 自身の窓（dle-*）は Codex ではない。それ以外で登録 root 配下の live な窓は、
+		// 手動改名された Codex かもしれないので所属不明として見送る（@dle_wt が root 配下のときだけ。名前だけで clear にしない）
+		// cwd が root 配下なだけ（@dle_wt 無し）の shell・エディタ・engine 窓は無関係（harness-codex は必ず @dle_wt を付ける）
+		else if (wt !== "" && !f[1].startsWith("dle-") && roots.some((root) => withinDirectory(root, wt))) unknown = true;
+	}
+	if (busy) return "busy";
+	return unknown ? "unknown" : "clear";
 }
 
 export interface SessionTarget {
@@ -182,6 +239,42 @@ interface SlotState {
 	limitGaveUp: boolean;
 }
 
+/** engine が発行する、harness-phase の遷移1回に結び付いた整理の機会（メモリだけ。再起動後に復活させない） */
+export interface PhaseBoundary {
+	id: string;
+	project: string;
+	issue: string;
+	phase: string;
+	sequence: number;
+	pid: string;
+	sessionId: string;
+	requestedAt: number;
+	expiresAt: number;
+	generation: number;
+}
+
+/** 強制整理の最終確認。signal は shutdown と絶対期限の両方で abort される（I/O を含めて期限を守る） */
+export type PhaseFinalCheck = (signal: AbortSignal) => Promise<RefreshReason | null>;
+
+export type PhaseProbe =
+	| { ok: true; pid: string; sessionId: string; pressure: RefreshPressure; codex: RefreshWaitState }
+	| { ok: false; reason: RefreshReason };
+
+export interface PhaseRefreshOutcome {
+	success: boolean;
+	reason: RefreshReason;
+}
+
+type PhaseStep =
+	| { kind: "wait" }
+	| { kind: "abort"; reason: RefreshReason }
+	| { kind: "go"; pid: string; sessionId: string; pane: string; tokens: number | null };
+
+/** 強制整理の安全確認の上限回数（100ms 刻みで最大 30 秒） */
+const PHASE_MAX_POLLS = 300;
+/** 強制整理の読取1回の上限 */
+const PHASE_READ_TIMEOUT_MS = 2000;
+
 interface RefreshDecisionContext {
 	prompt?: PromptEvidence;
 	session?: string;
@@ -215,6 +308,11 @@ export interface SupervisorOptions {
 	onRefreshDecision?: (decision: RefreshDecision) => void;
 	refreshObservationTimeoutMs?: number;
 	diagnosticTmux?: Tmux;
+	readBoundaryActivity?: (session: ClaudeSession, boundaryId: string) => Promise<BoundaryActivity>;
+	/** 強制整理の安全確認の間隔（ms）・静止確認の待ち（ms）・arm からの絶対期限（ms）。試験で縮める */
+	phasePollMs?: number;
+	phaseQuietMs?: number;
+	phaseDeadlineMs?: number;
 	inspectSession?: (pid: string) => Promise<ContextInspection<ClaudeSession>>;
 	inspectTranscript?: (session: ClaudeSession) => Promise<ContextInspection<TranscriptContext>>;
 	readSession?: (pid: string) => Promise<ClaudeSession | null>;
@@ -246,6 +344,9 @@ export class Supervisor {
 	private observationLastAt = new Map<string, number>();
 	private observing = new Set<string>();
 	private diagnosticJobs = new Set<Promise<void>>();
+	/** 強制整理を待機中の project。通常 tick の maybeRefresh・wake はこの間だけ見送る */
+	private phaseArmed = new Set<string>();
+	private phaseController = new AbortController();
 	private o: Required<SupervisorOptions>;
 	private state = new Map<string, SlotState>();
 	private startedAt: number;
@@ -278,6 +379,9 @@ export class Supervisor {
 			wakeQuietMs: 10_000,
 			wakeMinIntervalMs: 60_000,
 			wakeVerifyMs: 3000,
+			phasePollMs: 100,
+			phaseQuietMs: 1000,
+			phaseDeadlineMs: 30_000,
 			activity: () => ({ events: 0, lastAt: 0 }),
 			onRefresh: () => {},
 			onLimit: () => {},
@@ -694,8 +798,8 @@ export class Supervisor {
 		}
 	}
 
-	private async capture(name: string): Promise<string | null> {
-		const r = await this.o.tmux(["capture-pane", "-p", "-t", this.target(name)]);
+	private async capture(name: string, tmux: Tmux = this.o.tmux): Promise<string | null> {
+		const r = await tmux(["capture-pane", "-p", "-t", this.target(name)]);
 		return r.ok ? r.stdout : null;
 	}
 
@@ -724,7 +828,13 @@ export class Supervisor {
 			const now = this.o.now();
 			// 最小間隔は成功した送信どうしだけに効かせる。失敗は lastSentAt を更新しないので再試行を止めない
 			if (!w.enterOnly && w.lastSentAt !== null && now - w.lastSentAt < this.o.wakeMinIntervalMs) return;
-			const blocked = () => !exists || !this.o.isLive(t.name) || s.refreshing || s.needsPrompt || s.promptPending;
+			const blocked = () =>
+				!exists ||
+				!this.o.isLive(t.name) ||
+				s.refreshing ||
+				this.phaseArmed.has(t.name) ||
+				s.needsPrompt ||
+				s.promptPending;
 			if (blocked()) return;
 			const typed = w.enterOnly ? WAKE_PROMPT : undefined;
 			const first = await this.capture(t.name);
@@ -799,8 +909,9 @@ export class Supervisor {
 	private async session(
 		name: string,
 		diagnostic?: RefreshDecision,
+		tmux?: Tmux,
 	): Promise<{ pid: string; session: ClaudeSession } | null> {
-		const r = await (diagnostic ? this.o.diagnosticTmux : this.o.tmux)([
+		const r = await (tmux ?? (diagnostic ? this.o.diagnosticTmux : this.o.tmux))([
 			"display-message",
 			"-p",
 			"-t",
@@ -1075,7 +1186,7 @@ export class Supervisor {
 			if (!r) return skip("refresh-disabled");
 			const now = this.o.now();
 			const idleMs = r.idleSeconds * 1000;
-			if (s.refreshing) return skip("refreshing");
+			if (s.refreshing || this.phaseArmed.has(t.name)) return skip("refreshing");
 			if (s.wake.sending) return skip("wake-sending");
 			// 上限中に /clear すると上限の行が画面から消え、解除と誤認して通知が増える。上限中は整理しても進まない
 			if (this.o.limit.wakeMaxAttempts > 0 && s.limited) return skip("limited");
@@ -1146,37 +1257,314 @@ export class Supervisor {
 			if (this.o.now() - this.o.activity(t.name).lastAt < idleMs) return skip("activity-race");
 			// 上の await の間に wakeTick が送信を始めていたら見送る。ここから refreshing を立てるまでは同期（check-and-set）。
 			if (s.wake.sending) return skip("wake-race");
-			s.refreshing = true;
-			let result: RefreshResult = { success: false, reason: "clear の成功を確認できませんでした" };
-			this.o.onRefresh(t.name, "start");
-			try {
-				const clear = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", "/clear"]);
-				if (!clear.ok) throw new Error("/clear を入力できませんでした");
-				const enter = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
-				if (!enter.ok) throw new Error("/clear を送信できませんでした");
-				const next = await this.confirmClear(t.name, current.pid, current.session.sessionId, pane.stdout);
-				if (!next) return;
-				s.transitionSession = next.sessionId;
-				s.unknownSession = null;
-				await this.o.wait(this.o.promptDelayMs);
-				const prompt = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", r.prompt]);
-				if (!prompt.ok) throw new Error("再開プロンプトを入力できませんでした");
-				const resumed = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
-				if (!resumed.ok) throw new Error("再開プロンプトを送信できませんでした");
-				result = { success: true, reason };
-			} catch (error) {
-				result = { success: false, reason: error instanceof Error ? error.message : String(error) };
-			} finally {
-				s.lastRefreshAt = this.o.now();
-				s.refreshing = false;
-				this.o.log(`supervisor: ${t.name} のコンテキスト整理${result.success ? "完了" : "失敗"}（${result.reason}）`);
-				this.o.onRefresh(t.name, "done", result);
-				outcome = result.success;
-				primary = result.success ? "refresh-success" : "refresh-failed";
-			}
+			if (this.phaseArmed.has(t.name)) return skip("refreshing");
+			const result = await this.performRefresh(t, s, r, current.pid, current.session.sessionId, pane.stdout, reason);
+			outcome = result.success;
+			primary = result.success ? "refresh-success" : "refresh-failed";
 		} finally {
 			finish?.(primary, outcome, detail);
 		}
+	}
+
+	/**
+	 * /clear → 確認 → 再開プロンプトの実行部分。idle と強制整理が共用する。
+	 * 呼ぶ側は最後の await から呼ぶまでの間に await を挟まない（refreshing の check-and-set をここで行うため）。
+	 * 送る文字は定数と設定（r.prompt）だけで、Issue・next・handoff の本文は入れない。
+	 */
+	private async performRefresh(
+		t: SessionTarget,
+		s: SlotState,
+		r: RefreshTarget,
+		pid: string,
+		oldSession: string,
+		before: string,
+		reason: string,
+	): Promise<RefreshResult> {
+		s.refreshing = true;
+		let result: RefreshResult = { success: false, reason: "clear の成功を確認できませんでした" };
+		this.o.onRefresh(t.name, "start");
+		try {
+			const clear = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", "/clear"]);
+			if (!clear.ok) throw new Error("/clear を入力できませんでした");
+			const enter = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			if (!enter.ok) throw new Error("/clear を送信できませんでした");
+			const next = await this.confirmClear(t.name, pid, oldSession, before);
+			if (!next) return result;
+			s.transitionSession = next.sessionId;
+			s.unknownSession = null;
+			await this.o.wait(this.o.promptDelayMs);
+			const prompt = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", r.prompt]);
+			if (!prompt.ok) throw new Error("再開プロンプトを入力できませんでした");
+			const resumed = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			if (!resumed.ok) throw new Error("再開プロンプトを送信できませんでした");
+			result = { success: true, reason };
+		} catch (error) {
+			result = { success: false, reason: error instanceof Error ? error.message : String(error) };
+		} finally {
+			s.lastRefreshAt = this.o.now();
+			s.refreshing = false;
+			this.o.log(`supervisor: ${t.name} のコンテキスト整理${result.success ? "完了" : "失敗"}（${result.reason}）`);
+			this.o.onRefresh(t.name, "done", result);
+		}
+		return result;
+	}
+
+	// --- harness-phase の遷移直後の強制整理 -------------------------------------------------------
+
+	private forceLimit(t: SessionTarget | undefined): number {
+		// 窓口は idle だけ。target に値が無い（旧い型付きリテラル）worker は既定を使う
+		if (!t || t.name === "concierge" || !t.refresh) return 0;
+		return t.refresh.forceMaxTokens ?? DEFAULT_FORCE_MAX_TOKENS;
+	}
+
+	private phaseTmux(): Tmux {
+		const signal = this.phaseController.signal;
+		return (args) => this.o.tmux(args, { timeoutMs: PHASE_READ_TIMEOUT_MS, signal });
+	}
+
+	private async codexState(t: SessionTarget): Promise<RefreshWaitState> {
+		const r = t.refresh;
+		if (!r) return "unknown";
+		const list = await this.phaseTmux()(["list-panes", "-a", "-F", CODEX_PANE_FORMAT]);
+		if (!list.ok) return "unknown";
+		return classifyCodexPanes(list.stdout, [r.cwd, ...(r.worktreeRoot ? [r.worktreeRoot] : [])]);
+	}
+
+	/**
+	 * 遷移の通知を受けた時点の、強制整理の候補確認（engine が呼ぶ）。worker はまだ作業中なので idle は求めない。
+	 * 量は実判定と同じ forcePressure で、割合・件数からは換算しない。
+	 */
+	async phaseProbe(name: string): Promise<PhaseProbe> {
+		const t = this.o.targets().find((x) => x.name === name);
+		const limit = this.forceLimit(t);
+		const r = t?.refresh;
+		if (!t || t.startupError || !r || limit <= 0) return { ok: false, reason: "refresh-disabled" };
+		const s = this.st(name);
+		if (s.refreshing || this.phaseArmed.has(name)) return { ok: false, reason: "refreshing" };
+		if (s.wake.sending) return { ok: false, reason: "wake-sending" };
+		if (this.o.limit.wakeMaxAttempts > 0 && s.limited) return { ok: false, reason: "limited" };
+		const tmux = this.phaseTmux();
+		const current = await this.session(name, undefined, tmux);
+		if (!current) return { ok: false, reason: "session-unknown" };
+		if (path.resolve(current.session.cwd) !== path.resolve(r.cwd)) return { ok: false, reason: "cwd-mismatch" };
+		const transcript = await this.o.readTranscript(current.session);
+		if (!transcript) return { ok: false, reason: "transcript-unknown" };
+		const pane = await this.capture(name, tmux);
+		const screen = pane === null ? null : screenContext(pane).tokens;
+		return {
+			ok: true,
+			pid: current.pid,
+			sessionId: current.session.sessionId,
+			pressure: forcePressure(limit, transcript.tokens, screen),
+			codex: await this.codexState(t),
+		};
+	}
+
+	/** 強制整理の判定を診断に1行だけ残す。可否には使わない。同じ phase の機会につき1回だけ呼ぶこと */
+	recordPhaseDecision(
+		project: string,
+		reason: RefreshReason,
+		extra: { session?: string | null; pressure?: RefreshPressure; result?: boolean; blockers?: RefreshReason[] } = {},
+	) {
+		if (!this.diagnosticsEnabled) return;
+		const t = this.o.targets().find((x) => x.name === project);
+		try {
+			this.o.onRefreshDecision({
+				project,
+				session: extra.session ?? null,
+				at: this.o.now(),
+				tokens: extra.pressure?.tokens ?? null,
+				source: extra.pressure?.source ?? "unknown",
+				remainingPercent: null,
+				overThreshold: extra.pressure?.overThreshold ?? null,
+				primaryReason: reason,
+				blockers: extra.blockers ?? (reason.startsWith("refresh-") || reason === "below-threshold" ? [] : [reason]),
+				notObserved: [],
+				trigger: "phase",
+				thresholdTokens: this.forceLimit(t),
+				...(extra.result !== undefined ? { result: extra.result } : {}),
+			});
+		} catch {
+			/* 診断先の障害で整理を止めない */
+		}
+	}
+
+	/** shutdown 用。待機中の強制整理を止め、所有する tmux 読取子を終了させる */
+	cancelPhaseRefreshes() {
+		this.phaseController.abort();
+		this.phaseController = new AbortController();
+	}
+
+	/**
+	 * checkpoint を受理した後、worker が次の作業を始めずにターンを終える（session が idle になる）のを最大 30 秒待ち、
+	 * 安全が確認できたときだけ共通の performRefresh へ渡す。成立しなければ破棄して、既存の wake で worker を起こす。
+	 * 失敗した機会は再試行しない。finalCheck は engine 側の最新状態（人待ち・CI・Task・世代）の再確認。
+	 */
+	requestPhaseRefresh(b: PhaseBoundary, finalCheck: PhaseFinalCheck): Promise<PhaseRefreshOutcome> {
+		const name = b.project;
+		if (this.phaseArmed.has(name)) return Promise.resolve({ success: false, reason: "phase-superseded" });
+		this.phaseArmed.add(name);
+		const controller = this.phaseController;
+		return this.runPhaseRefresh(b, finalCheck, controller.signal).finally(() => this.phaseArmed.delete(name));
+	}
+
+	private async runPhaseRefresh(
+		b: PhaseBoundary,
+		finalCheck: PhaseFinalCheck,
+		signal: AbortSignal,
+	): Promise<PhaseRefreshOutcome> {
+		const name = b.project;
+		const t0 = this.o.targets().find((x) => x.name === name);
+		const s = this.st(name);
+		const deadline = this.o.now() + this.o.phaseDeadlineMs;
+		// checkpoint を受理した時刻。subagent の更新がこれより後にあれば、worker は Agent を動かし続けている。
+		// ticket の発行時刻にしないのは、Agent 内の harness-phase の後に tool_result・最終応答が必ず書かれるため
+		const acceptedAt = this.o.now();
+		// 絶対期限は I/O（tmux・gh）にも効かせる。ループの周回判定だけだと I/O 1回ぶん超過する
+		const io = AbortSignal.any([signal, AbortSignal.timeout(this.o.phaseDeadlineMs)]);
+		const a0 = this.o.activity(name);
+		let reason: RefreshReason = "phase-expired";
+		let step: PhaseStep = { kind: "wait" };
+		try {
+			for (let i = 0; i <= PHASE_MAX_POLLS; i++) {
+				if (signal.aborted) {
+					reason = "phase-superseded";
+					break;
+				}
+				if (this.o.now() >= deadline) break;
+				if (i > 0) await this.o.wait(this.o.phasePollMs);
+				step = await this.phaseStep(b, s, a0, finalCheck, io, acceptedAt);
+				if (signal.aborted) {
+					reason = "phase-superseded";
+					step = { kind: "wait" };
+					break;
+				}
+				if (io.aborted) {
+					reason = "phase-expired";
+					step = { kind: "wait" };
+					break;
+				}
+				if (step.kind === "wait") continue;
+				if (step.kind === "abort") reason = step.reason;
+				break;
+			}
+		} catch {
+			reason = "decision-unknown";
+			step = { kind: "abort", reason };
+		}
+		const limit = this.forceLimit(this.o.targets().find((x) => x.name === name) ?? t0);
+		if (step.kind === "go") {
+			const r = this.o.targets().find((x) => x.name === name)?.refresh;
+			if (r) {
+				const result = await this.performRefresh(
+					this.o.targets().find((x) => x.name === name) as SessionTarget,
+					s,
+					r,
+					step.pid,
+					step.sessionId,
+					step.pane,
+					`文脈 ${(step.tokens ?? 0) / 1000}k（強制閾値 ${limit / 1000}k・${b.phase} の直後）`,
+				);
+				const done: RefreshReason = result.success ? "refresh-success" : "refresh-failed";
+				this.recordPhaseDecision(name, done, {
+					session: step.sessionId,
+					pressure: forcePressure(limit, step.tokens, null),
+					result: result.success,
+				});
+				return { success: result.success, reason: done };
+			}
+			reason = "refresh-disabled";
+		}
+		// 待ち続けた worker を放置しない。成立しなかった機会は破棄し、再試行は既存の wake に任せる
+		this.recordPhaseDecision(name, reason, { session: b.sessionId });
+		// 停止中（cancelPhaseRefreshes 後）は worker を起こさない。engine がソケットを閉じる前に wake が通るのを防ぐ
+		if (signal.aborted) return { success: false, reason };
+		// armed のままだと maybeWake が見送ってしまうので、起こしを積む前に解く
+		this.phaseArmed.delete(name);
+		this.requestWake(name, "phase-refresh-skipped");
+		this.wakeTick().catch(() => {});
+		return { success: false, reason };
+	}
+
+	/** 1回の安全確認。wait は「まだ停止点でない」だけで、abort は成立しないと確定したとき */
+	private async phaseStep(
+		b: PhaseBoundary,
+		s: SlotState,
+		a0: { events: number; lastAt: number },
+		finalCheck: PhaseFinalCheck,
+		signal: AbortSignal,
+		acceptedAt: number,
+	): Promise<PhaseStep> {
+		const abort = (reason: RefreshReason): PhaseStep => ({ kind: "abort", reason });
+		const name = b.project;
+		const t = this.o.targets().find((x) => x.name === name);
+		const r = t?.refresh;
+		const limit = this.forceLimit(t);
+		if (!t || t.startupError || !r || limit <= 0) return abort("refresh-disabled");
+		if (s.refreshing) return abort("refreshing");
+		if (s.wake.sending) return abort("wake-race");
+		if (this.o.limit.wakeMaxAttempts > 0 && s.limited) return abort("limited");
+		if (!this.o.isLive(name)) return abort("channel-offline");
+		const sameActivity = () => {
+			const a = this.o.activity(name);
+			return a.events === a0.events && a.lastAt === a0.lastAt;
+		};
+		if (!sameActivity()) return abort("activity-race");
+		const tmux: Tmux = (args) => this.o.tmux(args, { timeoutMs: PHASE_READ_TIMEOUT_MS, signal });
+		const current = await this.session(name, undefined, tmux);
+		if (!current || current.pid !== b.pid || current.session.sessionId !== b.sessionId) return abort("session-unknown");
+		if (path.resolve(current.session.cwd) !== path.resolve(r.cwd)) return abort("cwd-mismatch");
+		if (current.session.status !== "idle") return { kind: "wait" };
+		const activity = await this.o.readBoundaryActivity(current.session, b.id);
+		if (activity === "waiting") return { kind: "wait" };
+		if (activity === "unknown") return abort("transcript-unknown");
+		if (activity === "active") return abort("worker-active");
+		const pane = await this.capture(name, tmux);
+		if (pane === null) return abort("capture-unknown");
+		if (pane.includes(WORKING_MARK)) return { kind: "wait" };
+		if (PERMISSION_PROMPTS.some((p) => pane.includes(p)) || pane.includes(DEV_CHANNEL_PROMPT))
+			return abort("permission-prompt");
+		if (inspectPrompt(pane).state !== "empty") return abort("input-not-empty");
+		const first = await this.o.readTranscript(current.session);
+		if (!first) return abort("transcript-unknown");
+		if (first.subagentMtimeMs >= acceptedAt) return abort("subagent-recent");
+		await this.o.wait(this.o.phaseQuietMs);
+		const second = await this.o.readTranscript(current.session);
+		if (!second) return abort("transcript-unknown");
+		// 1秒の間に書込みがあった（最後の応答の書込み途中など）。次の確認でもう一度見る
+		if (first.mtimeMs !== second.mtimeMs || first.subagentMtimeMs !== second.subagentMtimeMs) return { kind: "wait" };
+		const codex = await this.codexState(t);
+		if (codex === "busy") return abort("codex-busy");
+		if (codex === "unknown") return abort("codex-unknown");
+		const screen = screenContext(pane).tokens;
+		const pressureNow = forcePressure(limit, second.tokens, screen);
+		if (pressureNow.overThreshold === null) return abort("context-unknown");
+		if (pressureNow.overThreshold !== true) return abort("below-threshold");
+		const gate = await finalCheck(signal);
+		if (gate) return abort(gate);
+		// 送信直前の再確認（別 session への切替や直接入力も拒否する）
+		const latest = await this.session(name, undefined, tmux);
+		if (!latest || latest.pid !== current.pid || latest.session.sessionId !== current.session.sessionId)
+			return abort("session-unknown");
+		if (latest.session.status !== "idle") return abort("session-busy");
+		if (path.resolve(latest.session.cwd) !== path.resolve(r.cwd)) return abort("cwd-mismatch");
+		const finalPane = await this.capture(name, tmux);
+		if (finalPane === null) return abort("capture-unknown");
+		if (finalPane.includes(WORKING_MARK)) return abort("screen-working");
+		if (PERMISSION_PROMPTS.some((p) => finalPane.includes(p))) return abort("permission-prompt");
+		if (inspectPrompt(finalPane).state !== "empty" || finalPane !== pane) return abort("input-not-empty");
+		if (!sameActivity()) return abort("activity-race");
+		if (signal.aborted) return abort("phase-superseded");
+		// ここから performRefresh の refreshing 確定までは await を挟まない
+		if (s.wake.sending) return abort("wake-race");
+		if (s.refreshing) return abort("refreshing");
+		return {
+			kind: "go",
+			pid: current.pid,
+			sessionId: current.session.sessionId,
+			pane: finalPane,
+			tokens: pressureNow.tokens,
+		};
 	}
 
 	/** 自動起動を止めたセッションを再開させる */

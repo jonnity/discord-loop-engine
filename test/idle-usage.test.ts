@@ -699,3 +699,26 @@ test("T1: context外の不正usageや同ID競合を既知sessionのcoverageへ�
 	assert.deepEqual(r.diagnostics.reasons, {});
 	assert.equal(r.coverageComplete, true);
 });
+
+test("T10: harness-phase の後に refresh_checkpoint を呼んだ tick も heartbeat-active に残り、checkpoint の呼出し自体は作業に数えない", () => {
+	const rows = (phaseTick: boolean) => [
+		user(0, { turnOrigin: "scheduled" }),
+		assistant("a", 1, phaseTick ? tool("Bash", { command: "harness-phase 61 implementing" }) : []),
+		assistant("b", 2, tool("mcp__plugin_discord-loop-engine_dle__refresh_checkpoint", { boundary_id: "b" })),
+		assistant("c", 3),
+	];
+	const withPhase = summarizeIdleUsage(snapshot(rows(true)), context);
+	assert.deepEqual(
+		[withPhase.categories["heartbeat-active"].ticks, withPhase.categories["heartbeat-active"].calls],
+		[1, 3],
+	);
+	assert.equal(withPhase.categories["heartbeat-idle"].ticks, 0);
+	// checkpoint の呼出しだけの tick は、作業の入口（harness-phase 等）が無いので既知の見逃しの範囲で idle のまま。
+	const checkpointOnly = summarizeIdleUsage(snapshot(rows(false)), context);
+	assert.equal(checkpointOnly.categories["heartbeat-idle"].ticks, 1);
+	// 入力 snapshot は改変しない
+	const input = snapshot(rows(true));
+	const before = JSON.stringify(input);
+	summarizeIdleUsage(input, context);
+	assert.equal(JSON.stringify(input), before);
+});

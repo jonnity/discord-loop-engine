@@ -16,6 +16,7 @@ import { Ledger, type Project } from "../src/ledger.ts";
 import {
 	excludeLocalState,
 	type Run,
+	refreshCoverage,
 	registerProject,
 	repoFromRemote,
 	resolveProject,
@@ -750,5 +751,50 @@ test("T7: extraArgs に mode があれば engine は足さず、変更前の com
 		assert.equal(e2.c?.command, MAIN_CONCIERGE);
 		assert.equal(e2.h?.command, MAIN_EXTRA_EQ_H);
 		assert.equal(e2.n?.command, MAIN_EXTRA_EQ_N);
+	}
+});
+
+test("T1: worker の target と coverage に forceMaxTokens=250000・idle=150000 が配線され、窓口・native・無効化には強制が出ない", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-force-"));
+	writeFileSync(path.join(home, "config.json"), JSON.stringify({ channelIds: ["900"], allowedUserIds: ["111"] }));
+	const repo = mkdtempSync(path.join(os.tmpdir(), "dle-force-repo-"));
+	mkdirSync(path.join(repo, ".claude"), { recursive: true });
+	writeFileSync(path.join(repo, ".claude", "harness.json"), "{}");
+	try {
+		const ledger = new Ledger(home);
+		const base = { repo: "o/r", path: repo, active: true, addedAt: "2026-01-01T00:00:00Z" };
+		ledger.upsertProject({ ...base, name: "w", mode: "harness" });
+		ledger.upsertProject({ ...base, name: "n", mode: "native", initialPrompt: "/x" });
+		const cfg = loadConfig(home);
+		const targets = sessionTargets(cfg, ledger.projects(), ledger);
+		const w = targets.find((t) => t.name === "w")?.refresh;
+		assert.equal(w?.forceMaxTokens, 250000);
+		assert.equal(w?.maxTokens, 150000);
+		assert.equal(targets.find((t) => t.name === "n")?.refresh, undefined, "native は対象外");
+		const concierge = targets.find((t) => t.name === "concierge")?.refresh;
+		assert.equal(concierge?.maxTokens, 150000);
+		assert.equal("forceMaxTokens" in (concierge ?? {}), false, "窓口へは強制を配線しない");
+		const coverage = refreshCoverage(cfg, ledger.projects(), targets, ledger);
+		assert.equal(coverage.find((c) => c.project === "w")?.settings?.forceMaxTokens, 250000);
+		assert.equal(coverage.find((c) => c.project === "w")?.settings?.maxTokens, 150000);
+		assert.equal("forceMaxTokens" in (coverage.find((c) => c.project === "concierge")?.settings ?? {}), false);
+		// 型付きリテラルで forceMaxTokens が省略されても既定が入る。明示 0 は 0 のまま
+		const literal = {
+			...cfg,
+			worker: { ...cfg.worker, refresh: { ...cfg.worker.refresh, forceMaxTokens: undefined } },
+		} as Config;
+		assert.equal(
+			sessionTargets(literal, ledger.projects(), ledger).find((t) => t.name === "w")?.refresh?.forceMaxTokens,
+			250000,
+		);
+		const zero = { ...cfg, worker: { ...cfg.worker, refresh: { ...cfg.worker.refresh, forceMaxTokens: 0 } } } as Config;
+		const zeroTarget = sessionTargets(zero, ledger.projects(), ledger).find((t) => t.name === "w")?.refresh;
+		assert.equal(zeroTarget?.forceMaxTokens, 0);
+		assert.equal(zeroTarget?.maxTokens, 150000, "idle は残る");
+		const off = { ...cfg, worker: { ...cfg.worker, refresh: { ...cfg.worker.refresh, enabled: false } } } as Config;
+		assert.equal(sessionTargets(off, ledger.projects(), ledger).find((t) => t.name === "w")?.refresh, undefined);
+	} finally {
+		rmSync(home, { recursive: true, force: true });
+		rmSync(repo, { recursive: true, force: true });
 	}
 });
