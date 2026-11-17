@@ -110,6 +110,9 @@ export function route(msg: DiscordMessage, ctx: RouteContext): RouteResult {
 		user_id: author.id,
 		source: isDm ? "dm" : "channel",
 	};
+	// 本文や引用元ではなく、現在の投稿の送信者と投稿先が両方登録済みの場合だけ本人確認済みとする。
+	// 許可ユーザーの DM は未登録の投稿先でも配送されるため、送信者の一致だけでは足りない。
+	if (ctx.allowedUserIds.includes(author.id) && ctx.channelIds.includes(msg.channel_id)) meta.verified = "owner";
 	// 転送（type=1）は返信ではないので、台帳の逆引きも見出しの解析もしない（転送元の A への回答とは読まない）
 	const isForward = msg.message_reference?.type === 1;
 	const ref = isForward ? null : parsePost(msg.referenced_message);
