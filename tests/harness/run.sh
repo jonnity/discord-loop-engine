@@ -448,6 +448,110 @@ check "guard: 通常の git add は通す" '[ "$(guard "git add src/a.ts")" = 0 
 check "guard: 空コミットを止める" '[ "$(guard "git commit --allow-empty -m retrigger")" = 2 ]'
 check "guard: 通常のコミットは通す" '[ "$(guard "git commit -m fix")" = 0 ]'
 check "guard: 通常の gh は通す" '[ "$(guard "gh pr view 5 --json url")" = 0 ]'
+
+guard_capture() {
+	local command_text="$1"
+	shift
+	jq -nc --arg c "$command_text" '{tool_input:{command:$c}}' | env "$@" "${GUARD_BIN:-$BIN/harness-guard}" \
+		>"$TMP/guard.out" 2>"$TMP/guard.err"
+	guard_rc=$?
+}
+guard_expect() {
+	local reason="$1" command_text="$2"
+	shift 2
+	guard_capture "$command_text" "$@"
+	[ ! -s "$TMP/guard.out" ] || return 1
+	if [ "$reason" = pass ]; then
+		[ "$guard_rc" -eq 0 ] && [ ! -s "$TMP/guard.err" ]
+	else
+		[ "$guard_rc" -eq 2 ] && cmp -s "$TMP/guard.err" <(
+			printf 'harness-guard: Codex の直接起動（%s）を止めました。harness-codex start を使ってください。\n' "$reason"
+		)
+	fi
+}
+
+guard_bypass='--dangerously-bypass-approvals-and-sandbox'
+for command_text in 'codex exec' 'codex -C "$WT" -c model_reasoning_effort=high exec' '/opt/bin/codex exec'; do
+	check "guard G1: $command_text を止める" 'guard_expect "codex exec" "$command_text"'
+done
+ln -s "$ROOT" "$TMP/guard-plugin"
+check "guard G1: プラグインディレクトリがシンボリックリンクでも止める" 'GUARD_BIN="$TMP/guard-plugin/bin/harness-guard" guard_expect "codex exec" "codex exec"'
+for command_text in "codex $guard_bypass" "codex '$guard_bypass'" "codex exec $guard_bypass"; do
+	check "guard G1: $command_text の理由は対象フラグ" 'guard_expect "$guard_bypass" "$command_text"'
+done
+for command_text in 'codex login status' 'codex -C exec login status' 'codex -- exec' 'codex e' \
+	'codex exec --help' 'command codex exec' 'env A=B codex exec' 'exec codex exec' "printf '%s' $guard_bypass"; do
+	check "guard G1: $command_text は通す" 'guard_expect pass "$command_text"'
+done
+
+for command_text in 'tmux new-window -n work codex' 'tmux -L sock neww -ad -n work /opt/bin/codex exec' \
+	'tmux new-window -n work "codex exec"'; do
+	check "guard G2: $command_text を止める" 'guard_expect "tmux new-window" "$command_text"'
+done
+for command_text in 'tmux new-window -n codex -t codex -F "codex exec"' 'tmux new-window -n codex bash' \
+	"tmux new-window printf '%s\n' 'codex exec'" "tmux new-window \"echo 'codex exec'\"" \
+	'tmux new-window "codex exec --help"'; do
+	check "guard G2: $command_text は通す" 'guard_expect pass "$command_text"'
+done
+
+for command_text in ':; codex exec' ': && codex exec' ': || codex exec' ': | codex exec' \
+	$':\ncodex exec' $': &&\ncodex exec' 'harness-config --path; codex exec' 'harness-codex stop 4; codex exec'; do
+	check "guard G3: ${command_text//$'\n'/\\n} の後段を止める" 'guard_expect "codex exec" "$command_text"'
+done
+check "guard G3: 入力に書かれたコマンドを実行しない" 'guard_expect "codex exec" "touch \"$TMP/guard-side-effect\"; codex exec" && [ ! -e "$TMP/guard-side-effect" ]'
+
+for command_text in 'harness-codex start impl 4' 'harness-codex stop 4' 'harness-codex status 4' \
+	'harness-codex-status status 4' '"/opt/plugin path/bin/harness-codex" start impl 4' \
+	'tmux list-windows' 'tmux capture-pane -t codex'; do
+	check "guard G4: $command_text は通す" 'guard_expect pass "$command_text"'
+done
+
+guard_capture 'gh api repos/o/r/issues/3/labels -f labels[]=harness:merge-ok'
+check "guard G5: 旧ラベル API の規則と案内を保つ" '[ "$guard_rc" -eq 2 ] && [ ! -s "$TMP/guard.out" ] && grep -Fxq "harness-guard: gh api での harness:* ラベル操作は禁止です。harness-phase を使ってください。" "$TMP/guard.err"'
+check "guard G5: priority は通す" 'guard_expect pass "gh issue edit 3 --add-label harness:priority"'
+guard_capture 'gh pr merge 5'
+check "guard G5: 旧マージの診断を比較用に取得する" '[ "$guard_rc" -eq 2 ] && [ ! -s "$TMP/guard.out" ] && grep -Fq "harness-merge <issue>" "$TMP/guard.err" && cp "$TMP/guard.err" "$TMP/guard-merge.err"'
+guard_capture 'printf "%s\n" "gh pr merge 5"; codex exec'
+check "guard G5: 引用内も含め旧規則の診断を優先する" '[ "$guard_rc" -eq 2 ] && [ ! -s "$TMP/guard.out" ] && cmp -s "$TMP/guard-merge.err" "$TMP/guard.err"'
+mkdir -p "$TMP/guard-path"
+cat >"$TMP/guard-path/node" <<'EOF'
+#!/usr/bin/env bash
+cat >/dev/null
+printf 'direct-exec\n'
+case "${GUARD_EXTRA:-}" in
+newline) printf '\n' ;;
+nul) printf '\0' ;;
+esac
+printf '%s\n' 'node stub' >&2
+exit "${GUARD_NODE_RC:-0}"
+EOF
+chmod +x "$TMP/guard-path/node"
+check "guard G5: Node 異常終了では新規則を通す" 'guard_expect pass "codex exec" PATH="$TMP/guard-path:$PATH" GUARD_NODE_RC=1'
+check "guard G5: ヘルパーの余分な改行を拒否理由にしない" 'guard_expect pass "codex exec" PATH="$TMP/guard-path:$PATH" GUARD_EXTRA=newline'
+check "guard G5: ヘルパーの NUL を拒否理由にしない" 'guard_expect pass "codex exec" PATH="$TMP/guard-path:$PATH" GUARD_EXTRA=nul'
+guard_capture 'gh pr merge 5' PATH="$TMP/guard-path:$PATH" GUARD_NODE_RC=1
+check "guard G5: Node 異常終了でも旧規則は働く" '[ "$guard_rc" -eq 2 ] && [ ! -s "$TMP/guard.out" ] && cmp -s "$TMP/guard-merge.err" "$TMP/guard.err"'
+
+guard_body=$'codex exec\ncodex '"$guard_bypass"$'\ntmux new-window -n work codex'
+guard_heredoc="cat <<'BODY'"$'\n'"$guard_body"$'\nBODY\n'
+check "guard G6: 引用付き heredoc 本文の全対象を通す" 'guard_expect pass "$guard_heredoc"'
+command_text="${guard_heredoc}codex exec"
+check "guard G6: 終端後のコマンドを止める" 'guard_expect "codex exec" "$command_text"'
+command_text="cat <<'BODY'; codex exec"$'\n'"$guard_body"$'\nBODY\n'
+check "guard G6: heredoc と同じ行の別セグメントを止める" 'guard_expect "codex exec" "$command_text"'
+for command_text in $'cat 3<<-EOF <<END\n\tcodex exec\n\tEOF\ntmux new-window codex\nEND' \
+	"cat <<< 'codex exec'" "printf '%s\n' '$guard_body'" "printf '%s\n' codex exec" \
+	': # codex exec' ': \; codex exec'; do
+	check "guard G6: ${command_text//$'\n'/\\n} の本文や引数を通す" 'guard_expect pass "$command_text"'
+done
+
+for command_text in "codex exec; printf '" $'codex exec; cat <<EOF\n未終端' '"$TOOL" codex exec' \
+	'codex exec; if true; then :; fi' 'codex exec; echo $(printf test)' 'tmux new-window -Z codex'; do
+	check "guard G7: ${command_text//$'\n'/\\n} の解析不能は通す" 'guard_expect pass "$command_text"'
+done
+guard_capture "gh pr merge 5; codex exec; printf '"
+check "guard G7: 解析不能でも旧規則は働く" '[ "$guard_rc" -eq 2 ] && [ ! -s "$TMP/guard.out" ] && cmp -s "$TMP/guard-merge.err" "$TMP/guard.err"'
+
 rm "$PROJ/.claude/harness.json"
 check "guard: harness.json が無いプロジェクトでは何もしない" '[ "$(guard "gh pr merge 5")" = 0 ]'
 
@@ -466,6 +570,9 @@ gguard() { jq -nc --arg c "$1" '{tool_input:{command:$c}}' | env "${@:2}" "$BIN/
 check "guard: engine 側の設定があれば働く" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool)" = 2 ]'
 check "guard: native モードでは何もしない（独自のループの gh pr merge を止めない）" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool DLE_LOOP=native)" = 0 ]'
 check "guard: 設定の無いプロジェクトでは何もしない" '[ "$(gguard "gh pr merge 5" DLE_HOME="$DLEH" DLE_PROJECT=oogiri-doc)" = 0 ]'
+check "guard G5: engine 側の設定があれば Codex の直接起動を止める" 'guard_expect "codex exec" "codex exec" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool'
+check "guard G5: native モードでは Codex の直接起動を通す" 'guard_expect pass "codex exec" DLE_HOME="$DLEH" DLE_PROJECT=kishimen-tool DLE_LOOP=native'
+check "guard G5: 設定が無ければ Codex の直接起動を通す" 'guard_expect pass "codex exec" DLE_HOME="$DLEH" DLE_PROJECT=oogiri-doc'
 
 # --- C16: 設定 home と実行 home の分離 -------------------------------------------
 (
