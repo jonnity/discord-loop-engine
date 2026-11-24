@@ -590,6 +590,7 @@ function wakeSetup(
 		logAge?: number;
 		failFlags?: Set<string>; // "-l" / "Enter" を失敗させる
 		onWait?: () => void;
+		onSend?: (key: string) => void;
 		limit?: Partial<WorkerLimit>;
 	} = {},
 ) {
@@ -626,6 +627,7 @@ function wakeSetup(
 			}
 			if (args[0] === "send-keys") {
 				const key = args.includes("-l") ? "-l" : "Enter";
+				o.onSend?.(key);
 				if (state.fail.has(key)) return { ok: false, stdout: "" };
 			}
 			return { ok: true, stdout: "" };
@@ -1145,7 +1147,7 @@ interface LimitSlot {
 	limitGaveUp: boolean;
 	refreshing: boolean;
 	promptPending: boolean;
-	wake: { reasons: string[]; enterOnly: boolean; sending: boolean };
+	wake: { reasons: Map<string, unknown>; enterOnly: boolean; sending: boolean };
 }
 const wakeState = (h: WakeHarness) =>
 	(h.sup as unknown as { state: Map<string, LimitSlot> }).state.get("w") as LimitSlot;
@@ -1338,12 +1340,12 @@ test("上限の起こし(F2): limited の間は limit 以外の理由では送�
 	await h.sup.wakeTick();
 	await h.sup.tick();
 	assert.deepEqual(h.keys(), []);
-	assert.deepEqual(wakeState(h).wake.reasons, ["dispatch"]);
+	assert.deepEqual([...wakeState(h).wake.reasons.keys()], ["dispatch"]);
 	assert.equal(wakeState(h).wake.sending, false);
 	h.advance(30 * MIN);
 	await h.sup.tick();
 	assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
-	assert.deepEqual(wakeState(h).wake.reasons, []);
+	assert.deepEqual([...wakeState(h).wake.reasons.keys()], []);
 	assert.equal(wakeState(h).limitAttempts, 1);
 });
 
@@ -1369,6 +1371,7 @@ test("上限の起こし(F2): あきらめた後は dispatch が来ても送ら�
 test("上限の起こし(F2): enterOnly の Enter 再送は limited でも通る", async () => {
 	const h = wakeSetup({ panes: [`Claude usage limit reached\n❯ ${WAKE}`] });
 	await h.sup.tick();
+	h.sup.requestWake("w", "limit");
 	wakeState(h).wake.enterOnly = true;
 	await h.sup.wakeTick();
 	assert.equal(h.keys()[0], "Enter"); // limited でも -l なしの Enter が通る（verifyWake が足す分は後続）
@@ -1381,11 +1384,11 @@ test("上限の起こし: clearLimit で積んだ limit の要求が消える", 
 	h.advance(30 * MIN);
 	wakeState(h).refreshing = true; // 送れないので limit の要求が積まれたまま残る
 	await h.sup.tick();
-	assert.deepEqual(wakeState(h).wake.reasons, ["limit"]);
+	assert.deepEqual([...wakeState(h).wake.reasons.keys()], ["limit"]);
 	h.state.live = false; // channel 切断で解除
 	await h.sup.tick();
 	assert.deepEqual(h.sup.limitedNames(), []);
-	assert.deepEqual(wakeState(h).wake.reasons, []);
+	assert.deepEqual([...wakeState(h).wake.reasons.keys()], []);
 });
 
 test("上限の起こし: refreshing / promptPending の間は送らず回数も進まず、解消後に 1 回送る", async () => {
@@ -1541,5 +1544,61 @@ test("送信前にsessionの状態・cwd・画面安定性・取得可否が変�
 		h.advance();
 		await h.sup.tick();
 		assert.deepEqual(h.typed(), []);
+	}
+});
+
+test("期限切れの周期だけを取り消し、入力後に入ったイベントは次へ残す", async () => {
+	for (let trial = 0; trial < 3; trial++) {
+		let expired = false;
+		let added = false;
+		const h = wakeSetup({
+			onWait: () => {
+				expired = true;
+			},
+			onSend: (key) => {
+				if (key !== "-l" || added) return;
+				added = true;
+				h.sup.requestWake("w", "dispatch");
+			},
+		});
+		h.sup.requestWake("w", "periodic", {
+			decisionId: "stale",
+			isCurrent: () => !expired,
+			beforeInput: assert.fail,
+			deferred: () => {},
+		});
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), []);
+		h.sup.requestWake("w", "dispatch");
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+		h.advance(60_000);
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter", `-l ${WAKE}`, "Enter"]);
+	}
+});
+
+test("期限切れの Enter-only は固定入力を残し、同じ入力は次の有効なイベントでだけ再送できる", async () => {
+	for (let trial = 0; trial < 3; trial++) {
+		const h = wakeSetup({ failFlags: new Set(["Enter"]) });
+		let valid = true;
+		h.sup.requestWake("w", "periodic", {
+			decisionId: "stale",
+			isCurrent: () => valid,
+			beforeInput: () => {},
+			deferred: () => {},
+		});
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+		valid = false;
+		h.state.fail.clear();
+		h.state.i = 0;
+		h.state.panes = [`❯ ${WAKE}`, `❯ ${WAKE}`, `❯ ${WAKE}`, IDLE];
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter"]);
+		assert.match(h.skipped[0] ?? "", /期限切れ/);
+		h.sup.requestWake("w", "dispatch");
+		await h.sup.wakeTick();
+		assert.deepEqual(h.keys(), [`-l ${WAKE}`, "Enter", "Enter"]);
 	}
 });

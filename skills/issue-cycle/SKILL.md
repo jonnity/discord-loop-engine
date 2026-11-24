@@ -596,7 +596,7 @@ T5 は gate 取得の非0を stub で注入する単体検証であり、不正 
 
 `$WT/.harness/spec/{n}.md` の出現を **最大2分だけ** 出力なしでポーリングし（`until ...; do sleep 10; done`
 を12回で打ち切り。各回 `harness-codex-status status codex-spec-{n} "$WT"` も見て、`exited:*` で成果物が無ければ
-待たずに「Codex の監視と再起動」の判定に入る）、出たら `harness-phase {n} spec-review` → Phase 3。出なければ次の心拍に任せる。
+待たずに「Codex の監視と再起動」の判定に入る）、出たら `harness-phase {n} spec-review` → Phase 3。出なければ次のループ起動に任せる。
 
 ### Codex の監視と再起動（全 Phase 共通）
 
@@ -830,7 +830,7 @@ push/PR 作成を止める。ランナー停止・権限不足をコード修正
 自動解消できなければ `harness-phase {n} blocked --comment-file ...` で項目名・失敗理由・必要な対応を通知し、
 解消後に gate 全体を再実行する。
 
-PR を作ったら CI の結果を待つ（issue-loop 経由なら `subscribe_pr_activity` のイベントで、単体なら次の心拍で）。
+PR を作ったら CI の結果を待つ（`subscribe_pr_activity` のイベント、または次のループ起動で確認する）。
 CI が赤なら issue-loop の「CI red 対応」に従う。ただし、設計で停止ルール対象とした環境依存の失敗は、
 PR CI の実ログに基づく修正1回で解消しなければ `harness-phase {n} blocked --comment-file ...` で人に返す。
 「1回」は、同じ PR で対象の失敗後に push した修正コミットと、そのコミットに対する CI 結果から数える。

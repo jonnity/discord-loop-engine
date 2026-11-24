@@ -19,7 +19,7 @@
 //   dle runner status|start|stop|update   self-hosted runner の状態（sudo 不要）と、起動・停止・更新のコマンド表示
 
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -169,9 +169,9 @@ async function cmdStart() {
 	const ci = () => engine?.ciTick().catch((e: Error) => log(`ci: ${e.message}`));
 	setTimeout(ci, 20_000);
 	setInterval(ci, 5 * 60_000);
-	const queue = () => engine?.queueTick().catch((e: Error) => log(`queue: ${e.message}`));
-	setTimeout(queue, 25_000);
-	setInterval(queue, 60_000);
+	const queue = () => engine?.queueTick().catch(() => log("engine: 仕事判定の実行に失敗しました"));
+	const firstWorkPoll = setTimeout(queue, 25_000);
+	const workInterval = setInterval(queue, 60_000);
 	setInterval(() => {
 		engine?.writeStatus();
 		engine?.maybeRequestRetro();
@@ -180,17 +180,37 @@ async function cmdStart() {
 	const shutdown = async () => {
 		if (shuttingDown) return;
 		shuttingDown = true;
+		clearTimeout(firstWorkPoll);
+		clearInterval(workInterval);
 		log("engine: 停止します");
 		// 待機中の強制整理と、その読取子（tmux）を止めてから診断を書き切る。未実行の ticket は再起動後に復活させない
 		supervisor.cancelPhaseRefreshes();
 		await engine?.stop();
 		await supervisor.flushRefreshDiagnostics();
 		await diagnostics.close();
+		const pidFile = path.join(home, "engine.pid");
+		if (existsSync(pidFile) && Number(readFileSync(pidFile, "utf8")) === process.pid) unlinkSync(pidFile);
+		await Promise.all(
+			[process.stdout, process.stderr].map(
+				(stream) =>
+					new Promise<void>((done) => {
+						if (stream.destroyed) done();
+						else stream.write("", () => done());
+					}),
+			),
+		);
 		process.exit(0);
 	};
 	process.on("SIGINT", shutdown);
 	process.on("SIGTERM", shutdown);
 	process.on("SIGHUP", shutdown);
+	// パイプの読み手が閉じた場合も、未回収の読取子とソケットを残さない。
+	for (const stream of [process.stdout, process.stderr]) {
+		stream.on("error", (error: NodeJS.ErrnoException) => {
+			if (error.code === "EPIPE") void shutdown();
+			else throw error;
+		});
+	}
 }
 
 async function cmdUp() {

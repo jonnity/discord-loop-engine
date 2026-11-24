@@ -2123,13 +2123,39 @@ function wakeStub(engine: EngineType) {
 	return log;
 }
 
+function queuedGraph(args: string[], repo: string, numbers: number[]) {
+	const issueQuery = args.some((arg) => arg.includes("issues("));
+	const nodes = issueQuery
+		? numbers.map((number) => ({
+				number,
+				updatedAt: "2020-01-01T00:00:00Z",
+				labels: { nodes: [{ name: "harness:queued" }], pageInfo: { hasNextPage: false } },
+			}))
+		: [];
+	return {
+		ok: true,
+		stdout: JSON.stringify([
+			{
+				data: {
+					viewer: { login: "fixture" },
+					repository: {
+						nameWithOwner: repo,
+						[issueQuery ? "issues" : "pullRequests"]: {
+							nodes,
+							totalCount: nodes.length,
+							pageInfo: { hasNextPage: false, endCursor: nodes.length ? "last" : null },
+						},
+					},
+				},
+			},
+		]),
+		stderr: "",
+	};
+}
+
 test("refresh OFFでも配送・回答・phase・outbox再接続の業務動作を維持する", async () => {
 	let queued: number[] = [];
-	const { engine, home, discord } = setupEngine(5, async () => ({
-		ok: true,
-		stdout: JSON.stringify(queued.map((number) => ({ number }))),
-		stderr: "",
-	}));
+	const { engine, home, discord } = setupEngine(5, async (_cmd, args) => queuedGraph(args, "x/k", queued));
 	engine.config.worker.refresh.enabled = false;
 	engine.config.concierge.refresh.enabled = false;
 	mkdirSync(path.join(home, ".claude"));
@@ -2248,12 +2274,15 @@ test("outbox を 1 件以上払い出したときだけ worker を起こす", as
 	}
 });
 
-test("queueTick: 初回は覚えるだけ・新しい番号で 1 回だけ起こし・失敗では更新しない・外れて再付与なら再度起こす", async () => {
-	let out: { ok: boolean; stdout: string } = { ok: true, stdout: "[]" };
+test("queueTick: 初回は周期判定のみ・新しい番号と再付与は即時要求・失敗では集合を保存しない", async () => {
+	let numbers = [1];
+	let bad: { ok: boolean; stdout: string } | undefined;
 	const seenArgs: string[][] = [];
 	const exec: Run = async (cmd, args) => {
-		if (cmd === "gh") seenArgs.push(args);
-		return { ...out, stderr: "" };
+		assert.equal(cmd, "gh");
+		seenArgs.push(args);
+		if (bad && args.some((arg) => arg.includes("issues("))) return { ...bad, stderr: "" };
+		return queuedGraph(args, "x/r", numbers);
 	};
 	const { engine, home } = setupEngine(5, exec);
 	mkdirSync(path.join(home, "r", ".claude"), { recursive: true });
@@ -2263,38 +2292,39 @@ test("queueTick: 初回は覚えるだけ・新しい番号で 1 回だけ起こ
 	engine.ledger.upsertProject({ name: "notready", repo: "x/n", path: "/nonexistent", active: true, mode: "harness" });
 	engine.ledger.upsertProject({ name: "native", repo: "x/m", path: home, active: true, mode: "native" });
 	const log = wakeStub(engine);
-	const set = (nums: number[]) => {
-		out = { ok: true, stdout: JSON.stringify(nums.map((number) => ({ number }))) };
+	const observed = async (events: string[]) => {
+		log.length = 0;
+		await engine.queueTick();
+		assert.deepEqual(log, events);
 	};
-	set([1]);
-	await engine.queueTick();
-	assert.deepEqual(log, [], "初回は起こさない");
+	const periodic = "request ready periodic";
+	await observed([periodic, "wakeTick"]);
 	assert.deepEqual(engine.ledger.state().queuedSeen, { ready: ["1"] });
 	assert.ok(
-		seenArgs.every((a) => a.includes("x/r")),
+		seenArgs.every((a) => a.includes("owner=x") && a.includes("name=r")),
 		"ready な harness だけ見る",
 	);
-	await engine.queueTick();
-	assert.deepEqual(log, [], "同じ集合では起こさない");
-	set([1, 2]);
-	await engine.queueTick();
-	assert.deepEqual(log, ["request ready queued #2", "wakeTick"]);
-	for (const bad of [
+	await observed([periodic, "wakeTick"]);
+	numbers = [1, 2];
+	await observed(["request ready queued #2", periodic, "wakeTick"]);
+	for (const failure of [
 		{ ok: false, stdout: "" },
 		{ ok: true, stdout: "not json" },
 	]) {
-		log.length = 0;
-		out = bad;
-		await engine.queueTick();
-		assert.deepEqual(log, []);
+		bad = failure;
+		await observed([periodic, "wakeTick"]);
 		assert.deepEqual(engine.ledger.state().queuedSeen, { ready: ["1", "2"] }, "観測できなければ更新しない");
 	}
-	set([1]);
-	await engine.queueTick();
-	log.length = 0;
-	set([1, 2]);
-	await engine.queueTick();
-	assert.deepEqual(log, ["request ready queued #2", "wakeTick"], "外れた後の再付与は新規扱い");
+	bad = undefined;
+	numbers = [1];
+	await observed([periodic, "wakeTick"]);
+	numbers = [1, 2];
+	await observed(["request ready queued #2", periodic, "wakeTick"]);
+	engine.config.worker.wake = { ...engine.config.worker.wake, enabled: false };
+	const previousReads = seenArgs.length;
+	await observed([]);
+	assert.equal(seenArgs.length, previousReads, "wake 無効時は従来どおり定期読み取りと新規起床がない");
+	await engine.stop();
 });
 
 // --- Issue #25: blocked / interview の --file が黙って落ちない -----------------------------------

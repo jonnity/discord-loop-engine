@@ -38,6 +38,26 @@ const CONCLUSIONS = [
 ];
 const STATUS_STATES = ["EXPECTED", "ERROR", "FAILURE", "PENDING", "SUCCESS"];
 
+function ciNodeState(node: unknown): CiWait {
+	const c = object(node);
+	if (c.__typename === "CheckRun") {
+		if (c.status === "COMPLETED")
+			return typeof c.conclusion === "string" && CONCLUSIONS.includes(c.conclusion) ? "clear" : "unknown";
+		if (typeof c.status === "string" && RUN_STATES.includes(c.status)) return "busy";
+	} else if (c.__typename === "StatusContext" && typeof c.state === "string" && STATUS_STATES.includes(c.state)) {
+		return c.state === "PENDING" || c.state === "EXPECTED" ? "busy" : "clear";
+	}
+	return "unknown";
+}
+
+export function hasInvalidCiNodes(nodes: unknown[]): boolean {
+	return nodes.some((node) => {
+		const state = ciNodeState(node);
+		const c = object(node);
+		return state === "unknown" || (state === "busy" && c.__typename === "CheckRun" && c.conclusion !== null);
+	});
+}
+
 /**
  * CI の checks を「待ち」かどうかで分類する。完了した失敗・キャンセルは待ちではない。
  * Why not ciGreen の否定: 完了した失敗まで待ちになってしまう。未知の値は unknown にして許可の証拠にしない。
@@ -48,16 +68,9 @@ export function classifyCiNodes(nodes: unknown[]): CiWait {
 	let busy = false;
 	let unknown = false;
 	for (const node of nodes) {
-		const c = object(node);
-		if (c.__typename === "CheckRun") {
-			if (c.status === "COMPLETED") {
-				if (typeof c.conclusion !== "string" || !CONCLUSIONS.includes(c.conclusion)) unknown = true;
-			} else if (typeof c.status === "string" && RUN_STATES.includes(c.status)) busy = true;
-			else unknown = true;
-		} else if (c.__typename === "StatusContext") {
-			if (typeof c.state !== "string" || !STATUS_STATES.includes(c.state)) unknown = true;
-			else if (c.state === "PENDING" || c.state === "EXPECTED") busy = true;
-		} else unknown = true;
+		const state = ciNodeState(node);
+		if (state === "busy") busy = true;
+		if (state === "unknown") unknown = true;
 	}
 	if (busy) return "busy";
 	return unknown ? "unknown" : "clear";

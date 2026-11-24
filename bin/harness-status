@@ -38,9 +38,23 @@ done
 
 echo ""
 hb="$ROOT/.harness/loop-heartbeat"
+last="" interval="" scheduler=""
 if [ -f "$hb" ]; then
 	last="$(sed -n 's/^last_tick_at=//p' "$hb")"
 	interval="$(sed -n 's/^heartbeat_interval=//p' "$hb")"
+	scheduler="$(sed -n 's/^scheduler=//p' "$hb")"
+fi
+worker=0
+if [[ "${DLE_ROLE:-}" == worker && "${DLE_LOOP:-}" == harness && -n "${DLE_PROJECT:-}" && "$DLE_PROJECT" == "$PROJECT" ]]; then
+	worker=1
+fi
+if [[ "$worker" == 1 && "${DLE_ISSUE_LOOP_WAKE:-}" == engine ]]; then
+	echo "[loop] engine が起床を担当"
+	[ -z "$last" ] || echo "  last tick: $last"
+elif [[ "$scheduler" == engine && "$worker" == 0 ]]; then
+	echo "[loop] 最後の tick は engine 担当"
+	[ -z "$last" ] || echo "  last tick: $last"
+elif [[ "$scheduler" != engine && -f "$hb" ]]; then
 	echo "[loop] last tick: ${last:-?} (interval ${interval:-?})"
 	if [ -n "$last" ]; then
 		age=$(($(date +%s) - $(date -d "$last" +%s 2>/dev/null || echo 0)))

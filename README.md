@@ -1106,31 +1106,40 @@ idle 整理（上記）は worker が待機に入らないと動かない。harn
   強制だけを止めるには `worker.refresh.forceMaxTokens: 0`。idle の観測（3日）と前後7日の cache read 比較は、実装・マージを待たせない並行の運用確認
 
 
-idle の worker を engine が起こす。worker は idle だと次の心拍か人の入力まで Discord の回答や dispatch を読まないので、
-engine が A-番号の回答・dispatch・`harness:queued` の追加（60 秒ごとに `gh issue list`）・保留分の払い出し・再接続を検知したら、
-worker が idle（status idle・画面が静止して入力欄が空・直前の会話ログ更新から10秒以上）と確認できたときだけ、
-入力欄に `/discord-loop-engine:issue-loop` を送る。作業中・確認画面・入力途中・判定できないときは送らず、次の30秒 tick で再試行する。
-送る文字列はこの定数だけで、回答文や Issue の中身は入力しない。マージは従来どおり承認記録がなければ行われない。
-`worker.wake.enabled: false` で無効にできる。この場合は新queuedのpollも無効になり、空キュー時のdispatch・回答も
-次の心拍まで120分超遅れ得る。新Issue検知はactive・repo設定済み・readyなharnessプロジェクトのopenな
-`harness:queued` が対象で、初回pollは記憶だけ、上限50件。ラベル無しや50件超の完全検知は行わない。
+起床が有効な harness worker は engine が起こす。engine は60秒ごとに `gh` と台帳を読み、
+open な `harness:` ラベル付き Issue、認証主体自身または Dependabot の open PR（draft 含む）、
+進行中のタスク、既存の証拠で照合できる未処理回答を確認する。取得に失敗した場合も起床候補とする。
+全部の取得に成功して仕事が空なら、通常の定期起床は行わない。Claude のセッション内の心拍も作らない。
 
-issue-loopはセッションを保持し、空キューでblockedを含む未完了Issue/PRもDependabot監視もないengine配下workerの
-心拍を120分 `0 */2 * * *` にする。人間待ちだけ・Dependabot監視だけなら60分 `0 * * * *` から無変化2時間で120分へ、
-実行可能な作業や未処理の回答があれば15分 `*/15 * * * *` へ戻す。状態取得失敗は空とせず現間隔を維持する。
-標準cronでは旧式の分欄 `*/60` と `*/120` はともに毎時0分であり、2時間ごとにはならない。
-実予約に合わせてheartbeat_intervalとloop-heartbeatのINTERVALを記録し、毎tick CronListで生存を確認、消失時は張り直す。
-harness-statusの警告は記録間隔×2+5分（120minなら245分）で、起動や実処理の上限保証ではない。
-単体実行の全完了・明示停止では心拍を削除し、キュー完了の通知は1回だけにする。
+仕事があれば、直近で issue-loop の入力に成功した時点から15分で再試行できる。
+すべての仕事が明確な人間待ちか Dependabot 監視だけなら60分とし、無変化の観測が2時間続けば120分とする。
+Dependabot の監視には現 head と一致する承認依頼と完了した CI が必要。CI が空の場合、PR 更新から30分を超えれば完了 CI と同じ間隔判定に進む。
+gh と台帳から待機を確かめられない仕事は15分。CI の空には別途マージ可能性の判定が必要で、実行側が従来の承認条件を確認する。
 
-dispatch・新queued・回答による既存engineの起こしを主にし、心拍は取りこぼしの安全網にする。
-Issueコメントの返事はセッションを起こさないため心拍で回収する。PR購読は継続し、通知消失時も状態を読み直す。
-120分は予約間隔であり、busy・recurringの最大30分の遅延・sleep・上限・確認待ち・engine/session停止で処理はさらに遅れる。
-7日失効は次tick/通常再開時のCronListで復旧し、tickが来なくなった場合は所有者が通常手順で再開する。
-セッションを残すのでtmux/メモリとrefreshによるclear/再開消費は残る。refreshは従来どおり有効。
-配布はplugin更新、workerが新スキルをロードしたことの確認、通常の実機起動確認の順に行う。
-仮ルール9のdispatch/回答後の不作動時に起こす運用とは矛盾しない。ルール変更を選ぶ場合だけ、その後にrules_setし、
-rules_getの一致とworker受信を確認する。保存回答の確認・人のマージOK・harness-guard・Codexのgit操作禁止を維持する。
+A-番号の回答・dispatch・outbox の払い出し・再接続・新しい `harness:queued` は周期にかかわらず起床を要求する。
+queued の初回一覧は差分比較の基準となり、既存の queued Issue も仕事判定の対象になる。初期プロンプト・上限復帰・整理後の再開は独立して働く。
+画面2枚、idle、静止した会話ログ、空の入力欄と送信直前の画面を確かめて固定文字列 `/discord-loop-engine:issue-loop` を送る。
+作業中・入力途中・判定不能・上限中などは見送る。見送り後は次の supervisor tick や仕事判定で再試行できる。
+PR 購読と保存済み回答の手順、マージ承認、ハーネスのガード、キュー完了通知の条件は従来どおり。
+
+`worker.wake.enabled: false` の worker と engine 無しの単体実行は予約モードを使う。実作業の15分、人間待ちと Dependabot 監視の60分から120分、
+wake 無効の空キューの120分 `0 */2 * * *` を使う。単体の全完了では予約を削除する。明示停止は現在の tick と当該ループ自身の予約を対象とする。
+予約モードは CronList で実予約を確認し、`harness-status` は記録間隔×2+5分を超えると警告する。engine 担当なら同コマンドに最終 tick が表示される。
+配布時は worker を安全な時機に再起動して新しい起床担当とスキルを確認し、再開前の issue-loop の recurring が残っていれば対象を確認して解除する。
+忙しさや上限で見送る場合があるため、間隔は処理時刻を保証しない。
+
+#### 仕事判定の前後を比較する
+
+- 配布前に私有の集計用ディレクトリを作り、配布直前の7日間の snapshot を保存する。UTC の境界・対象 project と
+  worker session の対応・engine と plugin の版・稼働時間を記録する。
+- 配布後、移行を終えてから次の7日間の境界を固定して engine の標準エラーを保存する。
+  `engine: work-wake` は project ごとの判定、`engine: wake-sent` は Enter 成功の記録。それぞれ JSON 1行で、
+  `boot` と判定の `id`（送信側は `decisions`）で照合できる。送信件数は `boot` と `sendId` で一意に数える。
+- 7日後に同じ版の集計器で2つの snapshot を比較する。起動回数は同じ session 対応で `idle-usage` の全4分類を合計し、
+  費用比較は `usage-summary` の input、cache creation、cache read、output と calls を使う。
+  空、取得失敗、見送り、初期・再接続・上限・整理など経路別の実送信も集計する。欠測・対象日の稼働時間・仕事量の差を記録する。
+- 使用した UTC 窓、要約の形式、件数、保存した原ログのサイズとハッシュを照合してから、私有の一時コピーを片付ける。
+  公開する結果は件数と消費量に絞る。
 
 ### 自動整理の診断
 
@@ -1362,7 +1371,7 @@ engine は30秒ごとに各 worker の画面の末尾（`worker.limit.tailLines`
 アップデート後は worker の自動整理が既定で有効になる。整理の理由・文脈量、失敗、文脈量不明による
 見送りは journal に残る。A-番号とタスクは台帳に保持し、整理中のメッセージは outbox に保留する。
 復帰時は仮ルール、窓口だけの直近のやり取り、保留メッセージの順で渡す。
-issue-loop は復帰時に状態を読み直し、心拍が消えていれば張り直す。
+issue-loop は復帰時に状態を読み直す。予約モードは心拍が消えていれば張り直し、engine 担当は次の起床を待つ。
 
 ## 台帳（`~/.discord-loop-engine/`）
 
@@ -1572,8 +1581,9 @@ issue-loop §5 からこの例外への参照はありません。通常の CI r
 ### Dependabot PR の承認とマージ
 
 harness プロジェクトで、作成者が厳密に `dependabot[bot]` **かつ** head が `dependabot/*` の PR **のみ**に対応します。
-同じ repo の open・非 draft PR だけが対象です。main の `.github/dependabot.yml` がある、または対象の open PR がある
-プロジェクトだけを worker が心拍で監視します。全ページの読取り失敗は「対象なし」と扱いません。
+実行側の対象は同じ repo の open・非 draft PR です。予約モードでは main の `.github/dependabot.yml` がある、または
+対象の open PR があるプロジェクトを worker が心拍で監視します。engine の起床判定では open の draft も候補に含みます。
+全ページの読取り失敗は起床候補です。
 
 `harness-pr scan` は状態一覧、`harness-pr inbox` は保存済み回答と待ち状態を JSONL で返します。
 CI green 後に `harness-pr request --pr N` で承認 head SHA を固定した A-番号を発行します。
