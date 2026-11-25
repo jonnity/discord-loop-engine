@@ -19,7 +19,7 @@ trap 'rm -rf "$TMP"' EXIT
 
 # 実行中の engine（worker の中で走らせる場合）の環境を拾わない。拾うと harness-notify / harness-phase が
 # 実 engine のソケットに繋がり、本物の Discord に投稿してしまう
-unset DLE_ROLE DLE_PROJECT DLE_LOOP DLE_CONFIG_HOME DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN HARNESS_CONFIG
+unset DLE_ROLE DLE_PROJECT DLE_LOOP DLE_ISSUE_LOOP_WAKE DLE_CONFIG_HOME DISCORD_WEBHOOK_URL DISCORD_BOT_TOKEN HARNESS_CONFIG
 export DLE_HOME="$TMP/iso-home"
 export DLE_SOCKET="$DLE_HOME/engine.sock"
 mkdir -p "$DLE_HOME"
@@ -432,6 +432,18 @@ echo "@5" >"$PROJ/.worktrees/issue-5/.harness/codex-spec-5.id"; rm -f "$PROJ/.wo
 printf '@4 codex-impl-4 1\n@5 codex-spec-5 0\n@8 codex-impl-8 0\n' >"$TMUX_STUB_PANES"
 st="$(cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-status" 2>/dev/null)"
 check "status: 自分の codex ウィンドウを終了コード付きで見分けられる" 'grep -q "codex-impl-4: exited:1" <<<"$st" && grep -q "codex-spec-5: running" <<<"$st" && ! grep -q "@8" <<<"$st"'
+
+printf 'last_tick_at=2000-01-01T00:00:00Z\nscheduler=engine\n' > "$PROJ/.harness/loop-heartbeat"
+st="$(cd "$PROJ" && PATH="$STUBS:$PATH" DLE_ROLE=worker DLE_LOOP=harness DLE_PROJECT=kishimen-tool DLE_ISSUE_LOOP_WAKE=engine "$BIN/harness-status" 2>/dev/null)"
+check "96 status: engine 担当は最終 tick を表示し心拍警告を出さない" 'grep -q "engine が起床を担当" <<<"$st" && grep -q "2000-01-01" <<<"$st" && ! grep -q "途絶" <<<"$st"'
+st="$(cd "$PROJ" && PATH="$STUBS:$PATH" "$BIN/harness-status" 2>/dev/null)"
+check "96 status: 外部実行では engine 担当の履歴を表示する" 'grep -q "最後の tick は engine 担当" <<<"$st"'
+st="$(cd "$PROJ" && PATH="$STUBS:$PATH" DLE_ROLE=worker DLE_LOOP=harness DLE_PROJECT=kishimen-tool "$BIN/harness-status" 2>/dev/null)"
+check "96 status: wake 無効は古い engine tick を心拍に数えない" 'grep -q "heartbeat なし" <<<"$st"'
+printf 'last_tick_at=2000-01-01T00:00:00Z\nheartbeat_interval=120min\n' > "$PROJ/.harness/loop-heartbeat"
+st="$(cd "$PROJ" && PATH="$STUBS:$PATH" DLE_ROLE=worker DLE_LOOP=harness DLE_PROJECT=kishimen-tool "$BIN/harness-status" 2>/dev/null)"
+check "96 status: wake 無効の実予約では従来どおり警告する" 'grep -q "interval 120min" <<<"$st" && grep -q "途絶" <<<"$st"'
+rm -f "$PROJ/.harness/loop-heartbeat"
 
 # --- harness-guard -------------------------------------------------------------
 guard() { jq -nc --arg c "$1" '{tool_input:{command:$c}}' | "$BIN/harness-guard" >/dev/null 2>&1; echo $?; }

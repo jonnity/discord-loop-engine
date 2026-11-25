@@ -27,26 +27,44 @@ export interface RunOptions {
 	timeoutMs?: number;
 	maxBuffer?: number;
 	signal?: AbortSignal;
+	waitForClose?: boolean;
 }
 
 export type Run = (
 	cmd: string,
 	args: string[],
 	opts?: RunOptions,
-) => Promise<{ ok: boolean; stdout: string; stderr: string }>;
+) => Promise<{ ok: boolean; stdout: string; stderr: string; failure?: "timeout" | "invalid" }>;
 
 export const run: Run = (cmd, args, opts) =>
 	new Promise((resolve) => {
-		execFile(
+		let result: Awaited<ReturnType<Run>> | undefined;
+		const child = execFile(
 			cmd,
 			args,
 			{
 				maxBuffer: opts?.maxBuffer ?? 10 * 1024 * 1024,
 				...(opts?.timeoutMs ? { timeout: opts.timeoutMs, killSignal: "SIGKILL" as const } : {}),
-				...(opts?.signal ? { signal: opts.signal } : {}),
+				...(opts?.signal && !opts.waitForClose ? { signal: opts.signal } : {}),
 			},
-			(err, stdout, stderr) => resolve({ ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }),
+			(err, stdout, stderr) => {
+				result = { ok: !err, stdout: String(stdout ?? ""), stderr: String(stderr ?? "") };
+				if (!opts?.waitForClose) resolve(result);
+				else if (err?.code === "ERR_CHILD_PROCESS_STDIO_MAXBUFFER") result.failure = "invalid";
+				else if (err?.killed && err.signal === "SIGKILL") result.failure = "timeout";
+			},
 		);
+		if (opts?.waitForClose) {
+			// execFile の abort は TERM で callback を先に呼ぶ。停止期限を守るため SIGKILL で中断し close まで待つ。
+			const abort = () => child.kill("SIGKILL");
+			const signal = opts.signal;
+			child.once("close", () => {
+				signal?.removeEventListener("abort", abort);
+				resolve(result ?? { ok: false, stdout: "", stderr: "" });
+			});
+			if (signal?.aborted) abort();
+			else signal?.addEventListener("abort", abort, { once: true });
+		}
 	});
 
 // extraArgs で mode を指定済みなら足さない（後から付けた方が勝つかは CLI の実装次第なので、二重に渡さない）
@@ -202,7 +220,9 @@ function claudeCommand(cfg: Config, env: Record<string, string>, args: string[])
 	const envPart = Object.entries(env)
 		.map(([k, v]) => `${k}=${shq(v)}`)
 		.join(" ");
-	return `env ${envPart} ${[cfg.claudeBin, ...args].map(shq).join(" ")}`;
+	// 入れ子の dle から起動した場合も、親の worker 用の起床担当を子に伝播させない。
+	const unsetWake = process.env.DLE_ISSUE_LOOP_WAKE !== undefined && !Object.hasOwn(env, "DLE_ISSUE_LOOP_WAKE");
+	return `env ${unsetWake ? "-u DLE_ISSUE_LOOP_WAKE " : ""}${envPart} ${[cfg.claudeBin, ...args].map(shq).join(" ")}`;
 }
 
 /** worker が Author identity unknown でコミットに失敗しないよう、engine の設定の作者を渡す。
@@ -320,6 +340,7 @@ export function sessionTargets(cfg: Config, projects: Project[], ledger?: Ledger
 								DLE_ROLE: "worker",
 								DLE_PROJECT: p.name,
 								DLE_LOOP: native ? "native" : "harness",
+								...(!native && cfg.worker.wake?.enabled !== false ? { DLE_ISSUE_LOOP_WAKE: "engine" } : {}),
 							},
 							[
 								...(worktreeRoot ? ["--add-dir", worktreeRoot] : []),

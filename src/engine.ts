@@ -33,6 +33,7 @@ import {
 	TASK_STATUSES,
 	type Task,
 	type TaskStatus,
+	wakeLedgerFailure,
 } from "./ledger.ts";
 import { type DiscordReceipt, inspectReceipt, object, type ReceiptFailure } from "./notification-receipt.ts";
 import { hasHumanWait, readCiWait } from "./phase-wait.ts";
@@ -59,8 +60,9 @@ import {
 	route,
 	sanitizeUser,
 } from "./route.ts";
-import type { PhaseBoundary, RefreshResult, Supervisor } from "./supervisor.ts";
+import type { PeriodicWake, PhaseBoundary, RefreshResult, Supervisor, WakeDetail, WakeSend } from "./supervisor.ts";
 import { validateToolArguments } from "./tool-validation.ts";
+import { type Cadence, classifyWork, periodicValidityMs, type ReadFailure, readWork, WorkClock } from "./work-wake.ts";
 import { resolveWorktreeRoot } from "./worktrees.ts";
 
 export interface GatewayLike {
@@ -188,7 +190,15 @@ export interface EngineOptions {
 	log?: (m: string) => void;
 	exec?: Run;
 	boardDebounceMs?: number;
+	wakeNow?: () => number;
+	wakeWall?: () => number;
 }
+
+type WakeProject = { name: string; repo: string; cwd: string; tmuxSession?: string };
+type WakeLogResult =
+	| { result: "empty" | "not-due" | "stopped" }
+	| { result: "sent"; sendId: string }
+	| { result: "deferred"; detail: WakeDetail };
 
 export class Engine {
 	readonly config: Config;
@@ -198,6 +208,16 @@ export class Engine {
 	supervisor: Supervisor | null;
 	private log: (m: string) => void;
 	private exec: Run;
+	private wakeNow: () => number;
+	private wakeWall: () => number;
+	private wakeBoot = randomUUID();
+	private wakeSequence = 0;
+	private wakeSendSequence = 0;
+	private workController = new AbortController();
+	private workPoll?: Promise<void>;
+	private workTargets = new Map<string, WakeProject>();
+	private workClocks = new Map<string, WorkClock>();
+	private workLogs = new Map<string, (outcome: WakeLogResult) => void>();
 	readonly sessions = new Map<string, Session>();
 	private pendingPermissions = new Map<string, string>(); // request_id → session name
 	private postQueue: Promise<unknown> = Promise.resolve(); // 論理投稿を直列にする
@@ -228,6 +248,9 @@ export class Engine {
 		this.ledger = o.ledger ?? new Ledger(o.config.home);
 		this.log = o.log ?? ((m) => console.error(m));
 		this.exec = o.exec ?? defaultRun;
+		this.wakeNow = o.wakeNow ?? (() => performance.now());
+		this.wakeWall = o.wakeWall ?? Date.now;
+		this.supervisor?.observeWake?.((send) => this.onWakeSent(send));
 		this.boardDebounceMs = o.boardDebounceMs ?? 3000;
 		this.gateway = o.gatewayFactory({
 			onMessage: (d) => {
@@ -305,6 +328,10 @@ export class Engine {
 	}
 
 	async stop() {
+		this.workController.abort();
+		for (const name of this.workTargets.keys()) this.supervisor?.cancelPeriodicWake?.(name);
+		for (const finish of this.workLogs.values()) finish({ result: "stopped" });
+		await this.workPoll;
 		this.gateway.stop();
 		await this.dashboard?.close();
 		this.dashboard = null;
@@ -475,11 +502,22 @@ export class Engine {
 	 * idle の worker を起こす要求。検知したことだけを伝え、Issue の中身や回答文はキー入力に使わない。
 	 * reconnect だけは supervisor 側で積む（ここからは呼ばない）。
 	 */
-	private requestWake(project: string, reason: string) {
-		this.bump(project);
+	private requestWake(
+		project: string,
+		reason: string,
+		request?:
+			| PeriodicWake
+			| {
+					decisionId: string;
+					queued: string[];
+					deferred: (detail: WakeDetail) => void;
+			  },
+	) {
+		if (!request || !("isCurrent" in request)) this.bump(project);
 		if (!this.supervisor) return;
-		this.supervisor.requestWake(project, reason);
-		this.supervisor.wakeTick().catch(() => {});
+		this.supervisor.requestWake(project, reason, request);
+		// 同じ判定の queued と定期をまとめてから起こす。
+		if (!request) this.supervisor.wakeTick().catch(() => {});
 	}
 
 	/** supervisor が /clear する前後に呼ぶ */
@@ -1507,49 +1545,189 @@ export class Engine {
 		);
 	}
 
-	// --- CI の監視 -------------------------------------------------------------------------------
-	/**
-	 * harness:queued の Issue を 60 秒ごとに見て、新しく付いた番号があれば worker を起こす。
-	 * engine は GitHub のラベルの変化を受け取れないので polling にする。初回は覚えるだけ（起動時に issue-loop が走る）。
-	 * 取得に失敗したときは「変化なし」とみなし、queuedSeen も更新しない（次回に新規として拾えるように）。
-	 */
-	async queueTick() {
-		if (this.config.worker.wake?.enabled === false) return;
-		const seen = { ...(this.ledger.state().queuedSeen ?? {}) };
-		let changed = false;
-		for (const p of this.ledger.projects()) {
-			if (!p.active || !p.repo || p.mode !== "harness" || !this.ledger.isReady(p)) continue;
-			const r = await this.exec("gh", [
-				"issue",
-				"list",
-				"-R",
-				p.repo,
-				"--state",
-				"open",
-				"--label",
-				"harness:queued",
-				"--json",
-				"number",
-				"--limit",
-				"50",
-			]);
-			if (!r.ok) continue;
-			let numbers: string[];
-			try {
-				const parsed = JSON.parse(r.stdout) as { number: number }[];
-				if (!Array.isArray(parsed) || parsed.some((x) => !Number.isInteger(x?.number))) continue;
-				numbers = parsed.map((x) => String(x.number));
-			} catch {
-				continue;
-			}
-			const before = seen[p.name];
-			seen[p.name] = numbers;
-			changed = true;
-			if (!before) continue;
-			const fresh = numbers.filter((n) => !before.includes(n));
-			if (fresh.length > 0) this.requestWake(p.name, `queued #${fresh.join(",#")}`);
+	// --- 仕事と CI の監視 -------------------------------------------------------------------------
+	private workClock(name: string) {
+		const existing = this.workClocks.get(name);
+		if (existing) return existing;
+		const clock = new WorkClock();
+		this.workClocks.set(name, clock);
+		return clock;
+	}
+
+	private onWakeSent(send: WakeSend) {
+		this.workClock(send.project).sent(this.wakeNow());
+		if (send.causes.includes("initial") || send.causes.includes("refresh"))
+			this.supervisor?.cancelPeriodicWake(send.project);
+		const sendId = `${this.wakeBoot}-s${++this.wakeSendSequence}`;
+		this.log(
+			`engine: wake-sent ${JSON.stringify({
+				v: 1,
+				boot: this.wakeBoot,
+				project: send.project,
+				sendId,
+				at: new Date(this.wakeWall()).toISOString(),
+				causes: send.causes,
+				decisions: send.decisions,
+			})}`,
+		);
+		for (const id of send.decisions) this.workLogs.get(id)?.({ result: "sent", sendId });
+	}
+
+	private currentWakeProjects(strict: boolean): Map<string, WakeProject> {
+		const projects = strict ? this.ledger.wakeProjects() : this.ledger.projects();
+		const map = new Map<string, WakeProject>();
+		for (const target of sessionTargets(this.config, projects, this.ledger)) {
+			const project = projects.find((p) => p.name === target.name);
+			if (project?.active && project.mode === "harness" && target.wake && !target.startupError)
+				map.set(project.name, {
+					name: project.name,
+					repo: typeof project.repo === "string" ? project.repo : "",
+					cwd: target.cwd,
+					tmuxSession: target.tmuxSession,
+				});
 		}
-		if (changed) this.ledger.saveState({ queuedSeen: seen });
+		return map;
+	}
+
+	private sameWorkTarget(a: WakeProject, b?: WakeProject) {
+		return Boolean(b && a.repo === b.repo && a.cwd === b.cwd && a.tmuxSession === b.tmuxSession);
+	}
+
+	private isWorkTarget(project: WakeProject, failedRegistration: boolean): boolean {
+		try {
+			return this.sameWorkTarget(project, this.currentWakeProjects(!failedRegistration).get(project.name));
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * ラベルの変化を購読できないので、既存の 60 秒周期で読む。queued の初回は差分の基準だけを作る。
+	 * 一覧が取得できなかったときは queuedSeen を進めず、次の成功時に新規を拾う。
+	 */
+	queueTick(): Promise<void> {
+		if (this.workController.signal.aborted || this.config.worker.wake?.enabled === false || !this.supervisor)
+			return Promise.resolve();
+		this.workPoll ??= this.pollWork().finally(() => {
+			this.workPoll = undefined;
+		});
+		return this.workPoll;
+	}
+
+	private async pollWork() {
+		let targets: Map<string, WakeProject>;
+		let registrationFailure: ReadFailure | undefined;
+		try {
+			targets = this.currentWakeProjects(true);
+			for (const [name, previous] of this.workTargets) {
+				if (this.sameWorkTarget(previous, targets.get(name))) continue;
+				this.supervisor?.cancelPeriodicWake?.(name);
+				this.supervisor?.reconcileQueuedWake?.(name, []);
+				this.workClocks.delete(name);
+			}
+			this.workTargets = targets;
+		} catch (error) {
+			registrationFailure = wakeLedgerFailure("projects", error);
+			targets = this.workTargets;
+			if (!targets.size)
+				this.log(
+					`engine: work-wake-read ${JSON.stringify({
+						v: 1,
+						boot: this.wakeBoot,
+						at: new Date(this.wakeWall()).toISOString(),
+						failure: registrationFailure,
+					})}`,
+				);
+		}
+		const pending = [...targets.values()];
+		let next = 0;
+		await Promise.all(
+			Array.from({ length: Math.min(4, pending.length) }, async () => {
+				while (next < pending.length && !this.workController.signal.aborted) {
+					const project = pending[next++];
+					if (project) await this.pollWorkProject(project, registrationFailure);
+				}
+			}),
+		);
+	}
+
+	private async pollWorkProject(project: WakeProject, registrationFailure?: ReadFailure) {
+		const signal = this.workController.signal;
+		const { name, repo } = project;
+		const localRead = () => this.ledger.wakeLocal(name);
+		const remote = registrationFailure
+			? { issues: null, prs: null, failures: [registrationFailure] }
+			: await readWork(repo, this.exec, signal, this.wakeWall, { project: name, read: localRead });
+		const local = localRead();
+		const current = !signal.aborted && this.isWorkTarget(project, Boolean(registrationFailure));
+		const numbers = remote.issues?.filter((i) => i.labels.includes("harness:queued")).map((i) => String(i.number));
+		let fresh: string[] = [];
+		if (current) {
+			try {
+				fresh = this.ledger.wakeQueued(name, numbers ?? null);
+			} catch (error) {
+				local.failures.push(wakeLedgerFailure("queued-state", error));
+			}
+			if (numbers) this.supervisor?.reconcileQueuedWake?.(name, numbers);
+		}
+		const { reasons, failures, fingerprint } = classifyWork(name, remote, local, this.wakeWall(), fresh.length > 0);
+		const id = `${this.wakeBoot}-${++this.wakeSequence}`;
+		const at = new Date(this.wakeWall()).toISOString();
+		const now = this.wakeNow();
+		const work = reasons.length > 0;
+		const clock = this.workClock(name);
+		const cadence: Cadence = work ? clock.observe(now, fingerprint) : "none";
+		if (!work) clock.observe(now, null);
+		const log = (result: WakeLogResult) =>
+			this.log(
+				`engine: work-wake ${JSON.stringify({
+					v: 1,
+					boot: this.wakeBoot,
+					id,
+					project: name,
+					at,
+					work,
+					reasons,
+					fetchFailed: failures.length > 0,
+					failures,
+					cadence,
+					...result,
+				})}`,
+			);
+		if (!current || cadence === "none") {
+			this.supervisor?.cancelPeriodicWake?.(name);
+			log({ result: current ? "empty" : "stopped" });
+			return;
+		}
+
+		const due = clock.due(now, cadence);
+		if (!due) this.supervisor?.cancelPeriodicWake?.(name);
+		if (!due && !fresh.length) {
+			log({ result: "not-due" });
+			return;
+		}
+		const timer = setTimeout(() => finish({ result: "deferred", detail: "in-flight" }), 10_000);
+		timer.unref();
+		const finish = (result: WakeLogResult) => {
+			if (!this.workLogs.delete(id)) return;
+			clearTimeout(timer);
+			log(result);
+		};
+		this.workLogs.set(id, finish);
+		const deferred = (detail: WakeDetail) => finish({ result: "deferred", detail });
+		if (fresh.length)
+			this.requestWake(name, `queued #${fresh.join(",#")}`, { decisionId: id, queued: fresh, deferred });
+		if (due)
+			this.requestWake(name, "periodic", {
+				decisionId: id,
+				isCurrent: () =>
+					!signal.aborted &&
+					this.wakeNow() < now + periodicValidityMs &&
+					this.isWorkTarget(project, Boolean(registrationFailure)),
+				beforeInput: () => this.bump(name),
+				deferred,
+			});
+		void this.supervisor?.wakeTick().catch(() => deferred("send-error"));
 	}
 
 	/**

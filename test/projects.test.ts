@@ -319,7 +319,10 @@ test("窓口は Sonnet、worker は DLE_PROJECT 付きで、設定の有無と m
 	assert.equal(o?.refresh, undefined);
 	assert.equal(c?.refresh?.prompt, "/discord-loop-engine:concierge refresh");
 	assert.equal(k?.initialPrompt, "/discord-loop-engine:onboard", "設定が無ければ調査から");
-	assert.match(k?.command ?? "", /DLE_ROLE=worker DLE_PROJECT=kishimen-tool DLE_LOOP=harness claude /);
+	assert.match(
+		k?.command ?? "",
+		/DLE_ROLE=worker DLE_PROJECT=kishimen-tool DLE_LOOP=harness DLE_ISSUE_LOOP_WAKE=engine claude /,
+	);
 	assert.match(k?.command ?? "", /'Bash\(harness-merge:\*\)'.* --permission-mode acceptEdits$/);
 
 	assert.match(k?.command ?? "", /'Bash\(harness-issue-md:\*\)'/);
@@ -663,6 +666,7 @@ function pmTargets(
 			worker: {
 				model: null,
 				extraArgs: workerExtra.extraArgs ?? [],
+				wake: { enabled: false },
 				...("permissionMode" in workerExtra ? { permissionMode: workerExtra.permissionMode } : {}),
 				refresh: { enabled: false },
 				initialPrompt: "/discord-loop-engine:issue-loop",
@@ -796,5 +800,48 @@ test("T1: worker の target と coverage に forceMaxTokens=250000・idle=150000
 	} finally {
 		rmSync(home, { recursive: true, force: true });
 		rmSync(repo, { recursive: true, force: true });
+	}
+});
+
+test("仕事起床の marker は wake が有効な harness worker だけに渡す", () => {
+	const home = mkdtempSync(path.join(os.tmpdir(), "dle-mode-"));
+	try {
+		writeFileSync(path.join(home, "config.json"), JSON.stringify({ channelIds: ["1"], allowedUserIds: ["2"] }));
+		const cfg = loadConfig(home);
+		const ledger = new Ledger(home);
+		const worker: Project = { name: "fixture", repo: "x/y", path: home, mode: "harness", active: true, addedAt: "" };
+		const marker = "DLE_ISSUE_LOOP_WAKE=engine";
+		const [concierge, onboard, native] = sessionTargets(
+			cfg,
+			[worker, { ...worker, name: "native", mode: "native" }],
+			ledger,
+		);
+		assert.ok(onboard?.command.includes(marker));
+		assert.equal(onboard?.wake, undefined);
+		assert.ok(!concierge?.command.includes(marker));
+		assert.ok(!native?.command.includes(marker));
+		mkdirSync(path.join(home, ".claude"));
+		writeFileSync(path.join(home, ".claude", "harness.json"), "{}");
+		const [, ready] = sessionTargets(cfg, [worker], ledger);
+		assert.ok(ready?.command.includes(marker));
+		assert.deepEqual(ready?.wake, { enabled: true });
+		cfg.worker.wake = { ...cfg.worker.wake, enabled: false };
+		const [, off] = sessionTargets(cfg, [worker], ledger);
+		assert.equal(off?.wake, undefined);
+		assert.equal(off?.initialPrompt, ready?.initialPrompt);
+		assert.deepEqual(off?.refresh, ready?.refresh);
+		assert.ok(!off?.command.includes("DLE_ISSUE_LOOP_WAKE"));
+		assert.equal(off?.command, ready?.command.replace(" DLE_ISSUE_LOOP_WAKE=engine", ""));
+		const inherited = process.env.DLE_ISSUE_LOOP_WAKE;
+		process.env.DLE_ISSUE_LOOP_WAKE = "engine";
+		try {
+			const targets = sessionTargets(cfg, [worker, { ...worker, name: "native", mode: "native" }], ledger);
+			assert.ok(targets.every((target) => target.command.includes("env -u DLE_ISSUE_LOOP_WAKE ")));
+		} finally {
+			if (inherited === undefined) delete process.env.DLE_ISSUE_LOOP_WAKE;
+			else process.env.DLE_ISSUE_LOOP_WAKE = inherited;
+		}
+	} finally {
+		rmSync(home, { recursive: true, force: true });
 	}
 });

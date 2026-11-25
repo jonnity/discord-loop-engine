@@ -1,6 +1,6 @@
 ---
 name: issue-loop
-description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上位のループ制御スキル。harness:queued の Issue からのキュー自動補充、CI red の仕分けと Codex への差し戻し、Codex ウィンドウのシェパード、人間からの返信の取り込みを担う。マージ承認は自動化しない。
+description: engine の起床または心拍（CronCreate）で issue-cycle を繰り返し呼び出す上位のループ制御スキル。harness:queued の Issue からのキュー自動補充、CI red の仕分けと Codex への差し戻し、Codex ウィンドウのシェパード、人間からの返信の取り込みを担う。マージ承認は自動化しない。
 ---
 
 # issue-loop
@@ -22,20 +22,26 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 ## 前提
 
 - `issue-cycle` の前提（tmux・gh。codex は無くても `harness-implementer` で進む。`.claude/harness.json`、`harness-labels` 済み）
-- `CronCreate` / `CronList` / `CronDelete` が使えること。使えない環境では手動で `/discord-loop-engine:issue-loop`
-  を繰り返す運用に落とす
+- 予約モードでは `CronCreate` / `CronList` / `CronDelete` が必要。使えない環境では手動で `/discord-loop-engine:issue-loop`
+  を繰り返す。engine 担当の通常運転には不要で、旧予約の移行確認に `CronList` / `CronDelete` を使う
 - 人の判断が要る通知を出せること。discord-loop-engine の engine が動いていれば engine 経由で出る。
   engine を使わず単体で回すときは、`DISCORD_WEBHOOK_URL` を環境変数か設定の `notify.envFiles` に置く
   （どちらも無いと `harness-notify` は失敗する）
 
 ## 起動時
 
+最初に環境を確認し、`DLE_ISSUE_LOOP_WAKE=engine`・`DLE_ROLE=worker`・`DLE_LOOP=harness` がすべて一致すれば engine 担当とする。
+それ以外は予約モードとする。clear 後も同じ条件で判定する。
+
 1. **状態把握**: `issue-cycle` の Step 0（`harness-status` / `harness-inbox`）。
    engine 配下の worker は、続けて `tasks_list`（または `task_get`）で自プロジェクトのタスクを読み、
    `次にやること`（`next`）があれば、再起動直後（使用量の上限でアカウントを替えた `dle restart` の後など）は
    そこから続ける。GitHub の状態と食い違えば GitHub を優先する
-2. **心拍**: 手順 1 の結果がキュー空・アクティブなしでも、ここで早期終了せず必ず実行する。
-   下の「心拍の選択」を使い、`CronList` にこのループの心拍が無ければ選んだ間隔で張る（engine 配下で再起動した worker は、空キューでも心拍なしの idle になりやすい）。プロンプトは**スキル呼び出し単体**に固定し、
+2. **起床担当**: 下の「心拍の選択」に従う。
+   - engine 担当では `CronList` が使えるなら、recurring で prompt が `/discord-loop-engine:issue-loop` に完全一致する旧予約だけを
+     `CronDelete` し、再一覧で消えたことを確認する。別用途の予約と one-shot を保持する。確認不能なら解除成功を記録しない。
+   - 予約モードでは手順 1 の結果がキュー空・アクティブなしでも実行する。
+   `CronList` にこのループの心拍が無ければ選んだ間隔で張る。プロンプトは**スキル呼び出し単体**に固定し、
    複合プロンプト（`/clear` を混ぜる等）にしない（oogiri-doc で心拍が無言で空振りし続けた事故がある）。
    以下は起動直後の既定15分の例。空キュー・人間待ちの間隔は「心拍の選択」の表から選ぶ:
    ```
@@ -49,7 +55,10 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 
 ## 心拍の選択
 
-起動時・毎 tick・clear 後・終了時は次の優先順を共用する。空判定は候補Issueの0件だけでは決めず、
+起動時・毎 tick・clear 後・終了時は起床担当を先に確認する。engine 担当では `CronCreate` を呼ばない。
+仕事が残っていても各 tick の作業が終われば idle に戻る。次の通常起床の間隔は engine が決める。
+
+予約モードは次の優先順を共用する。空判定は候補Issueの0件だけでは決めず、
 `harness-status` / `harness-inbox`、tasks/attention、Codex/CI、`harness-pr inbox` / `harness-pr scan` の取得成功と結果を確認する。
 
 | 状態 | 予約式 | INTERVAL |
@@ -74,6 +83,16 @@ description: issue-cycle を心拍（CronCreate）で繰り返し呼び出す上
 
 ### 0. heartbeat の記録
 
+engine 担当では登録 main の最終 tick と担当だけを一緒に更新する。
+
+```bash
+ROOT=$(harness-config --root); mkdir -p "$ROOT/.harness"
+printf 'last_tick_at=%s\nscheduler=engine\n' "$(date -u +%FT%TZ)" \
+  > "$ROOT/.harness/loop-heartbeat.tmp" && mv "$ROOT/.harness/loop-heartbeat.tmp" "$ROOT/.harness/loop-heartbeat"
+```
+
+予約モードでは以下を使う。
+
 ```bash
 ROOT=$(harness-config --root); mkdir -p "$ROOT/.harness"
 printf 'last_tick_at=%s\nheartbeat_interval=%s\n' "$(date -u +%FT%TZ)" "${INTERVAL:?実予約を確認した間隔を設定する}" \
@@ -81,7 +100,7 @@ printf 'last_tick_at=%s\nheartbeat_interval=%s\n' "$(date -u +%FT%TZ)" "${INTERV
 ```
 
 先にCronListと「心拍の選択」で実予約を確認し、上の記録コマンドと同じBash呼び出し内でINTERVALを設定する（例: 予約が15分なら冒頭に `INTERVAL=15min` を置く）。別のBash呼び出しの変数は引き継がれない。確認不能ならこの書込みを行わず既存記録を維持する。
-`harness-status` はこれを見て「待機中」と「止まっている」を区別する。
+`harness-status` は予約モードの実予約の記録から「待機中」と「止まっている」を区別する。
 
 ### 1. Codex のシェパード（サブエージェントに丸ごと任せる）
 
@@ -342,12 +361,12 @@ PR の CI が失敗したら（購読イベント、または tick ごとの `gh
 ## コンテキスト管理
 
 コンテキストの `/clear` は engine が行う。cron による自己 clear・自己 resume は予約しない。
-clear 後は「起動時」の状態把握と「心拍の選択」からやり直し、`CronList` で心拍を確認して、無ければ張り直す。
+clear 後は「起動時」の状態把握と「心拍の選択」からやり直す。予約モードでは `CronList` で心拍を確認して、無ければ張り直す。
 
 1. **本体を薄く保つ（根本策）**: 本体で直接やるのは、ループ判断・`harness-*` コマンド・`handoff.md` の
    読み書き・cron 管理・Codex 起動・人間ゲートだけ。ソース調査・tmux ログ・CI ログ・diff・大きな `gh`
    出力はサブエージェントに読ませて結論だけ受け取る。`gh` は `--json`/`-q` で必要な項目に絞る
-2. **人間待ちだけのときは心拍を緩める**: アクティブが全部 `interview` / `awaiting-merge` / `blocked` で、
+2. **予約モードで人間待ちだけのときは心拍を緩める**: アクティブが全部 `interview` / `awaiting-merge` / `blocked` で、
    Codex も CI も動いていなければ、「心拍の選択」に従い、心拍を `0 * * * *` に張り替える（2時間変化が無ければ `0 */2 * * *`）。
    Codex・CI が動き出すか人間の返事でフェーズが進んだら `*/15 * * * *` に戻す。
    ※ Issue コメントでの返事はセッションを起こさないので、緩めた分だけ取り込みが遅れる
@@ -370,7 +389,8 @@ clear 後は「起動時」の状態把握と「心拍の選択」からやり�
 ```
 
 フェーズや決定事項はここに書かない（GitHub が正）。このファイルは1件1行・現在値だけを保ち、
-完了した Issue の行は消す。heartbeat_intervalは実予約と同じ15min/60min/120minにする。
+完了した Issue の行は消す。heartbeat_intervalは予約モードの実予約と同じ15min/60min/120minにする。
+engine 担当では `## loop_meta` を保ち、`heartbeat_interval` は削除する。古い間隔から予約を復元しない。
 
 検証規則（保存・engine の検証・復帰・テストで同じ）:
 
@@ -413,16 +433,20 @@ Codex 実行中・CI 待ち・人の回答待ちのどれでもないと engine 
    accepted は clear の成功を意味しない）。`accepted: false` のときは、`reason` が何であっても（`next-text-invalid`・`checkpoint-race`・`checkpoint-invalid`・`phase-expired` など）、
    整理せず通常どおり進める。engine は拒否のたびに ticket を破棄するので、修正して再送しても必ず `phase-expired` になる（失敗した機会は再試行されない）
 
-復帰（clear 後）は上の「起動時」と同じ。`tasks.next` と `.harness/handoff.md` を読み、心拍は `CronList` で確かめて無ければ張り直す。
+復帰（clear 後）は上の「起動時」と同じ。`tasks.next` と `.harness/handoff.md` を読み、予約モードでは心拍を `CronList` で確かめて無ければ張り直す。
 GitHub の状態が正本で、食い違えば GitHub を優先する。
 
 ## 終了条件
 
-- Dependabot の監視対象なら、Issue キューが空でも心拍を60分 `0 * * * *`、無変化2時間後120分 `0 */2 * * *`で保持する。
+- engine 担当では、空の tick を終了する。Dependabot の設定だけで心拍や空用 one-shot を作らない。後から開かれた PR は engine が検知する。
+  Dependabot PR の監視だけが残る場合は engine が60分、無変化2時間で120分の起床を担う。
+  「キュー完了」は従来の通知条件で1回だけとし、実際に PR の監視が続く場合にだけ補足する。
+- 予約モードで Dependabot の監視対象なら、Issue キューが空でも心拍を60分 `0 * * * *`、無変化2時間後120分 `0 */2 * * *`で保持する。
   キュー完了通知は「Issue キュー完了・Dependabot PR の監視は継続」と1回だけ補足する。
   両方の監視条件が無くなれば PR 監視用心拍は次の全完了判定へ移す。読取り失敗では削除せず現在の間隔を維持する。
 - キューが空で、blockedを含む未完了Issue/PRがなく、アクティブも全部終わり、Dependabot の監視対象でもない（「心拍の選択」で取得成功を確認）:
-  - `DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `0 */2 * * *` に緩めて保持する（engine の起こしが取りこぼしたときの
-    最後の安全網にする）。`harness-notify --event info` の「キュー完了」は1回だけ（心拍を残しても繰り返さない）
+  - 予約モードの `DLE_ROLE=worker`（wake 無効）→ 心拍を `0 */2 * * *` に緩めて保持する。
+    `harness-notify --event info` の「キュー完了」は1回だけ（心拍を残しても繰り返さない）
   - engine 無しの単体実行 → 心拍を `CronDelete` し、`harness-notify --event info` で「キュー完了」を1回だけ通知して終える
-- ユーザーが止めるよう言った → 心拍・one-shot を全部消す
+- ユーザーが止めるよう言った → 心拍・one-shot を全部消す（この worker が当該ループ用に作ったものだけ）。
+  現在の tick を終了する。project の設定・active 状態、後続のイベントと通常の仕事判定は維持する。

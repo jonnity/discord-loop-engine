@@ -44,13 +44,38 @@ export interface WakeTarget {
 }
 
 interface WakeState {
-	reasons: string[];
+	reasons: Map<string, WakeEvent>;
+	periodic?: PeriodicWake;
 	since: number | null;
 	lastSentAt: number | null;
 	sending: boolean;
 	enterOnly: boolean;
 	unknownNotified: boolean;
 }
+
+export type WakeDetail =
+	| "busy"
+	| "unknown"
+	| "refresh"
+	| "limit"
+	| "min-interval"
+	| "offline"
+	| "send-error"
+	| "in-flight"
+	| "input"
+	| "permission";
+export type WakeSend = {
+	project: string;
+	causes: string[];
+	decisions: string[];
+};
+type WakeEvent = { decisionId?: string; queued?: string[]; deferred?: (detail: WakeDetail) => void };
+export type PeriodicWake = {
+	decisionId: string;
+	isCurrent: () => boolean;
+	beforeInput: () => void;
+	deferred: (detail: WakeDetail) => void;
+};
 
 export interface RefreshResult {
 	success: boolean;
@@ -340,6 +365,7 @@ export interface SupervisorOptions {
 const OBSERVATION_MIN_INTERVAL_MS = 20000;
 
 export class Supervisor {
+	private wakeObserver?: (send: WakeSend) => void;
 	private diagnosticsEnabled: boolean;
 	private observationLastAt = new Map<string, number>();
 	private observing = new Set<string>();
@@ -430,7 +456,14 @@ export class Supervisor {
 				unknownSession: null,
 				codexSince: new Map(),
 				refreshing: false,
-				wake: { reasons: [], since: null, lastSentAt: null, sending: false, enterOnly: false, unknownNotified: false },
+				wake: {
+					reasons: new Map(),
+					since: null,
+					lastSentAt: null,
+					sending: false,
+					enterOnly: false,
+					unknownNotified: false,
+				},
 				promptPending: false,
 				limited: false,
 				limitMisses: 0,
@@ -550,7 +583,7 @@ export class Supervisor {
 		s.limitLastWakeAt = null;
 		s.limitGaveUp = false;
 		// 復帰後に古い要求が残って余計な起こしを送らない
-		s.wake.reasons = s.wake.reasons.filter((r) => r !== LIMIT_REASON);
+		s.wake.reasons.delete(LIMIT_REASON);
 	}
 
 	/**
@@ -755,13 +788,15 @@ export class Supervisor {
 		s.needsPrompt = false;
 		// 初期プロンプトが issue-loop そのものなので、溜まっている起こしは不要。待っている間に走る wakeTick を止めるため先に立てる
 		s.promptPending = true;
-		s.wake.reasons = [];
+		s.wake.reasons.clear();
 		s.wake.since = null;
 		s.wake.enterOnly = false;
 		try {
 			await new Promise((r) => setTimeout(r, this.o.promptDelayMs));
-			await this.o.tmux(["send-keys", "-t", this.target(name), "-l", t.initialPrompt]);
-			await this.o.tmux(["send-keys", "-t", this.target(name), "Enter"]);
+			const typed = await this.o.tmux(["send-keys", "-t", this.target(name), "-l", t.initialPrompt]);
+			const enter = await this.o.tmux(["send-keys", "-t", this.target(name), "Enter"]);
+			if (typed.ok && enter.ok && t.initialPrompt === WAKE_PROMPT)
+				this.wakeObserver?.({ project: name, causes: ["initial"], decisions: [] });
 			this.o.log(`supervisor: ${name} に「${t.initialPrompt}」を入力しました`);
 		} finally {
 			s.promptPending = false;
@@ -769,12 +804,51 @@ export class Supervisor {
 	}
 
 	/** 起こしの要求を積む（wake が付いていない target は無視）。送るのは maybeWake の判定が通ったときだけ。 */
-	requestWake(name: string, reason: string) {
+	requestWake(name: string, reason: string, request?: PeriodicWake | WakeEvent) {
 		if (!this.o.targets().some((x) => x.name === name && x.wake && !x.startupError)) return;
 		const w = this.st(name).wake;
-		if (!w.reasons.includes(reason)) w.reasons.push(reason);
-		if (w.reasons.length > WAKE_MAX_REASONS) w.reasons.splice(0, w.reasons.length - WAKE_MAX_REASONS);
+		if (request && "isCurrent" in request) {
+			w.periodic = request;
+			return;
+		}
+		w.reasons.set(reason, request ?? {});
+		if (w.reasons.size > WAKE_MAX_REASONS) {
+			const first = w.reasons.keys().next().value;
+			if (first !== undefined) w.reasons.delete(first);
+		}
 		w.since ??= this.o.now();
+	}
+
+	observeWake(observer: (send: WakeSend) => void) {
+		this.wakeObserver = observer;
+	}
+
+	cancelPeriodicWake(name: string) {
+		const w = this.state.get(name)?.wake;
+		if (!w?.periodic) return;
+		w.periodic = undefined;
+		if (w.enterOnly && !w.reasons.size)
+			this.o.onWakeSkipped(name, "無効になった定期起床の入力が残っています（確認してください）");
+	}
+
+	reconcileQueuedWake(name: string, numbers: string[]) {
+		const events = this.state.get(name)?.wake.reasons;
+		if (!events) return;
+		for (const [reason, event] of events) {
+			if (!event.queued) continue;
+			const remaining = event.queued.filter((n) => numbers.includes(n));
+			if (!remaining.length) events.delete(reason);
+			else if (remaining.length !== event.queued.length) events.set(reason, { ...event, queued: remaining });
+		}
+	}
+
+	private currentPeriodic(name: string, w: WakeState) {
+		if (w.periodic && !w.periodic.isCurrent()) {
+			w.periodic = undefined;
+			if (w.enterOnly && !w.reasons.size)
+				this.o.onWakeSkipped(name, "期限切れの定期起床の入力が残っています（確認してください）");
+		}
+		return w.periodic;
 	}
 
 	/**
@@ -819,15 +893,33 @@ export class Supervisor {
 		const s = this.st(t.name);
 		const w = s.wake;
 		// 最初の await より前に同期的に check-and-set する（判定中の await で別の maybeWake が割り込んでも二重に送らない）
-		if (w.sending || (w.reasons.length === 0 && !w.enterOnly)) return;
+		const pending = this.currentPeriodic(t.name, w);
+		const queued = [...w.reasons.values()].filter((event) => event.deferred);
+		const deferred = (reason: WakeDetail) => {
+			pending?.deferred(reason);
+			for (const event of queued) event.deferred?.(reason);
+		};
+		if (w.sending) return deferred("in-flight");
+		if (!w.reasons.size && !pending) return;
 		// 上限中は limit の起こし以外では送らない（他の理由が再試行の回数を食わず、あきらめ後は何も送らない）。理由は積んだまま。
 		// 同期の早期 return で、sending を立てる前なので finally の解放には影響しない
-		if (this.o.limit.wakeMaxAttempts > 0 && s.limited && !w.enterOnly && !w.reasons.includes(LIMIT_REASON)) return;
+		if (
+			this.o.limit.wakeMaxAttempts > 0 &&
+			s.limited &&
+			!w.reasons.has(LIMIT_REASON) &&
+			(!w.enterOnly || !w.reasons.size)
+		)
+			return deferred("limit");
 		w.sending = true;
+		let detail: WakeDetail = "send-error";
+		let sent = false;
 		try {
 			const now = this.o.now();
 			// 最小間隔は成功した送信どうしだけに効かせる。失敗は lastSentAt を更新しないので再試行を止めない
-			if (!w.enterOnly && w.lastSentAt !== null && now - w.lastSentAt < this.o.wakeMinIntervalMs) return;
+			if (!w.enterOnly && w.lastSentAt !== null && now - w.lastSentAt < this.o.wakeMinIntervalMs) {
+				detail = "min-interval";
+				return;
+			}
 			const blocked = () =>
 				!exists ||
 				!this.o.isLive(t.name) ||
@@ -835,7 +927,10 @@ export class Supervisor {
 				this.phaseArmed.has(t.name) ||
 				s.needsPrompt ||
 				s.promptPending;
-			if (blocked()) return;
+			if (blocked()) {
+				detail = !exists || !this.o.isLive(t.name) ? "offline" : "refresh";
+				return;
+			}
 			const typed = w.enterOnly ? WAKE_PROMPT : undefined;
 			const first = await this.capture(t.name);
 			await this.o.wait(this.o.wakeProbeMs);
@@ -843,6 +938,7 @@ export class Supervisor {
 			// Enter の再送で、入力欄が WAKE_PROMPT 以外なら人の入力とみなして諦める（送らない）
 			if (w.enterOnly && second !== null && inputText(second) !== WAKE_PROMPT) {
 				w.enterOnly = false;
+				detail = "input";
 				return;
 			}
 			const current = await this.session(t.name);
@@ -862,25 +958,70 @@ export class Supervisor {
 					this.o.onWakeSkipped(t.name, "待機を判定できないため起こしを見送り中");
 				}
 			} else w.unknownNotified = false;
-			if (!verdict.ready) return;
+			if (!verdict.ready) {
+				detail = "busy";
+				if (verdict.why.startsWith("unknown")) detail = "unknown";
+				else if (
+					[first, second].some(
+						(pane) => pane && [...PERMISSION_PROMPTS, DEV_CHANNEL_PROMPT].some((p) => pane.includes(p)),
+					)
+				)
+					detail = "permission";
+				else if ([first, second].some((pane) => pane && inputText(pane) && inputText(pane) !== typed)) detail = "input";
+				return;
+			}
 			// 判定と送信の間に人が入力・作業開始、または初期プロンプト・/clear が始まった場合に備えて撮り直す
 			const last = await this.capture(t.name);
-			if (!this.screenOk(last, typed)) return;
-			if (blocked() || (w.reasons.length === 0 && !w.enterOnly)) return;
+			if (!this.screenOk(last, typed)) {
+				detail = last === null ? "unknown" : "input";
+				return;
+			}
+			const periodic = this.currentPeriodic(t.name, w);
+			if (
+				blocked() ||
+				!this.o
+					.targets()
+					.some(
+						(x) =>
+							x.name === t.name &&
+							x.wake &&
+							!x.startupError &&
+							x.cwd === t.cwd &&
+							this.sessionOf(x) === this.sessionOf(t),
+					) ||
+				(!w.reasons.size && !periodic)
+			)
+				return;
+			if (
+				this.o.limit.wakeMaxAttempts > 0 &&
+				s.limited &&
+				!w.reasons.has(LIMIT_REASON) &&
+				(!w.enterOnly || !w.reasons.size)
+			) {
+				detail = "limit";
+				return;
+			}
+			const captured = [...w.reasons];
+			const destination = `${this.sessionOf(t)}:${windowName(t.name)}`;
+			periodic?.beforeInput();
 			if (!w.enterOnly) {
-				const typedOk = await this.o.tmux(["send-keys", "-t", this.target(t.name), "-l", WAKE_PROMPT]);
+				const typedOk = await this.o.tmux(["send-keys", "-t", destination, "-l", WAKE_PROMPT]);
 				if (!typedOk.ok) return;
 			}
-			const enter = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
+			const enter = await this.o.tmux(["send-keys", "-t", destination, "Enter"]);
 			if (!enter.ok) {
 				// 入力欄にコマンドが残っている。次は -l を送らず Enter だけ再送する
 				w.enterOnly = true;
+				if (periodic && w.periodic !== periodic && !w.reasons.size)
+					this.o.onWakeSkipped(t.name, "無効になった定期起床の入力が残っています（確認してください）");
 				return;
 			}
-			w.reasons = [];
-			w.since = null;
+			for (const [reason, event] of captured) if (w.reasons.get(reason) === event) w.reasons.delete(reason);
+			if (!w.reasons.size) w.since = null;
+			if (w.periodic === periodic) w.periodic = undefined;
 			w.enterOnly = false;
 			w.lastSentAt = this.o.now();
+			sent = true;
 			if (this.o.limit.wakeMaxAttempts > 0 && s.limited) {
 				// 実際に上限中の worker に入力した1回。次の待ちは倍
 				s.limitAttempts += 1;
@@ -888,9 +1029,20 @@ export class Supervisor {
 				s.limitNextAt = w.lastSentAt + this.limitIntervalMs(s.limitAttempts);
 			}
 			this.o.log(`supervisor: ${t.name} を起こしました`);
+			const causes = captured.map(([reason]) => {
+				if (reason.startsWith("回答 ")) return "answer";
+				if (reason.startsWith("queued ")) return "queued";
+				if ([LIMIT_REASON, "outbox", "dispatch", "reconnect", "phase-refresh-skipped"].includes(reason)) return reason;
+				return "event";
+			});
+			if (periodic) causes.push("periodic");
+			const decisions = captured.flatMap(([, event]) => (event.decisionId ? [event.decisionId] : []));
+			if (periodic) decisions.push(periodic.decisionId);
+			this.wakeObserver?.({ project: t.name, causes: [...new Set(causes)], decisions: [...new Set(decisions)] });
 			await this.verifyWake(t);
 		} finally {
 			w.sending = false;
+			if (!sent) deferred(detail);
 		}
 	}
 
@@ -899,6 +1051,8 @@ export class Supervisor {
 		const stuck = (pane: string | null) =>
 			pane !== null && !pane.includes(WORKING_MARK) && inputText(pane) === WAKE_PROMPT;
 		await this.o.wait(this.o.wakeVerifyMs);
+		if (!this.o.targets().some((x) => x.name === t.name && x.cwd === t.cwd && this.sessionOf(x) === this.sessionOf(t)))
+			return;
 		if (!stuck(await this.capture(t.name))) return;
 		await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
 		await this.o.wait(this.o.wakeVerifyMs);
@@ -1297,6 +1451,7 @@ export class Supervisor {
 			if (!prompt.ok) throw new Error("再開プロンプトを入力できませんでした");
 			const resumed = await this.o.tmux(["send-keys", "-t", this.target(t.name), "Enter"]);
 			if (!resumed.ok) throw new Error("再開プロンプトを送信できませんでした");
+			if (r.prompt === WAKE_PROMPT) this.wakeObserver?.({ project: t.name, causes: ["refresh"], decisions: [] });
 			result = { success: true, reason };
 		} catch (error) {
 			result = { success: false, reason: error instanceof Error ? error.message : String(error) };

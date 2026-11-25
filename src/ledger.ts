@@ -14,6 +14,8 @@
 import { appendFileSync, existsSync, mkdirSync, readdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { WorkerPermissionMode } from "./config.ts";
+import { isObject, parseStrictJson } from "./harness-json.ts";
+import type { ReadFailure, WakeLocal } from "./work-wake.ts";
 
 export type TaskStatus = "inbox" | "queued" | "ai-working" | "waiting-human" | "blocked" | "done";
 export const TASK_STATUSES: TaskStatus[] = ["inbox", "queued", "ai-working", "waiting-human", "blocked", "done"];
@@ -163,6 +165,56 @@ function readJson<T>(file: string, fallback: T): T {
 	}
 }
 
+class WakeLedgerFormat extends Error {}
+
+function wakeReadText(file: string): string | undefined {
+	try {
+		return readFileSync(file, "utf8");
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	}
+}
+
+function wakeJson(text: string): unknown {
+	try {
+		return parseStrictJson(text);
+	} catch {
+		throw new WakeLedgerFormat();
+	}
+}
+
+export function wakeLedgerFailure(source: ReadFailure["source"], error: unknown): ReadFailure {
+	return { source, code: error instanceof WakeLedgerFormat ? "invalid" : "unavailable" };
+}
+
+function isWakeLink(value: unknown): boolean {
+	return value === undefined || (typeof value === "string" && /^(?:0|[1-9][0-9]*)?$/.test(value));
+}
+
+function wakeLink(value: string | undefined): string {
+	// 旧データの 0 は未リンク。台帳に保存された値まで変えると既存の読み取りに影響する。
+	return value === "0" ? "" : (value ?? "");
+}
+
+function wakeAttention(raw: unknown): raw is Attention {
+	if (!isObject(raw)) return false;
+	return (
+		typeof raw.id === "string" &&
+		/^A-[0-9]+$/.test(raw.id) &&
+		BigInt(raw.id.slice(2)) > 0n &&
+		typeof raw.project === "string" &&
+		raw.project.length > 0 &&
+		typeof raw.kind === "string" &&
+		Object.hasOwn(KIND_LABEL, raw.kind) &&
+		(raw.status === "open" || raw.status === "resolved") &&
+		["issue", "pr", "taskId", "summary", "createdAt"].every((key) => typeof raw[key] === "string") &&
+		[raw.issue, raw.pr].every(isWakeLink) &&
+		(raw.answer === undefined || typeof raw.answer === "string") &&
+		(raw.resolvedAt === undefined || typeof raw.resolvedAt === "string")
+	);
+}
+
 const pad = (n: number, w: number) => String(n).padStart(w, "0");
 
 export class Ledger {
@@ -235,6 +287,32 @@ export class Ledger {
 		writeAtomic(path.join(this.dir, "state.json"), `${JSON.stringify({ ...this.state(), ...patch }, null, 2)}\n`);
 	}
 
+	wakeQueued(project: string, numbers: string[] | null): string[] {
+		const file = path.join(this.dir, "state.json");
+		const state = wakeJson(wakeReadText(file) ?? "{}");
+		if (!isObject(state)) throw new WakeLedgerFormat();
+		for (const key of ["taskSeq", "attentionSeq", "doneSinceRetro"]) {
+			const n = state[key];
+			if (n !== undefined && (typeof n !== "number" || !Number.isSafeInteger(n) || n < 0)) throw new WakeLedgerFormat();
+		}
+		const seen = state.queuedSeen ?? {};
+		if (
+			!isObject(seen) ||
+			Object.values(seen).some(
+				(list) =>
+					list !== null &&
+					(!Array.isArray(list) ||
+						list.some((n) => typeof n !== "string" || !/^[1-9][0-9]*$/.test(n)) ||
+						new Set(list).size !== list.length),
+			)
+		)
+			throw new WakeLedgerFormat();
+		const previous = Object.hasOwn(seen, project) ? (seen[project] as string[] | null) : undefined;
+		if (numbers && (!previous || previous.length !== numbers.length || numbers.some((n) => !previous.includes(n))))
+			writeAtomic(file, `${JSON.stringify({ ...state, queuedSeen: { ...seen, [project]: numbers } }, null, 2)}\n`);
+		return previous && numbers ? numbers.filter((n) => !previous.includes(n)) : [];
+	}
+
 	// --- projects ----------------------------------------------------------------
 	projects(): Project[] {
 		// mode が無いのは 0.1.0 の形式。その頃はすべて harness だった
@@ -242,6 +320,27 @@ export class Ledger {
 			...p,
 			mode: p.mode ?? "harness",
 		}));
+	}
+
+	wakeProjects(): Project[] {
+		const raw = wakeJson(wakeReadText(path.join(this.dir, "projects.json")) ?? "[]");
+		if (!Array.isArray(raw)) throw new WakeLedgerFormat();
+		const names = new Set<string>();
+		return raw.map((p: unknown): Project => {
+			if (
+				!isObject(p) ||
+				typeof p.name !== "string" ||
+				!/^[\w.-]+$/.test(p.name) ||
+				names.has(p.name) ||
+				typeof p.path !== "string" ||
+				!p.path ||
+				typeof p.active !== "boolean" ||
+				(p.mode !== undefined && p.mode !== null && p.mode !== "harness" && p.mode !== "native")
+			)
+				throw new WakeLedgerFormat();
+			names.add(p.name);
+			return { ...p, mode: p.mode ?? "harness", repo: typeof p.repo === "string" ? p.repo : "" } as Project;
+		});
 	}
 
 	// --- プロジェクトの設定（engine 側の harness.json） ----------------------------------
@@ -319,14 +418,26 @@ export class Ledger {
 		return `---\n${fm}\n---\n## 次にやること\n${t.next || "-"}\n\n## 経緯\n${t.history.map((h) => `- ${h}`).join("\n")}\n`;
 	}
 
-	static parseTask(text: string): Task | null {
+	static parseTask(text: string, strict = false): Task | null {
 		const m = /^---\n([\s\S]*?)\n---\n([\s\S]*)$/.exec(text);
 		if (!m) return null;
 		const fields: Record<string, string> = {};
 		for (const line of (m[1] as string).split("\n")) {
 			const i = line.indexOf(":");
-			if (i > 0) fields[line.slice(0, i).trim()] = line.slice(i + 1).trim();
+			if (i > 0) {
+				const key = line.slice(0, i).trim();
+				if (strict && Object.hasOwn(fields, key)) return null;
+				fields[key] = line.slice(i + 1).trim();
+			}
 		}
+		if (
+			strict &&
+			(!fields.project ||
+				!fields.id ||
+				!TASK_STATUSES.some((v) => v === fields.status) ||
+				![fields.issue, fields.pr].every(isWakeLink))
+		)
+			return null;
 		const body = m[2] as string;
 		const next = /## 次にやること\n([\s\S]*?)\n\n## 経緯/.exec(body)?.[1]?.trim() ?? "";
 		const history = (/## 経緯\n([\s\S]*)$/.exec(body)?.[1] ?? "")
@@ -356,6 +467,82 @@ export class Ledger {
 			.sort()
 			.map((f) => Ledger.parseTask(readFileSync(path.join(dir, f), "utf8")))
 			.filter((t): t is Task => t !== null);
+	}
+
+	wakeLocal(project: string): WakeLocal {
+		const data: WakeLocal = { tasks: [], attention: [], outbox: [], failures: [] };
+		const fail = (source: ReadFailure["source"], error: unknown) => {
+			const failure = wakeLedgerFailure(source, error);
+			if (!data.failures.some((f) => f.source === source && f.code === failure.code)) data.failures.push(failure);
+		};
+		try {
+			const dir = path.join(this.dir, "tasks");
+			for (const file of readdirSync(dir).filter((f) => /^T-\d+\.md$/.test(f))) {
+				try {
+					const text = readFileSync(path.join(dir, file), "utf8");
+					const loose = Ledger.parseTask(text);
+					const header = text.match(/^---\n([\s\S]*?)\n---/);
+					const declared = [...(header?.[1] ?? "").matchAll(/^\s*project\s*:\s*(\S+)\s*$/gm)];
+					if (declared.length === 1 && loose?.project && loose.project !== project) continue;
+					const strict = Ledger.parseTask(text, true);
+					if (!strict || strict.id !== file.slice(0, -3)) throw new WakeLedgerFormat();
+					data.tasks.push({ ...strict, issue: wakeLink(strict.issue), pr: wakeLink(strict.pr) });
+				} catch (error) {
+					fail("tasks", error);
+				}
+			}
+		} catch (error) {
+			fail("tasks", error);
+		}
+		try {
+			const attention = wakeJson(wakeReadText(path.join(this.dir, "attention.json")) ?? "[]");
+			if (!Array.isArray(attention)) throw new WakeLedgerFormat();
+			const seen = new Set<bigint>();
+			for (const raw of attention as unknown[]) {
+				if (!isObject(raw)) {
+					fail("attention", new WakeLedgerFormat());
+					continue;
+				}
+				if (typeof raw.project === "string" && raw.project && raw.project !== project) continue;
+				const a = { ...raw, issue: raw.issue ?? "", pr: raw.pr ?? "", taskId: raw.taskId ?? "" };
+				if (!wakeAttention(a) || seen.has(BigInt(a.id.slice(2)))) {
+					fail("attention", new WakeLedgerFormat());
+					continue;
+				}
+				seen.add(BigInt(a.id.slice(2)));
+				data.attention.push({ ...a, issue: wakeLink(a.issue), pr: wakeLink(a.pr) });
+			}
+		} catch (error) {
+			fail("attention", error);
+		}
+		try {
+			const text = wakeReadText(path.join(this.dir, "outbox", `${project}.jsonl`)) ?? "";
+			for (const line of text.split("\n").filter(Boolean)) {
+				const item = wakeJson(line);
+				if (
+					!isObject(item) ||
+					typeof item.content !== "string" ||
+					!isObject(item.meta) ||
+					!Object.values(item.meta).every((v) => typeof v === "string")
+				)
+					throw new WakeLedgerFormat();
+				const meta = item.meta as Record<string, string>;
+				if (meta.attention !== undefined) {
+					const reply: Record<string, string> = {
+						attention: meta.attention,
+						issue: wakeLink(meta.issue),
+						pr: wakeLink(meta.pr),
+						task: meta.task ?? "",
+					};
+					if (meta.project !== undefined) reply.project = meta.project;
+					if (meta.kind !== undefined) reply.kind = meta.kind;
+					data.outbox.push(reply);
+				}
+			}
+		} catch (error) {
+			fail("outbox", error);
+		}
+		return data;
 	}
 
 	task(id: string): Task | null {

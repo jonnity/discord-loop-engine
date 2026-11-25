@@ -1217,10 +1217,10 @@ test("T18-8: PR監視・回答・枠・明示retry・承認操作の入口を定
 	assert.ok(concierge.includes("meta.issue が空で meta.pr"));
 });
 
-test("issue-loop: 心拍は空キューでも張り、engine 配下では削除せず緩めて保持する。承認記録なしのマージはしない", () => {
+test("issue-loop: wake 無効は空キューでも心拍を保持し、承認記録なしのマージはしない", () => {
 	const loop = readFileSync(path.resolve(import.meta.dirname, "../skills/issue-loop/SKILL.md"), "utf8");
-	assert.match(loop, /早期終了せず必ず実行する/);
-	assert.match(loop, /`DLE_ROLE=worker`（engine 配下）→ 心拍は `CronDelete` せず `0 \*\/2 \* \* \*` に緩めて保持/);
+	assert.match(loop, /予約モードでは手順 1 の結果がキュー空・アクティブなしでも実行する/);
+	assert.match(loop, /`DLE_ROLE=worker`（wake 無効）→ 心拍を `0 \*\/2 \* \* \*` に緩めて保持/);
 	assert.match(loop, /engine 無しの単体実行 → 心拍を `CronDelete`/);
 	assert.match(loop, /承認記録が無ければマージしない/);
 	assert.ok(
@@ -1721,4 +1721,14 @@ test("T3/T12: issue-loop の手順書に handoff の検証規則と expected/tex
 	assert.doesNotMatch(force, /\/clear を実行|CronCreate\(.*clear/);
 	assert.match(loopSkill, /コンテキストの `\/clear` は engine が行う。cron による自己 clear・自己 resume は予約しない/);
 	assert.match(skill, /refreshBoundary/);
+});
+
+test("engine 担当の起動・復帰・終了は CronCreate をせず予約モードの間隔を保存しない", () => {
+	const loop = readFileSync(new URL("../skills/issue-loop/SKILL.md", import.meta.url), "utf8");
+	const start = section(loop, "## 起動時", "## 心拍の選択");
+	assert.match(start, /DLE_ISSUE_LOOP_WAKE=engine.*DLE_ROLE=worker.*DLE_LOOP=harness/);
+	assert.match(start, /recurring.*完全一致[\s\S]*?CronDelete[\s\S]*?再一覧/);
+	assert.match(section(loop, "## 心拍の選択", "## 毎 tick"), /engine 担当[\s\S]*?CronCreate.*呼ばない/);
+	assert.ok(section(loop, "### 0. heartbeat", "### 1.").includes("scheduler=engine"));
+	assert.match(section(loop, "## 終了条件"), /現在の tick[\s\S]*?後続のイベント/);
 });
